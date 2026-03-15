@@ -390,6 +390,33 @@ Always provide a reason. This is logged as a lesson and visible in future cycles
   {
     type: "function",
     function: {
+      name: "get_top_lpers",
+      description: `Get the top LPers for a pool by address — quick read-only lookup.
+Use this when the user asks "who are the top LPers in this pool?" or wants to
+know how others are performing in a specific pool without saving lessons.
+
+Returns: aggregate patterns (avg hold time, win rate, ROI) and per-LPer summaries.
+Requires LPAGENT_API_KEY to be set.`,
+      parameters: {
+        type: "object",
+        properties: {
+          pool_address: {
+            type: "string",
+            description: "The pool address to look up top LPers for"
+          },
+          limit: {
+            type: "number",
+            description: "Number of top LPers to return. Default 5."
+          }
+        },
+        required: ["pool_address"]
+      }
+    }
+  },
+
+  {
+    type: "function",
+    function: {
       name: "study_top_lpers",
       description: `Fetch and analyze top LPers for a pool to learn from their behaviour.
 Returns aggregate patterns (avg hold time, win rate, ROI) and historical samples.

@@ -39,6 +39,7 @@ const toolMap = {
   close_position: closePosition,
   get_wallet_balance: getWalletBalances,
   swap_token: swapToken,
+  get_top_lpers: studyTopLPers,
   study_top_lpers: studyTopLPers,
   add_lesson: ({ rule, tags }) => { addLesson(rule, tags || []); return { saved: true, rule }; },
   clear_lessons: ({ mode, keyword }) => {
