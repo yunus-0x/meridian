@@ -114,6 +114,9 @@ export async function recordPerformance(perf) {
       log("evolve", `Auto-evolved thresholds: ${JSON.stringify(result.changes)}`);
     }
   }
+
+  // Fire-and-forget sync to hive mind (if enabled)
+  import("./hive-mind.js").then(m => m.syncToHive()).catch(() => {});
 }
 
 /**

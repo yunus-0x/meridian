@@ -39,5 +39,7 @@
   "telegramChatId": "",
   "_lastEvolved": "",
   "_positionsAtEvolution": 25,
-  "_lastAgentTune": ""
+  "_lastAgentTune": "",
+  "hiveMindUrl": "",
+  "hiveMindApiKey": ""
 }
