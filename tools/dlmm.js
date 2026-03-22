@@ -646,7 +646,15 @@ export async function closePosition({ position_address }) {
       }
 
       _positionsCacheAt = 0; // invalidate cache after snapshotting PnL
-      const initialUsd = tracked.initial_value_usd || 0;
+      // Use tracked initial value; if missing (legacy positions), estimate from
+      // SOL amount at current price so pnl_pct isn't forced to 0
+      let initialUsd = tracked.initial_value_usd || 0;
+      if (!initialUsd && tracked.amount_sol > 0 && finalValueUsd > 0) {
+        // Best-effort fallback: use final value as proxy (IL makes this imprecise
+        // but it's much better than 0 which inflates pnl_usd and zeros pnl_pct)
+        initialUsd = finalValueUsd;
+        log("close", `initial_value_usd missing for ${position_address}, using finalValueUsd ($${finalValueUsd}) as fallback`);
+      }
 
       await recordPerformance({
         position: position_address,
