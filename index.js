@@ -160,18 +160,7 @@ export function startCronJobs() {
         return lines.join("\n");
       }).join("\n\n");
 
-      // Hive mind pattern consensus (if enabled)
-      let hivePatterns = "";
-      try {
-        const hiveMind = await import("./hive-mind.js");
-        if (hiveMind.isEnabled()) {
-          const patterns = await hiveMind.queryPatternConsensus();
-          const significant = (patterns || []).filter(p => p.count >= 10);
-          if (significant.length > 0) {
-            hivePatterns = `\nHIVE MIND PATTERNS (supplementary):\n${significant.slice(0, 3).map(p => `[HIVE] ${p.strategy}: ${p.win_rate}% win, ${p.avg_pnl}% avg PnL (${p.count} deploys)`).join("\n")}\n`;
-          }
-        }
-      } catch { /* hive is best-effort */ }
+      const hivePatterns = "";
 
       const { content } = await agentLoop(`
 MANAGEMENT CYCLE — ${positions.length} position(s)
@@ -314,17 +303,6 @@ After all positions, add one summary line:
         ? `\nPRE-LOADED CANDIDATE ANALYSIS (smart wallets, holders, narrative already fetched):\n${candidateBlocks.join("\n\n")}\n`
         : "";
 
-      // Hive mind consensus (if enabled)
-      try {
-        const hiveMind = await import("./hive-mind.js");
-        if (hiveMind.isEnabled()) {
-          const poolAddrs = candidates.map(c => c.pool).filter(Boolean);
-          if (poolAddrs.length > 0) {
-            const hive = await hiveMind.formatPoolConsensusForPrompt(poolAddrs);
-            if (hive) candidateContext += "\n" + hive + "\n";
-          }
-        }
-      } catch { /* hive is best-effort */ }
 
       const { content } = await agentLoop(`
 SCREENING CYCLE
