@@ -189,7 +189,7 @@ If instruction set: Note: "[instruction text]"
 If close rule triggered: Rule [N]: [reason]
 
 Summary: 💼 [N] positions | $[total_value] | fees: $[sum_unclaimed] | [action or "no action"]
-      `, config.llm.maxSteps, [], "MANAGER", config.llm.managementModel, 1024);
+      `, config.llm.maxSteps, [], "MANAGER", config.llm.managementModel, 2048);
       mgmtReport = content;
     } catch (error) {
       log("cron_error", `Management cycle failed: ${error.message}`);
