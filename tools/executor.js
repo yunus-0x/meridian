@@ -21,7 +21,7 @@ import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStra
 import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-blacklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
-import { config, reloadScreeningThresholds } from "../config.js";
+import { config, getOperatingMode, reloadScreeningThresholds } from "../config.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -144,6 +144,7 @@ const toolMap = {
       minTokenFeesSol: ["screening", "minTokenFeesSol"],
       maxBundlersPct: ["screening", "maxBundlersPct"],
       maxTop10Pct: ["screening", "maxTop10Pct"],
+      blockedLaunchpads: ["screening", "blockedLaunchpads"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
       // management
       minClaimAmount: ["management", "minClaimAmount"],
@@ -167,8 +168,9 @@ const toolMap = {
       managementModel: ["llm", "managementModel"],
       screeningModel: ["llm", "screeningModel"],
       generalModel: ["llm", "generalModel"],
+      operatingMode: ["management", "operatingMode"],
       // strategy
-      minBinStep: ["strategy", "minBinStep"],
+      strategy: ["strategy", "strategy"],
       binsBelow: ["strategy", "binsBelow"],
     };
 
@@ -183,7 +185,22 @@ const toolMap = {
     for (const [key, val] of Object.entries(changes)) {
       const match = CONFIG_MAP[key] ? [key, CONFIG_MAP[key]] : CONFIG_MAP_LOWER[key.toLowerCase()];
       if (!match) { unknown.push(key); continue; }
-      applied[match[0]] = val;
+      applied[match[0]] = match[0] === "operatingMode"
+        ? String(val ?? "").trim().toLowerCase()
+        : val;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(applied, "operatingMode")) {
+      const validOperatingModes = new Set(["dry-run", "semi-auto", "full-auto"]);
+      if (!validOperatingModes.has(applied.operatingMode)) {
+        log("config", `update_config rejected invalid operatingMode: ${JSON.stringify(applied.operatingMode)}`);
+        return {
+          success: false,
+          error: `Invalid operatingMode: ${applied.operatingMode}. Allowed values: dry-run, semi-auto, full-auto.`,
+          unknown,
+          reason,
+        };
+      }
     }
 
     if (Object.keys(applied).length === 0) {
@@ -241,6 +258,189 @@ const WRITE_TOOLS = new Set([
   "add_liquidity",
 ]);
 
+const DEPLOY_SAFETY_CODES = {
+  BIN_STEP_OUT_OF_RANGE: "BIN_STEP_OUT_OF_RANGE",
+  MAX_POSITIONS_REACHED: "MAX_POSITIONS_REACHED",
+  DUPLICATE_POOL: "DUPLICATE_POOL",
+  DUPLICATE_BASE_TOKEN: "DUPLICATE_BASE_TOKEN",
+  MISSING_DEPLOY_AMOUNT: "MISSING_DEPLOY_AMOUNT",
+  DEPLOY_AMOUNT_TOO_SMALL: "DEPLOY_AMOUNT_TOO_SMALL",
+  DEPLOY_AMOUNT_TOO_LARGE: "DEPLOY_AMOUNT_TOO_LARGE",
+  INSUFFICIENT_SOL: "INSUFFICIENT_SOL",
+};
+
+const SAFETY_BLOCK_FALLBACK_CODE = "SAFETY_BLOCK";
+
+function createSafetyFailure(code, reason, extra = {}) {
+  return {
+    pass: false,
+    code,
+    reason,
+    ...extra,
+  };
+}
+
+function logModeDecisionAction({ name, args, startTime, modeDecision }) {
+  if (!modeDecision || modeDecision.action === "allow") return;
+
+  logAction({
+    tool: name,
+    args,
+    result: summarizeResult(modeDecision.response),
+    duration_ms: Date.now() - startTime,
+    success: modeDecision.action === "simulate",
+    mode: modeDecision.metadata,
+    lifecycle: "mode_gate",
+    outcome: modeDecision.action,
+  });
+}
+
+function logSafetyBlockAction({ name, args, startTime, safetyCheck, mode }) {
+  logAction({
+    tool: name,
+    args,
+    result: summarizeResult({
+      blocked: true,
+      success: false,
+      tool: name,
+      code: safetyCheck.code ?? SAFETY_BLOCK_FALLBACK_CODE,
+      reason: safetyCheck.reason,
+      mode,
+    }),
+    duration_ms: Date.now() - startTime,
+    success: false,
+    mode,
+    lifecycle: "safety_gate",
+    outcome: "block",
+  });
+}
+
+function getWriteToolModeDecision(name, args = {}) {
+  const mode = getOperatingMode();
+  const approvalProvided = args.approved === true || args.approval_token === "manual";
+  const metadata = {
+    operating_mode: mode,
+    write_tool: name,
+    approval_required: mode === "semi-auto",
+    approval_provided: approvalProvided,
+  };
+
+  if (mode === "dry-run") {
+    return {
+      action: "simulate",
+      metadata,
+      response: {
+        simulated: true,
+        success: true,
+        tool: name,
+        mode: metadata,
+        args,
+        message: `Simulated ${name} in dry-run mode. No write executed.`,
+      },
+    };
+  }
+
+  if (mode === "semi-auto" && !approvalProvided) {
+    return {
+      action: "block",
+      metadata,
+      response: {
+        blocked: true,
+        success: false,
+        tool: name,
+        mode: metadata,
+        reason: `Tool ${name} requires explicit approval in semi-auto mode.`,
+      },
+    };
+  }
+
+  return {
+    action: "allow",
+    metadata,
+  };
+}
+
+async function maybeAutoSwapToSol({ baseMint, contextLabel }) {
+  if (!baseMint) {
+    return {
+      status: "skipped",
+      reason: "No base mint available for auto-swap.",
+    };
+  }
+
+  const balances = await getWalletBalances({});
+  const token = balances.tokens?.find((t) => t.mint === baseMint);
+  if (!token) {
+    return {
+      status: "skipped",
+      reason: `Base token ${baseMint} not found in wallet.`,
+    };
+  }
+  if (token.usd < 0.10) {
+    return {
+      status: "skipped",
+      reason: `Base token value $${token.usd.toFixed(2)} is below auto-swap threshold.`,
+      mint: baseMint,
+      symbol: token.symbol || baseMint.slice(0, 8),
+      amount: token.balance,
+      usd: token.usd,
+    };
+  }
+
+  const symbol = token.symbol || baseMint.slice(0, 8);
+  log("executor", `Auto-swapping ${contextLabel} ${symbol} ($${token.usd.toFixed(2)}) back to SOL`);
+
+  const swapResult = await executeTool("swap_token", {
+    input_mint: baseMint,
+    output_mint: "SOL",
+    amount: token.balance,
+  });
+
+  if (swapResult?.blocked) {
+    log("executor", `Auto-swap ${contextLabel} blocked by operating mode: ${swapResult.reason}`);
+    return {
+      status: "blocked",
+      reason: swapResult.reason,
+      mint: baseMint,
+      symbol,
+      amount: token.balance,
+      usd: token.usd,
+      mode: swapResult.mode,
+    };
+  } else if (swapResult?.simulated) {
+    log("executor", `Auto-swap ${contextLabel} simulated in ${swapResult.mode?.operating_mode ?? "unknown"} mode`);
+    return {
+      status: "simulated",
+      reason: swapResult.message,
+      mint: baseMint,
+      symbol,
+      amount: token.balance,
+      usd: token.usd,
+      mode: swapResult.mode,
+    };
+  }
+
+  if (swapResult?.error) {
+    return {
+      status: "error",
+      reason: swapResult.error,
+      mint: baseMint,
+      symbol,
+      amount: token.balance,
+      usd: token.usd,
+    };
+  }
+
+  return {
+    status: "executed",
+    mint: baseMint,
+    symbol,
+    amount: token.balance,
+    usd: token.usd,
+    tx: swapResult?.tx,
+  };
+}
+
 /**
  * Execute a tool call with safety checks and logging.
  */
@@ -255,15 +455,42 @@ export async function executeTool(name, args) {
     return { error };
   }
 
+  let modeDecision = null;
+  if (WRITE_TOOLS.has(name)) {
+    modeDecision = getWriteToolModeDecision(name, args);
+  }
+
   // ─── Pre-execution safety checks ──────────
   if (WRITE_TOOLS.has(name)) {
     const safetyCheck = await runSafetyChecks(name, args);
     if (!safetyCheck.pass) {
       log("safety_block", `${name} blocked: ${safetyCheck.reason}`);
+      const mode = modeDecision?.metadata ?? {
+        operating_mode: getOperatingMode(),
+        write_tool: name,
+      };
+      logSafetyBlockAction({ name, args, startTime, safetyCheck, mode });
       return {
         blocked: true,
+        success: false,
+        tool: name,
+        code: safetyCheck.code ?? SAFETY_BLOCK_FALLBACK_CODE,
         reason: safetyCheck.reason,
+        mode,
       };
+    }
+  }
+
+  if (WRITE_TOOLS.has(name)) {
+    if (modeDecision?.action === "simulate") {
+      log("write_simulated", `${name} simulated in ${modeDecision.metadata.operating_mode} mode`);
+      logModeDecisionAction({ name, args, startTime, modeDecision });
+      return modeDecision.response;
+    }
+    if (modeDecision?.action === "block") {
+      log("write_blocked", `${name} blocked in ${modeDecision.metadata.operating_mode} mode`);
+      logModeDecisionAction({ name, args, startTime, modeDecision });
+      return modeDecision.response;
     }
   }
 
@@ -282,36 +509,73 @@ export async function executeTool(name, args) {
     });
 
     if (success) {
+      const notificationMode = modeDecision?.metadata?.operating_mode ?? getOperatingMode();
+      const notificationStatus = "executed";
       if (name === "swap_token" && result.tx) {
-        notifySwap({ inputSymbol: args.input_mint?.slice(0, 8), outputSymbol: args.output_mint === "So11111111111111111111111111111111111111112" || args.output_mint === "SOL" ? "SOL" : args.output_mint?.slice(0, 8), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
+        notifySwap({
+          inputSymbol: args.input_mint?.slice(0, 8),
+          outputSymbol: args.output_mint === "So11111111111111111111111111111111111111112" || args.output_mint === "SOL" ? "SOL" : args.output_mint?.slice(0, 8),
+          amountIn: result.amount_in,
+          amountOut: result.amount_out,
+          tx: result.tx,
+          mode: notificationMode,
+          status: notificationStatus,
+        }).catch(() => {});
       } else if (name === "deploy_position") {
-        notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
+        notifyDeploy({
+          pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8),
+          amountSol: args.amount_y ?? args.amount_sol ?? 0,
+          position: result.position,
+          tx: result.txs?.[0] ?? result.tx,
+          priceRange: result.price_range,
+          binStep: result.bin_step,
+          baseFee: result.base_fee,
+          mode: notificationMode,
+          status: notificationStatus,
+        }).catch(() => {});
       } else if (name === "close_position") {
-        notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0 }).catch(() => {});
+        notifyClose({
+          pair: result.pool_name || args.position_address?.slice(0, 8),
+          pnlUsd: result.pnl_usd ?? 0,
+          pnlPct: result.pnl_pct ?? 0,
+          mode: notificationMode,
+          status: notificationStatus,
+          reason: result.close_reason ?? result.reason,
+        }).catch(() => {});
         // Auto-swap base token back to SOL unless user said to hold
         if (!args.skip_swap && result.base_mint) {
           try {
-            const balances = await getWalletBalances({});
-            const token = balances.tokens?.find(t => t.mint === result.base_mint);
-            if (token && token.usd >= 0.10) {
-              log("executor", `Auto-swapping ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
-              await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
-            }
+            result.auto_swap = await maybeAutoSwapToSol({ baseMint: result.base_mint, contextLabel: "after close" });
           } catch (e) {
             log("executor_warn", `Auto-swap after close failed: ${e.message}`);
+            result.auto_swap = {
+              status: "error",
+              reason: e.message,
+            };
           }
+        } else {
+          result.auto_swap = {
+            status: "skipped",
+            reason: args.skip_swap ? "Auto-swap skipped because skip_swap was requested." : "No base mint available for auto-swap.",
+          };
         }
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
         try {
-          const balances = await getWalletBalances({});
-          const token = balances.tokens?.find(t => t.mint === result.base_mint);
-          if (token && token.usd >= 0.10) {
-            log("executor", `Auto-swapping claimed ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
-            await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
-          }
+          result.auto_swap = await maybeAutoSwapToSol({ baseMint: result.base_mint, contextLabel: "after claim" });
         } catch (e) {
           log("executor_warn", `Auto-swap after claim failed: ${e.message}`);
+          result.auto_swap = {
+            status: "error",
+            reason: e.message,
+          };
         }
+      } else if (name === "claim_fees") {
+        result.auto_swap = {
+          status: "skipped",
+          reason: !config.management.autoSwapAfterClaim
+            ? "Auto-swap after claim is disabled in config."
+            : "No base mint available for auto-swap.",
+        };
       }
     }
 
@@ -345,28 +609,28 @@ async function runSafetyChecks(name, args) {
       const minStep = config.screening.minBinStep;
       const maxStep = config.screening.maxBinStep;
       if (args.bin_step != null && (args.bin_step < minStep || args.bin_step > maxStep)) {
-        return {
-          pass: false,
-          reason: `bin_step ${args.bin_step} is outside the allowed range of [${minStep}-${maxStep}].`,
-        };
+        return createSafetyFailure(
+          DEPLOY_SAFETY_CODES.BIN_STEP_OUT_OF_RANGE,
+          `bin_step ${args.bin_step} is outside the allowed range of [${minStep}-${maxStep}].`,
+        );
       }
 
       // Check position count limit + duplicate pool guard — force fresh scan to avoid stale cache
       const positions = await getMyPositions({ force: true });
       if (positions.total_positions >= config.risk.maxPositions) {
-        return {
-          pass: false,
-          reason: `Max positions (${config.risk.maxPositions}) reached. Close a position first.`,
-        };
+        return createSafetyFailure(
+          DEPLOY_SAFETY_CODES.MAX_POSITIONS_REACHED,
+          `Max positions (${config.risk.maxPositions}) reached. Close a position first.`,
+        );
       }
       const alreadyInPool = positions.positions.some(
         (p) => p.pool === args.pool_address
       );
       if (alreadyInPool && !args.allow_duplicate_pool) {
-        return {
-          pass: false,
-          reason: `Already have an open position in pool ${args.pool_address}. Cannot open duplicate. Pass allow_duplicate_pool: true for multi-layer strategy.`,
-        };
+        return createSafetyFailure(
+          DEPLOY_SAFETY_CODES.DUPLICATE_POOL,
+          `Already have an open position in pool ${args.pool_address}. Cannot open duplicate. Pass allow_duplicate_pool: true for multi-layer strategy.`,
+        );
       }
 
       // Block same base token across different pools
@@ -375,10 +639,10 @@ async function runSafetyChecks(name, args) {
           (p) => p.base_mint === args.base_mint
         );
         if (alreadyHasMint) {
-          return {
-            pass: false,
-            reason: `Already holding base token ${args.base_mint} in another pool. One position per token only.`,
-          };
+          return createSafetyFailure(
+            DEPLOY_SAFETY_CODES.DUPLICATE_BASE_TOKEN,
+            `Already holding base token ${args.base_mint} in another pool. One position per token only.`,
+          );
         }
       }
 
@@ -392,32 +656,32 @@ async function runSafetyChecks(name, args) {
       } else if (amountX > 0 && amountY > 0) {
         // Custom ratio dual-sided: skip minimum SOL check, only enforce max
         if (amountY > config.risk.maxDeployAmount) {
-          return {
-            pass: false,
-            reason: `SOL amount ${amountY} exceeds maximum allowed per position (${config.risk.maxDeployAmount}).`,
-          };
+          return createSafetyFailure(
+            DEPLOY_SAFETY_CODES.DEPLOY_AMOUNT_TOO_LARGE,
+            `SOL amount ${amountY} exceeds maximum allowed per position (${config.risk.maxDeployAmount}).`,
+          );
         }
       } else {
         // Standard SOL-sided deploy
         if (amountY <= 0) {
-          return {
-            pass: false,
-            reason: `Must provide a positive SOL amount (amount_y).`,
-          };
+          return createSafetyFailure(
+            DEPLOY_SAFETY_CODES.MISSING_DEPLOY_AMOUNT,
+            `Must provide a positive SOL amount (amount_y).`,
+          );
         }
 
         const minDeploy = Math.max(0.1, config.management.deployAmountSol);
         if (amountY < minDeploy) {
-          return {
-            pass: false,
-            reason: `Amount ${amountY} SOL is below the minimum deploy amount (${minDeploy} SOL). Use at least ${minDeploy} SOL.`,
-          };
+          return createSafetyFailure(
+            DEPLOY_SAFETY_CODES.DEPLOY_AMOUNT_TOO_SMALL,
+            `Amount ${amountY} SOL is below the minimum deploy amount (${minDeploy} SOL). Use at least ${minDeploy} SOL.`,
+          );
         }
         if (amountY > config.risk.maxDeployAmount) {
-          return {
-            pass: false,
-            reason: `SOL amount ${amountY} exceeds maximum allowed per position (${config.risk.maxDeployAmount}).`,
-          };
+          return createSafetyFailure(
+            DEPLOY_SAFETY_CODES.DEPLOY_AMOUNT_TOO_LARGE,
+            `SOL amount ${amountY} exceeds maximum allowed per position (${config.risk.maxDeployAmount}).`,
+          );
         }
       }
 
@@ -427,10 +691,10 @@ async function runSafetyChecks(name, args) {
         const gasReserve = config.management.gasReserve;
         const minRequired = amountY + gasReserve;
         if (balance.sol < minRequired) {
-          return {
-            pass: false,
-            reason: `Insufficient SOL: have ${balance.sol} SOL, need ${minRequired} SOL (${amountY} deploy + ${gasReserve} gas reserve).`,
-          };
+          return createSafetyFailure(
+            DEPLOY_SAFETY_CODES.INSUFFICIENT_SOL,
+            `Insufficient SOL: have ${balance.sol} SOL, need ${minRequired} SOL (${amountY} deploy + ${gasReserve} gas reserve).`,
+          );
         }
       }
 

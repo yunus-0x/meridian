@@ -6,7 +6,7 @@ import { log } from "./logger.js";
 import { getMyPositions, getPositionPnl, closePosition } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
-import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
+import { config, getOperatingMode, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { registerCronRestarter } from "./tools/executor.js";
 import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isEnabled as telegramEnabled } from "./telegram.js";
@@ -16,9 +16,25 @@ import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenHolders, getTokenNarrative, getTokenInfo } from "./tools/token.js";
+import { createReadlineSafety } from "./repl-safety.js";
+
+function describeOperatingMode(mode) {
+  switch (mode) {
+    case "dry-run":
+      return "writes simulated";
+    case "semi-auto":
+      return "write approval required";
+    case "full-auto":
+      return "writes execute live";
+    default:
+      return "mode behavior unknown";
+  }
+}
+
+const operatingMode = getOperatingMode();
 
 log("startup", "DLMM LP Agent starting...");
-log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
+log("startup", `Operating mode: ${operatingMode} (${describeOperatingMode(operatingMode)})`);
 log("startup", `Model: ${process.env.LLM_MODEL || "hermes-3-405b"}`);
 
 const TP_PCT  = config.management.takeProfitFeePct;
@@ -97,7 +113,7 @@ function stopCronJobs() {
 }
 
 export async function runManagementCycle({ silent = false } = {}) {
-  log("cron", `Starting management cycle [model: ${config.llm.managementModel}]`);
+  log("cron", `Starting management cycle [mode: ${getOperatingMode()}] [model: ${config.llm.managementModel}]`);
   let mgmtReport = null;
   let positions = [];
   try {
@@ -218,10 +234,13 @@ After all positions, add one summary line:
 }
 
 export async function runScreeningCycle({ silent = false } = {}) {
-    if (_screeningBusy) return;
+  if (_screeningBusy) return;
+  _screeningBusy = true;
 
-    // Hard guards — don't even run the agent if preconditions aren't met
-    let prePositions, preBalance;
+  // Hard guards — don't even run the agent if preconditions aren't met
+  let prePositions, preBalance;
+  let screenReport = null;
+  try {
     try {
       [prePositions, preBalance] = await Promise.all([getMyPositions(), getWalletBalances()]);
       if (prePositions.total_positions >= config.risk.maxPositions) {
@@ -238,11 +257,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
       return;
     }
 
-    _screeningBusy = true;
-    timers.screeningLastRun = Date.now();
-    log("cron", `Starting screening cycle [model: ${config.llm.screeningModel}]`);
-    let screenReport = null;
-    try {
+      timers.screeningLastRun = Date.now();
+      log("cron", `Starting screening cycle [mode: ${getOperatingMode()}] [model: ${config.llm.screeningModel}]`);
       // Reuse pre-fetched balance — no extra RPC call needed
       const currentBalance = preBalance;
       const deployAmount = computeDeployAmount(currentBalance.sol);
@@ -322,7 +338,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         }
       } catch { /* hive is best-effort */ }
 
-      const { content } = await agentLoop(`
+    const { content } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
 Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
@@ -338,7 +354,7 @@ ${config.screening.blockedLaunchpads.length ? `- HARD SKIP if launchpad is any o
 STEPS:
 1. Pick the best candidate based on narrative quality, smart wallets, and pool metrics.
 2. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
-   bins_below = round(35 + (volatility/5)*55) clamped to [35,90].
+   bins_below = round(35 + (volatility / 5) * 34), clamped to [35, 69].
 3. Report in this exact format (no tables, no extra sections):
    Deployed: PAIR
    bin_step=X | fee=X% | bots=X% | top10=X% | fees=XSOL
@@ -347,18 +363,18 @@ STEPS:
    narrative: <one sentence>
    reason: <one sentence why picked over others>
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, 2048);
-      screenReport = content;
-    } catch (error) {
-      log("cron_error", `Screening cycle failed: ${error.message}`);
-      screenReport = `Screening cycle failed: ${error.message}`;
-    } finally {
-      _screeningBusy = false;
-      if (!silent && telegramEnabled()) {
-        if (screenReport) sendMessage(`🔍 Screening Cycle\n\n${screenReport}`).catch(() => {});
-      }
+    screenReport = content;
+  } catch (error) {
+    log("cron_error", `Screening cycle failed: ${error.message}`);
+    screenReport = `Screening cycle failed: ${error.message}`;
+  } finally {
+    _screeningBusy = false;
+    if (!silent && telegramEnabled()) {
+      if (screenReport) sendMessage(`🔍 Screening Cycle\n\n${screenReport}`).catch(() => {});
     }
-    return screenReport;
   }
+  return screenReport;
+}
 
 export function startCronJobs() {
   stopCronJobs();
@@ -408,12 +424,19 @@ Summarize the current portfolio health, total fees earned, and performance of al
 //  GRACEFUL SHUTDOWN
 // ═══════════════════════════════════════════
 async function shutdown(signal) {
+  if (shutdown.inFlight) return;
+  shutdown.inFlight = true;
   log("shutdown", `Received ${signal}. Shutting down...`);
   stopPolling();
-  const positions = await getMyPositions();
-  log("shutdown", `Open positions at shutdown: ${positions.total_positions}`);
+  try {
+    const positions = await getMyPositions();
+    log("shutdown", `Open positions at shutdown: ${positions.total_positions}`);
+  } catch (error) {
+    log("shutdown_error", `Failed to fetch positions during shutdown: ${error.message}`);
+  }
   process.exit(0);
 }
+shutdown.inFlight = false;
 
 process.on("SIGINT",  () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
@@ -467,12 +490,19 @@ if (isTTY) {
     output: process.stdout,
     prompt: buildPrompt(),
   });
+  let promptTicker = null;
+  const readlineSafety = createReadlineSafety(rl, {
+    onClose: () => {
+      if (promptTicker) clearInterval(promptTicker);
+      promptTicker = null;
+    },
+  });
 
   // Update prompt countdown every 10 seconds
-  setInterval(() => {
+  promptTicker = setInterval(() => {
     if (!busy) {
-      rl.setPrompt(buildPrompt());
-      rl.prompt(true); // true = preserve current line
+      readlineSafety.setPrompt(buildPrompt());
+      readlineSafety.prompt(true); // true = preserve current line
     }
   }, 10_000);
 
@@ -484,17 +514,22 @@ if (isTTY) {
       timers.screeningLastRun  = Date.now();
       startCronJobs();
       console.log("Autonomous cycles are now running.\n");
-      rl.setPrompt(buildPrompt());
-      rl.prompt(true);
+      readlineSafety.setPrompt(buildPrompt());
+      readlineSafety.prompt(true);
     }
   }
 
   async function runBusy(fn) {
-    if (busy) { console.log("Agent is busy, please wait..."); rl.prompt(); return; }
-    busy = true; rl.pause();
+    if (busy) { console.log("Agent is busy, please wait..."); readlineSafety.prompt(); return; }
+    busy = true; readlineSafety.pause();
     try { await fn(); }
     catch (e) { console.error(`Error: ${e.message}`); }
-    finally { busy = false; rl.setPrompt(buildPrompt()); rl.resume(); rl.prompt(); }
+    finally {
+      busy = false;
+      readlineSafety.setPrompt(buildPrompt());
+      readlineSafety.resume();
+      readlineSafety.prompt();
+    }
   }
 
   // ── Startup: show wallet + top candidates ──
@@ -539,12 +574,13 @@ if (isTTY) {
     busy = false;
   }
 
-  // Always start autonomous cycles on launch
-  launchCron();
-  maybeRunMissedBriefing().catch(() => {});
+  if (!shutdown.inFlight) {
+    // Always start autonomous cycles on launch
+    launchCron();
+    maybeRunMissedBriefing().catch(() => {});
 
-  // Telegram bot
-  startPolling(async (text) => {
+    // Telegram bot
+    startPolling(async (text) => {
     if (_managementBusy || _screeningBusy || busy) {
       sendMessage("Agent is busy right now — try again in a moment.").catch(() => {});
       return;
@@ -620,10 +656,11 @@ if (isTTY) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     } finally {
       busy = false;
-      rl.setPrompt(buildPrompt());
-      rl.prompt(true);
+      readlineSafety.setPrompt(buildPrompt());
+      readlineSafety.prompt(true);
     }
-  });
+    });
+  }
 
   console.log(`
 Commands:
@@ -639,11 +676,11 @@ Commands:
   /stop          Shut down
 `);
 
-  rl.prompt();
+  readlineSafety.prompt();
 
   rl.on("line", async (line) => {
     const input = line.trim();
-    if (!input) { rl.prompt(); return; }
+    if (!input) { readlineSafety.prompt(); return; }
 
     // ── Number pick: deploy into pool N ─────
     const pick = parseInt(input);
@@ -682,7 +719,7 @@ Commands:
     // ── go: start cron without deploying ────
     if (input.toLowerCase() === "go") {
       launchCron();
-      rl.prompt();
+      readlineSafety.prompt();
       return;
     }
 
@@ -743,7 +780,7 @@ Commands:
         console.log("\n  No closed positions yet — thresholds are preset defaults.");
       }
       console.log();
-      rl.prompt();
+      readlineSafety.prompt();
       return;
     }
 
@@ -830,7 +867,10 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
     });
   });
 
-  rl.on("close", () => shutdown("stdin closed"));
+  rl.on("close", () => {
+    readlineSafety.markClosed();
+    shutdown("stdin closed");
+  });
 
 } else {
   // Non-TTY: start immediately

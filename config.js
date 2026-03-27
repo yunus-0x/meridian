@@ -4,16 +4,62 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_CONFIG_PATH = path.join(__dirname, "user-config.json");
+const initialDryRunEnv = process.env.DRY_RUN;
 
-const u = fs.existsSync(USER_CONFIG_PATH)
-  ? JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"))
-  : {};
+let u = {};
+let configParseFailed = false;
+if (fs.existsSync(USER_CONFIG_PATH)) {
+  try {
+    u = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"));
+  } catch {
+    configParseFailed = true;
+    u = {};
+  }
+}
+
+const VALID_OPERATING_MODES = new Set(["dry-run", "semi-auto", "full-auto"]);
+
+function normalizeOperatingMode(value) {
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (VALID_OPERATING_MODES.has(raw)) return raw;
+  return "full-auto";
+}
+
+function normalizeLegacyDryRun(value) {
+  if (value === undefined || value === null) return undefined;
+  const raw = String(value).trim().toLowerCase();
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  return undefined;
+}
+
+function isValidOperatingMode(value) {
+  return VALID_OPERATING_MODES.has(String(value ?? "").trim().toLowerCase());
+}
+
+function syncDryRunEnv(mode) {
+  process.env.DRY_RUN = mode === "dry-run" ? "true" : "false";
+}
 
 // Apply wallet/RPC from user-config if not already in env
 if (u.rpcUrl)    process.env.RPC_URL            ||= u.rpcUrl;
 if (u.walletKey) process.env.WALLET_PRIVATE_KEY ||= u.walletKey;
 if (u.llmModel)  process.env.LLM_MODEL          ||= u.llmModel;
-if (u.dryRun !== undefined) process.env.DRY_RUN ||= String(u.dryRun);
+
+const legacyDryRun = normalizeLegacyDryRun(u.dryRun);
+const configuredOperatingMode = isValidOperatingMode(u.operatingMode)
+  ? normalizeOperatingMode(u.operatingMode)
+  : null;
+const resolvedOperatingMode = configParseFailed
+  ? "dry-run"
+  : (initialDryRunEnv === "true"
+    ? "dry-run"
+    : (configuredOperatingMode
+      ?? (legacyDryRun !== undefined
+        ? (legacyDryRun ? "dry-run" : "full-auto")
+        : "full-auto")));
+
+syncDryRunEnv(resolvedOperatingMode);
 
 export const config = {
   // ─── Risk Limits ─────────────────────────
@@ -44,18 +90,19 @@ export const config = {
 
   // ─── Position Management ────────────────
   management: {
+    operatingMode:        resolvedOperatingMode,
     minClaimAmount:        u.minClaimAmount        ?? 5,
     autoSwapAfterClaim:    u.autoSwapAfterClaim    ?? false,
     outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 10,
     outOfRangeWaitMinutes: u.outOfRangeWaitMinutes ?? 30,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
-    emergencyPriceDropPct: u.emergencyPriceDropPct ?? -50,
+    emergencyPriceDropPct: u.emergencyPriceDropPct ?? u.stopLossPct ?? -50,
     takeProfitFeePct:      u.takeProfitFeePct      ?? 5,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
-    minSolToOpen:          u.minSolToOpen          ?? 0.55,
-    deployAmountSol:       u.deployAmountSol       ?? 0.5,
-    gasReserve:            u.gasReserve            ?? 0.2,
-    positionSizePct:       u.positionSizePct       ?? 0.35,
+    minSolToOpen:          u.minSolToOpen          ?? 0.75,
+    deployAmountSol:       u.deployAmountSol       ?? 0.35,
+    gasReserve:            u.gasReserve            ?? 0.35,
+    positionSizePct:       u.positionSizePct       ?? 0.25,
   },
 
   // ─── Strategy Mapping ───────────────────
@@ -95,15 +142,15 @@ export const config = {
  *
  * Formula: clamp(deployable × positionSizePct, floor=deployAmountSol, ceil=maxDeployAmount)
  *
- * Examples (defaults: gasReserve=0.2, positionSizePct=0.35, floor=0.5):
- *   0.8 SOL wallet → 0.6 SOL deploy  (floor)
- *   2.0 SOL wallet → 0.63 SOL deploy
- *   3.0 SOL wallet → 0.98 SOL deploy
- *   4.0 SOL wallet → 1.33 SOL deploy
+ * Examples (defaults: gasReserve=0.35, positionSizePct=0.25, floor=0.35):
+ *   0.8 SOL wallet → 0.35 SOL deploy (floor)
+ *   2.0 SOL wallet → 0.41 SOL deploy
+ *   3.0 SOL wallet → 0.66 SOL deploy
+ *   4.0 SOL wallet → 0.91 SOL deploy
  */
 export function computeDeployAmount(walletSol) {
-  const reserve  = config.management.gasReserve      ?? 0.2;
-  const pct      = config.management.positionSizePct ?? 0.35;
+  const reserve  = config.management.gasReserve      ?? 0.35;
+  const pct      = config.management.positionSizePct ?? 0.25;
   const floor    = config.management.deployAmountSol;
   const ceil     = config.risk.maxDeployAmount;
   const deployable = Math.max(0, walletSol - reserve);
@@ -137,3 +184,8 @@ export function reloadScreeningThresholds() {
   } catch { /* ignore */ }
 }
 
+export function getOperatingMode() {
+  const mode = normalizeOperatingMode(config.management.operatingMode);
+  syncDryRunEnv(mode);
+  return mode;
+}

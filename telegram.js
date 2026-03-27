@@ -135,42 +135,55 @@ export function stopPolling() {
 }
 
 // ─── Notification helpers ────────────────────────────────────────
-export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, binStep, baseFee }) {
+function escapeHTML(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, binStep, baseFee, mode, status }) {
   const priceStr = priceRange
     ? `Price range: ${priceRange.min < 0.0001 ? priceRange.min.toExponential(3) : priceRange.min.toFixed(6)} – ${priceRange.max < 0.0001 ? priceRange.max.toExponential(3) : priceRange.max.toFixed(6)}\n`
     : "";
   const poolStr = (binStep || baseFee)
     ? `Bin step: ${binStep ?? "?"}  |  Base fee: ${baseFee != null ? baseFee + "%" : "?"}\n`
     : "";
+  const executionStr = `Mode: ${escapeHTML(mode ?? "unknown")} | Status: ${escapeHTML(status ?? "unknown")}\n`;
   await sendHTML(
-    `✅ <b>Deployed</b> ${pair}\n` +
+    `✅ <b>Deployed</b> ${escapeHTML(pair)}\n` +
+    executionStr +
     `Amount: ${amountSol} SOL\n` +
     priceStr +
     poolStr +
-    `Position: <code>${position?.slice(0, 8)}...</code>\n` +
-    `Tx: <code>${tx?.slice(0, 16)}...</code>`
+    `Position: <code>${escapeHTML(position?.slice(0, 8) || "?")}...</code>\n` +
+    `Tx: <code>${escapeHTML(tx?.slice(0, 16) || "?")}...</code>`
   );
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlPct }) {
+export async function notifyClose({ pair, pnlUsd, pnlPct, mode, status, reason }) {
   const sign = pnlUsd >= 0 ? "+" : "";
+  const reasonStr = reason ? `\nReason: ${escapeHTML(reason)}` : "";
   await sendHTML(
-    `🔒 <b>Closed</b> ${pair}\n` +
-    `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)`
+    `🔒 <b>Closed</b> ${escapeHTML(pair)}\n` +
+    `Mode: ${escapeHTML(mode ?? "unknown")} | Status: ${escapeHTML(status ?? "unknown")}\n` +
+    `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)` +
+    reasonStr
   );
 }
 
-export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx }) {
+export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx, mode, status }) {
   await sendHTML(
-    `🔄 <b>Swapped</b> ${inputSymbol} → ${outputSymbol}\n` +
+    `🔄 <b>Swapped</b> ${escapeHTML(inputSymbol)} → ${escapeHTML(outputSymbol)}\n` +
+    `Mode: ${escapeHTML(mode ?? "unknown")} | Status: ${escapeHTML(status ?? "unknown")}\n` +
     `In: ${amountIn ?? "?"} | Out: ${amountOut ?? "?"}\n` +
-    `Tx: <code>${tx?.slice(0, 16)}...</code>`
+    `Tx: <code>${escapeHTML(tx?.slice(0, 16) || "?")}...</code>`
   );
 }
 
 export async function notifyOutOfRange({ pair, minutesOOR }) {
   await sendHTML(
-    `⚠️ <b>Out of Range</b> ${pair}\n` +
+    `⚠️ <b>Out of Range</b> ${escapeHTML(pair)}\n` +
     `Been OOR for ${minutesOOR} minutes`
   );
 }
