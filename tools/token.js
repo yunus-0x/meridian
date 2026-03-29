@@ -54,13 +54,8 @@ export async function getTokenInfo({ query }) {
       buyers: t.stats1h.numOrganicBuyers,
       net_buyers: t.stats1h.numNetBuyers,
     } : null,
-    stats_24h: t.stats24h ? {
-      price_change: t.stats24h.priceChange?.toFixed(2),
-      buy_vol: t.stats24h.buyVolume?.toFixed(0),
-      sell_vol: t.stats24h.sellVolume?.toFixed(0),
-      buyers: t.stats24h.numOrganicBuyers,
-      net_buyers: t.stats24h.numNetBuyers,
-    } : null,
+    // stats_24h omitted — misleading for short-timeframe LP (reflects full pump history)
+    stats_24h_net_buyers: t.stats24h ? t.stats24h.numNetBuyers : null, // keep only net buyer direction
   }));
 
   // Enrich first result with OKX smart money + risk data (only if key configured)

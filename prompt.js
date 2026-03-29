@@ -81,6 +81,14 @@ The same pool will show much smaller numbers on 5m vs 24h. Adjust your expectati
   4h        │ ≥ 0.8%  = decent    │ ≥ $40k
   24h       │ ≥ 3%    = decent    │ ≥ $100k
 
+TOKEN TAGS (from OKX advanced-info):
+- dev_sold_all = BULLISH — dev has no tokens left to dump on you
+- dev_buying_more = BULLISH — dev is accumulating
+- smart_money_buy = BULLISH — smart money actively buying
+- dex_boost / dex_screener_paid = NEUTRAL/CAUTION — paid promotion, may inflate visibility
+- is_honeypot = HARD SKIP
+- low_liquidity = CAUTION
+
 IMPORTANT: fee_active_tvl_ratio values are ALREADY in percentage form. 0.29 = 0.29%. Do NOT multiply by 100. A value of 1.0 = 1.0%, a value of 22 = 22%. Never convert.
 
 Current screening timeframe: ${config.screening.timeframe} — interpret all metrics relative to this window.

@@ -73,10 +73,13 @@ export async function getAdvancedInfo(tokenAddress, chainIndex = CHAIN_SOLANA) {
     dev_token_count:  int(d.devCreateTokenCount),
     creator:          d.creatorAddress || null,
     tags,
-    is_honeypot:      tags.includes("honeypot"),
-    smart_money_buy:  tags.includes("smartMoneyBuy"),
-    dev_sold_all:     tags.includes("devHoldingStatusSellAll"),
-    low_liquidity:    tags.includes("lowLiquidity"),
+    is_honeypot:          tags.includes("honeypot"),
+    smart_money_buy:      tags.includes("smartMoneyBuy"),
+    dev_sold_all:         tags.includes("devHoldingStatusSellAll"),   // BULLISH — dev has no bag left to dump
+    dev_buying_more:      tags.includes("devHoldingStatusBuy"),       // dev accumulating
+    low_liquidity:        tags.includes("lowLiquidity"),
+    dex_boost:            tags.includes("dexBoost"),                  // paid boost on DEX (promotional)
+    dex_screener_paid:    tags.includes("dexScreenerPaid"),           // paid trending on DexScreener
   };
 }
 
