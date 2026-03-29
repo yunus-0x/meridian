@@ -111,10 +111,14 @@ export async function getTokenHolders({ mint, limit = 20 }) {
   const top10Pct = realHolders.slice(0, 10).reduce((s, h) => s + (Number(h.pct) || 0), 0);
 
   // ─── Bundle / Cluster Analysis (OKX) ─────────────────────────
-  let clusterData = null;
+  let advancedData = null;
+  let clusterList  = [];
   if (process.env.OKX_API_KEY) {
-    const { getClusterOverview } = await import("./okx.js");
-    clusterData = await getClusterOverview(mint).catch(() => null);
+    const { getAdvancedInfo, getClusterList } = await import("./okx.js");
+    [advancedData, clusterList] = await Promise.all([
+      getAdvancedInfo(mint).catch(() => null),
+      getClusterList(mint).catch(() => []),
+    ]);
   }
 
   // ─── Smart Wallet / KOL Cross-reference ──────────────────────
@@ -183,11 +187,12 @@ export async function getTokenHolders({ mint, limit = 20 }) {
     total_fetched: holders.length,
     showing: mapped.length,
     top_10_real_holders_pct: top10Pct.toFixed(2),
-    // OKX cluster analysis — more accurate than slot-window heuristics
-    rug_pull_pct:          clusterData?.rug_pull_pct         ?? null,
-    same_fund_source_pct:  clusterData?.same_fund_source_pct ?? null,
-    new_wallet_pct:        clusterData?.new_wallet_pct       ?? null,
-    cluster_concentration: clusterData?.cluster_concentration ?? null,
+    // OKX advanced info
+    risk_level:     advancedData?.risk_level     ?? null,  // 1=low..5=high
+    bundle_pct:     advancedData?.bundle_pct     ?? null,
+    sniper_pct:     advancedData?.sniper_pct     ?? null,
+    suspicious_pct: advancedData?.suspicious_pct ?? null,
+    new_wallet_pct: advancedData?.new_wallet_pct ?? null,  // high = rug signal
     smart_wallets_holding: smartWalletsHolding,
     holders: mapped,
   };

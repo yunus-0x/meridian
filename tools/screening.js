@@ -126,19 +126,44 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     .filter((p) => !occupiedPools.has(p.pool) && !occupiedMints.has(p.base?.mint))
     .slice(0, limit);
 
-  // Enrich with ATH data from OKX (price_vs_ath_pct) — only when key is configured
+  // Enrich with OKX data — advanced info (risk/bundle/sniper) + ATH price
   if (process.env.OKX_API_KEY && eligible.length > 0) {
-    const { getPriceInfo } = await import("./okx.js");
-    const priceResults = await Promise.allSettled(
-      eligible.map((p) => p.base?.mint ? getPriceInfo(p.base.mint) : Promise.resolve(null))
+    const { getAdvancedInfo, getPriceInfo } = await import("./okx.js");
+    const okxResults = await Promise.allSettled(
+      eligible.map((p) => p.base?.mint
+        ? Promise.all([getAdvancedInfo(p.base.mint), getPriceInfo(p.base.mint)])
+        : Promise.resolve([null, null])
+      )
     );
     for (let i = 0; i < eligible.length; i++) {
-      const r = priceResults[i];
-      if (r.status === "fulfilled" && r.value) {
-        eligible[i].price_vs_ath_pct = r.value.price_vs_ath_pct;
-        eligible[i].ath = r.value.ath;
+      const r = okxResults[i];
+      if (r.status !== "fulfilled") continue;
+      const [adv, price] = r.value;
+      if (adv) {
+        eligible[i].risk_level     = adv.risk_level;
+        eligible[i].bundle_pct     = adv.bundle_pct;
+        eligible[i].sniper_pct     = adv.sniper_pct;
+        eligible[i].suspicious_pct = adv.suspicious_pct;
+        eligible[i].new_wallet_pct = adv.new_wallet_pct;
+        // Also check creator against dev blocklist
+        if (adv.creator && !eligible[i].dev) eligible[i].dev = adv.creator;
+      }
+      if (price) {
+        eligible[i].price_vs_ath_pct = price.price_vs_ath_pct;
+        eligible[i].ath              = price.ath;
       }
     }
+    // Drop any pools whose creator is on the dev blocklist (caught via advanced-info)
+    const before = eligible.length;
+    const filtered = eligible.filter((p) => {
+      if (p.dev && isDevBlocked(p.dev)) {
+        log("dev_blocklist", `Filtered blocked deployer (okx) ${p.dev.slice(0, 8)} token ${p.base?.symbol}`);
+        return false;
+      }
+      return true;
+    });
+    eligible.splice(0, eligible.length, ...filtered);
+    if (eligible.length < before) log("dev_blocklist", `Filtered ${before - eligible.length} pool(s) via OKX creator check`);
   }
 
   return {

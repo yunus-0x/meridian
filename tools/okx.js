@@ -1,11 +1,11 @@
 /**
- * OKX DEX API helpers — auth signing + cluster overview + price info (ATH)
+ * OKX DEX API helpers
  * Docs: https://web3.okx.com/build/dev-docs/
  */
 
 import crypto from "crypto";
 
-const BASE = "https://www.okx.com";
+const BASE = "https://web3.okx.com";
 const CHAIN_SOLANA = "501";
 
 function sign(timestamp, method, path, body = "") {
@@ -13,21 +13,19 @@ function sign(timestamp, method, path, body = "") {
   return crypto.createHmac("sha256", process.env.OKX_SECRET_KEY).update(pre).digest("base64");
 }
 
-function headers(method, path, body = "") {
+function authHeaders(method, path, body = "") {
   const ts = new Date().toISOString();
   return {
     "Content-Type": "application/json",
-    "OK-ACCESS-KEY": process.env.OKX_API_KEY,
-    "OK-ACCESS-SIGN": sign(ts, method, path, body),
-    "OK-ACCESS-TIMESTAMP": ts,
+    "OK-ACCESS-KEY":        process.env.OKX_API_KEY,
+    "OK-ACCESS-SIGN":       sign(ts, method, path, body),
+    "OK-ACCESS-TIMESTAMP":  ts,
     "OK-ACCESS-PASSPHRASE": process.env.OKX_PASSPHRASE,
   };
 }
 
 async function okxGet(path) {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: headers("GET", path),
-  });
+  const res = await fetch(`${BASE}${path}`, { headers: authHeaders("GET", path) });
   if (!res.ok) throw new Error(`OKX API ${res.status}: ${path}`);
   const json = await res.json();
   if (json.code !== "0" && json.code !== 0) throw new Error(`OKX error ${json.code}: ${json.msg}`);
@@ -38,7 +36,7 @@ async function okxPost(path, body) {
   const bodyStr = JSON.stringify(body);
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
-    headers: headers("POST", path, bodyStr),
+    headers: authHeaders("POST", path, bodyStr),
     body: bodyStr,
   });
   if (!res.ok) throw new Error(`OKX API ${res.status}: ${path}`);
@@ -47,25 +45,69 @@ async function okxPost(path, body) {
   return json.data;
 }
 
+const pct = (v) => v != null && v !== "" ? parseFloat(v) : null;
+const int = (v) => v != null && v !== "" ? parseInt(v, 10) : null;
+
 /**
- * Cluster overview for a token — bundle %, rug pull %, new wallet %, same-fund-source %.
- * chainIndex: "501" for Solana (default)
+ * Advanced token info — risk level, bundle/sniper/suspicious %, dev rug history, token tags.
+ * Single call replaces the old cluster-overview endpoint.
  */
-export async function getClusterOverview(tokenAddress, chainIndex = CHAIN_SOLANA) {
-  const path = `/api/v6/dex/token/cluster-overview?chainIndex=${chainIndex}&tokenContractAddress=${tokenAddress}`;
+export async function getAdvancedInfo(tokenAddress, chainIndex = CHAIN_SOLANA) {
+  const path = `/api/v6/dex/market/token/advanced-info?chainIndex=${chainIndex}&tokenContractAddress=${tokenAddress}`;
   const data = await okxGet(path);
   const d = Array.isArray(data) ? data[0] : data;
   if (!d) return null;
+
+  const tags = d.tokenTags || [];
   return {
-    rug_pull_pct:        parseFloat(d.rugPullPercent      ?? d.rug_pull_percent      ?? 0),
-    same_fund_source_pct: parseFloat(d.sameFundSourcePercent ?? d.same_fund_source_percent ?? 0),
-    new_wallet_pct:      parseFloat(d.holderNewAddressPercent ?? d.holder_new_address_percent ?? 0),
-    cluster_concentration: parseFloat(d.clusterConcentration ?? d.cluster_concentration ?? 0),
+    risk_level:       int(d.riskControlLevel),  // 1=low 2=med 3=med-high 4=high 5=high(manual)
+    bundle_pct:       pct(d.bundleHoldingPercent),
+    sniper_pct:       pct(d.sniperHoldingPercent),
+    suspicious_pct:   pct(d.suspiciousHoldingPercent),
+    new_wallet_pct:   pct(d.holderNewAddressPercent),
+    dev_holding_pct:  pct(d.devHoldingPercent),
+    top10_pct:        pct(d.top10HoldPercent),
+    lp_burned_pct:    pct(d.lpBurnedPercent),
+    total_fee_sol:    pct(d.totalFee),
+    dev_rug_count:    int(d.devRugPullTokenCount),
+    dev_token_count:  int(d.devCreateTokenCount),
+    creator:          d.creatorAddress || null,
+    tags,
+    is_honeypot:      tags.includes("honeypot"),
+    smart_money_buy:  tags.includes("smartMoneyBuy"),
+    dev_sold_all:     tags.includes("devHoldingStatusSellAll"),
+    low_liquidity:    tags.includes("lowLiquidity"),
   };
 }
 
 /**
- * Price info for a token — current price, ATH (maxPrice), ATL (minPrice), volumes.
+ * Top 100 holder clusters — trend direction, holding period, KOL presence, PnL.
+ * Condenses to top N clusters for LLM consumption.
+ */
+export async function getClusterList(tokenAddress, chainIndex = CHAIN_SOLANA, limit = 5) {
+  const path = `/api/v6/dex/market/token/cluster/list?chainIndex=${chainIndex}&tokenContractAddress=${tokenAddress}`;
+  const data = await okxGet(path);
+  const raw = Array.isArray(data) ? data[0]?.clustList ?? data : (data?.clustList ?? []);
+  if (!raw.length) return [];
+
+  return raw.slice(0, limit).map((c) => {
+    const hasKol = (c.clusterAddressList || []).some((a) => a.isKol);
+    return {
+      holding_pct:      pct(c.holdingPercent),
+      trend:            c.trendType?.trendType || null,   // buy | sell | neutral | transfer
+      avg_hold_days:    c.averageHoldingPeriod ? Math.round(parseFloat(c.averageHoldingPeriod)) : null,
+      pnl_pct:          pct(c.pnlPercent),
+      buy_vol_usd:      pct(c.buyVolume),
+      sell_vol_usd:     pct(c.sellVolume),
+      avg_buy_price:    pct(c.averageBuyPriceUsd),
+      has_kol:          hasKol,
+      address_count:    (c.clusterAddressList || []).length,
+    };
+  });
+}
+
+/**
+ * Price info — current price, ATH (maxPrice), ATL, 24h volume + price change.
  */
 export async function getPriceInfo(tokenAddress, chainIndex = CHAIN_SOLANA) {
   const data = await okxPost("/api/v6/dex/market/price-info", [
@@ -77,10 +119,26 @@ export async function getPriceInfo(tokenAddress, chainIndex = CHAIN_SOLANA) {
   const maxPrice = parseFloat(d.maxPrice || 0);
   return {
     price,
-    ath:            maxPrice,
-    atl:            parseFloat(d.minPrice || 0),
+    ath:              maxPrice,
+    atl:              parseFloat(d.minPrice || 0),
     price_vs_ath_pct: maxPrice > 0 ? parseFloat(((price / maxPrice) * 100).toFixed(1)) : null,
-    volume_24h:     parseFloat(d.volume24H || 0),
+    volume_24h:       parseFloat(d.volume24H || 0),
     price_change_24h: parseFloat(d.priceChange24H || 0),
+  };
+}
+
+/**
+ * Fetch all three in parallel — use this during screening enrichment.
+ */
+export async function getFullTokenAnalysis(tokenAddress, chainIndex = CHAIN_SOLANA) {
+  const [advanced, clusters, price] = await Promise.allSettled([
+    getAdvancedInfo(tokenAddress, chainIndex),
+    getClusterList(tokenAddress, chainIndex),
+    getPriceInfo(tokenAddress, chainIndex),
+  ]);
+  return {
+    advanced: advanced.status === "fulfilled" ? advanced.value : null,
+    clusters: clusters.status === "fulfilled" ? clusters.value : [],
+    price:    price.status    === "fulfilled" ? price.value    : null,
   };
 }
