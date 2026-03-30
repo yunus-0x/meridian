@@ -40,8 +40,8 @@ const INTENT_PATTERNS = [
   { intent: "strategy",    re: /\b(strategy|strategies)\b/i },
   { intent: "screen",      re: /\b(screen|candidate|find pool|search|research|token)\b/i },
   { intent: "memory",      re: /\b(memory|pool history|note|remember)\b/i },
-  { intent: "smartwallet", re: /\b(smart wallet|kol|whale|watch.?list|add wallet|remove wallet|list wallet|tracked wallet)\b/i },
-  { intent: "study",       re: /\b(study|analyze lp|top lper|best lper|who.?s lping|lp behavior|lper)\b/i },
+  { intent: "smartwallet", re: /\b(smart wallet|kol|whale|watch.?list|add wallet|remove wallet|list wallet|tracked wallet|analyze pool|check pool|who.?s in|wallets in|add to (smart|watch|kol))\b/i },
+  { intent: "study",       re: /\b(study top|top lper|best lper|who.?s lping|lp behavior|lper)\b/i },
   { intent: "performance", re: /\b(performance|history|how.?s the bot|how.?s it doing|stats|report)\b/i },
   { intent: "lessons",     re: /\b(lesson|learned|teach|pin|unpin|clear lesson|what did you learn)\b/i },
 ];
