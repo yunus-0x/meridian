@@ -79,6 +79,7 @@ export const config = {
     managementModel: u.managementModel ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
     screeningModel:  u.screeningModel  ?? process.env.LLM_MODEL ?? "openrouter/hunter-alpha",
     generalModel:    u.generalModel    ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
+    fallbackModel: typeof u.fallbackModel === "string" ? u.fallbackModel : "",
   },
 
   // ─── Common Token Mints ────────────────
@@ -136,4 +137,3 @@ export function reloadScreeningThresholds() {
     if (fresh.category       != null) s.category       = fresh.category;
   } catch { /* ignore */ }
 }
-

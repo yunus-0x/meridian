@@ -307,6 +307,12 @@ const generalModel = await ask(
   e("generalModel", DEFAULT_MODEL)
 );
 
+console.log("  Used when the primary model fails or returns a malformed response.\n");
+const fallbackModel = await ask(
+  "Fallback model override (optional)",
+  e("fallbackModel", "")
+);
+
 rl.close();
 
 // ─── Write .env ───────────────────────────────────────────────────────────────
@@ -344,6 +350,7 @@ const userConfig = {
   managementModel,
   screeningModel,
   generalModel,
+  fallbackModel,
   telegramChatId: telegramChatId || "",
   dryRun,
 };

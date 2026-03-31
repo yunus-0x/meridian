@@ -34,6 +34,7 @@
   "managementModel": "openai/gpt-oss-20b:free",
   "screeningModel": "openai/gpt-oss-20b:free",
   "generalModel": "openai/gpt-oss-20b:free",
+  "fallbackModel": "",
   "dryRun": false,
   "telegramChatId": "",
   "_lastEvolved": "",
