@@ -14,7 +14,7 @@ function getToolsForRole(agentType) {
 import { getWalletBalances } from "./tools/wallet.js";
 import { getMyPositions } from "./tools/dlmm.js";
 import { log } from "./logger.js";
-import { config } from "./config.js";
+import { config, resolveFallbackModel } from "./config.js";
 import { getStateSummary } from "./state.js";
 import { getLessonsForPrompt, getPerformanceSummary } from "./lessons.js";
 
@@ -57,7 +57,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       const activeModel = model || DEFAULT_MODEL;
 
       // Retry up to 3 times on transient provider errors (502, 503, 529)
-      const FALLBACK_MODEL = config.llm.fallbackModel || "stepfun/step-3.5-flash:free";
+      const FALLBACK_MODEL = resolveFallbackModel(config.llm.fallbackModel);
       let response;
       let usedModel = activeModel;
       for (let attempt = 0; attempt < 3; attempt++) {

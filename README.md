@@ -422,7 +422,7 @@ All fields are optional — defaults shown. Edit `user-config.json`.
 | `managementModel` | `openai/gpt-oss-20b:free` | LLM for management cycles |
 | `screeningModel` | `openai/gpt-oss-20b:free` | LLM for screening cycles |
 | `generalModel` | `openai/gpt-oss-20b:free` | LLM for REPL / chat |
-| `fallbackModel` | `""` | Optional override used when the primary model fails or returns a malformed response |
+| `fallbackModel` | unset | Optional override used when the primary model fails or returns a malformed response; blank or whitespace values are treated as unset |
 
 > Override model at runtime: `node cli.js config set screeningModel anthropic/claude-opus-4-5`
 

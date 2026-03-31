@@ -81,6 +81,12 @@ function buildEnv(map) {
   return Object.entries(map).map(([k, v]) => `${k}=${v}`).join("\n") + "\n";
 }
 
+function normalizeOptionalString(value) {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
 // ─── Presets ──────────────────────────────────────────────────────────────────
 const PRESETS = {
   degen: {
@@ -308,9 +314,10 @@ const generalModel = await ask(
 );
 
 console.log("  Used when the primary model fails or returns a malformed response.\n");
+const fallbackModelDefault = normalizeOptionalString(e("fallbackModel", "")) ?? "";
 const fallbackModel = await ask(
   "Fallback model override (optional)",
-  e("fallbackModel", "")
+  fallbackModelDefault
 );
 
 rl.close();
@@ -350,13 +357,19 @@ const userConfig = {
   managementModel,
   screeningModel,
   generalModel,
-  fallbackModel,
   telegramChatId: telegramChatId || "",
   dryRun,
 };
 
 // Remove legacy key if present
 delete userConfig.emergencyPriceDropPct;
+
+const normalizedFallbackModel = normalizeOptionalString(fallbackModel);
+if (normalizedFallbackModel) {
+  userConfig.fallbackModel = normalizedFallbackModel;
+} else {
+  delete userConfig.fallbackModel;
+}
 
 fs.writeFileSync(CONFIG_PATH, JSON.stringify(userConfig, null, 2));
 
