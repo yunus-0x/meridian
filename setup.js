@@ -296,6 +296,12 @@ const llmModel = await ask(
   e("llmModel", process.env.LLM_MODEL || provider.modelDefault)
 );
 
+console.log("  Fallback model — used when the primary model returns a provider error (502/503/529). Leave blank to keep the built-in default.\n");
+const fallbackModelRaw = await ask(
+  "Fallback model override (optional)",
+  e("fallbackModel", "") || ""
+);
+
 const dryRun = await ask(
   "Dry run mode? (true = no real transactions)",
   e("dryRun", "false")
@@ -328,6 +334,13 @@ const userConfig = {
   ...(llmApiKey ? { llmApiKey } : {}),
   dryRun: dryRun === "true",
 };
+
+const normalizedFallbackModel = fallbackModelRaw?.trim() || null;
+if (normalizedFallbackModel) {
+  userConfig.fallbackModel = normalizedFallbackModel;
+} else {
+  delete userConfig.fallbackModel;
+}
 
 fs.writeFileSync(CONFIG_PATH, JSON.stringify(userConfig, null, 2));
 
