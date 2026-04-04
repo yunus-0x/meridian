@@ -276,12 +276,10 @@ async function poll(onMessage) {
 
         const incomingChatId = String(msg.chat.id);
 
-        // Auto-register first sender as the owner
+        // Reject messages if no chatId is pre-configured
         if (!chatId) {
-          chatId = incomingChatId;
-          saveChatId(chatId);
-          log("telegram", `Registered chat ID: ${chatId}`);
-          await sendMessage("Connected! I'm your LP agent. Ask me anything or use commands like /status.");
+          log("telegram_security", `Rejected message from ${incomingChatId} — TELEGRAM_CHAT_ID not set in .env`);
+          continue;
         }
 
         // Only accept messages from the registered chat
@@ -302,7 +300,7 @@ export function startPolling(onMessage) {
   if (!TOKEN) return;
   _polling = true;
   poll(onMessage); // fire-and-forget
-  log("telegram", "Bot polling started");
+  log("telegram", `Bot polling started — authorized chat: ${chatId ?? "NONE (messages will be rejected until TELEGRAM_CHAT_ID is set)"}`);
 }
 
 export function stopPolling() {

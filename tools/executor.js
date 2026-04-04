@@ -177,10 +177,7 @@ const toolMap = {
       // schedule
       managementIntervalMin: ["schedule", "managementIntervalMin"],
       screeningIntervalMin: ["schedule", "screeningIntervalMin"],
-      // models
-      managementModel: ["llm", "managementModel"],
-      screeningModel: ["llm", "screeningModel"],
-      generalModel: ["llm", "generalModel"],
+      // models intentionally excluded — model routing is operator-only, not LLM-mutable
       // strategy
       minBinStep: ["strategy", "minBinStep"],
       binsBelow: ["strategy", "binsBelow"],
