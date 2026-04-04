@@ -109,6 +109,29 @@ function shouldRequireRealToolUse(goal, agentType, interactive = false) {
   return interactive && LIVE_DATA_TOOL_INTENTS.test(goal);
 }
 
+function buildMessages(systemPrompt, sessionHistory, goal, providerMode = "system") {
+  if (providerMode === "user_embedded") {
+    return [
+      ...sessionHistory,
+      {
+        role: "user",
+        content: `[SYSTEM INSTRUCTIONS]\n${systemPrompt}\n\n[USER REQUEST]\n${goal}`,
+      },
+    ];
+  }
+
+  return [
+    { role: "system", content: systemPrompt },
+    ...sessionHistory,
+    { role: "user", content: goal },
+  ];
+}
+
+function isSystemRoleError(error) {
+  const message = String(error?.message || error?.error?.message || error || "");
+  return /invalid message role:\s*system/i.test(message);
+}
+
 /**
  * Core ReAct agent loop.
  *
@@ -133,11 +156,8 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   }
   const systemPrompt = buildSystemPrompt(agentType, portfolio, positions, stateSummary, lessons, perfSummary, weightsSummary);
 
-  const messages = [
-    { role: "system", content: systemPrompt },
-    ...sessionHistory,          // inject prior conversation turns
-    { role: "user", content: goal },
-  ];
+  let providerMode = "system";
+  let messages = buildMessages(systemPrompt, sessionHistory, goal, providerMode);
 
   // Track write tools fired this session — prevent the model from calling the same
   // destructive tool twice (e.g. deploy twice, swap twice after auto-swap)
@@ -165,14 +185,25 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       const toolChoice = (step === 0 && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
 
       for (let attempt = 0; attempt < 3; attempt++) {
-        response = await client.chat.completions.create({
-          model: usedModel,
-          messages,
-          tools: getToolsForRole(agentType, goal),
-          tool_choice: toolChoice,
-          temperature: config.llm.temperature,
-          max_tokens: maxOutputTokens ?? config.llm.maxTokens,
-        });
+        try {
+          response = await client.chat.completions.create({
+            model: usedModel,
+            messages,
+            tools: getToolsForRole(agentType, goal),
+            tool_choice: toolChoice,
+            temperature: config.llm.temperature,
+            max_tokens: maxOutputTokens ?? config.llm.maxTokens,
+          });
+        } catch (error) {
+          if (providerMode === "system" && isSystemRoleError(error)) {
+            providerMode = "user_embedded";
+            messages = buildMessages(systemPrompt, sessionHistory, goal, providerMode);
+            log("agent", "Provider rejected system role — retrying with embedded system instructions");
+            attempt -= 1;
+            continue;
+          }
+          throw error;
+        }
         if (response.choices?.length) break;
         const errCode = response.error?.code;
         if (errCode === 502 || errCode === 503 || errCode === 529) {
@@ -234,8 +265,10 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             };
           }
           messages.push({
-            role: "system",
-            content: "You have not used any tool yet. This request requires real tool execution or live tool-backed data. Do not answer from memory or inference. Call the appropriate tool first, then report only the real result.",
+            role: providerMode === "system" ? "system" : "user",
+            content: providerMode === "system"
+              ? "You have not used any tool yet. This request requires real tool execution or live tool-backed data. Do not answer from memory or inference. Call the appropriate tool first, then report only the real result."
+              : "[SYSTEM REMINDER]\nYou have not used any tool yet. This request requires real tool execution or live tool-backed data. Do not answer from memory or inference. Call the appropriate tool first, then report only the real result.",
           });
           continue;
         }
