@@ -179,9 +179,10 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           volatility: { type: "number", description: "Pool volatility at deploy time" },
           fee_tvl_ratio: { type: "number", description: "fee/TVL ratio at deploy time" },
           organic_score: { type: "number", description: "Base token organic score at deploy time" },
-          initial_value_usd: { type: "number", description: "Estimated USD value being deployed" }
+          initial_value_usd: { type: "number", description: "Estimated USD value being deployed" },
+          conviction_score: { type: "number", description: "Your conviction in this deploy (1-10). 10 = highest. Must be >= 7 to proceed. Consider: narrative quality, smart wallets, pool metrics, hive consensus, pool memory." }
         },
-        required: ["pool_address"]
+        required: ["pool_address", "conviction_score"]
       }
     }
   },

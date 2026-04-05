@@ -4,7 +4,7 @@ import readline from "readline";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
-import { getWalletBalances } from "./tools/wallet.js";
+import { getWalletBalances, JUPITER_API_KEY } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
@@ -13,13 +13,100 @@ import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isE
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
-import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
+import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolMemoryStats } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
+import { queryPoolConsensus, queryLessonConsensus } from "./hive-mind.js";
+import { getWeightsSummary } from "./signal-weights.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
 log("startup", `Model: ${process.env.LLM_MODEL || "hermes-3-405b"}`);
+
+// ─── Startup health checks (fire-and-forget) ───
+
+// OKX API
+import { healthCheck as okxHealthCheck } from "./tools/okx.js";
+okxHealthCheck().then((r) => {
+  if (r.ok && r.authError) {
+    log("startup", `OKX API: OK (${r.latencyMs}ms, public mode — ${r.authError})`);
+  } else if (r.ok) {
+    log("startup", `OKX API: OK (${r.latencyMs}ms, auth: ${r.auth ? "yes" : "no"})`);
+  } else {
+    log("startup", `OKX API: FAILED — ${r.error} (auth: ${r.auth ? "yes" : "no"})`);
+  }
+}).catch(() => {});
+
+// Jupiter API
+(async () => {
+  const start = Date.now();
+  try {
+    const res = await fetch("https://api.jup.ag/price/v3?ids=So11111111111111111111111111111111111111112", {
+      headers: { "x-api-key": JUPITER_API_KEY },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    log("startup", `Jupiter: OK (${Date.now() - start}ms)`);
+  } catch (e) {
+    log("startup", `Jupiter: FAILED — ${e.message} (${Date.now() - start}ms)`);
+  }
+})();
+
+// LLM (OpenRouter or compatible)
+(async () => {
+  const start = Date.now();
+  const baseURL = process.env.LLM_BASE_URL || "https://openrouter.ai/api/v1";
+  const apiKey = process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY;
+  try {
+    const res = await fetch(`${baseURL}/models`, {
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    log("startup", `LLM: OK (${Date.now() - start}ms, ${baseURL})`);
+  } catch (e) {
+    log("startup", `LLM: FAILED — ${e.message} (${Date.now() - start}ms)`);
+  }
+})();
+
+// Helius (optional)
+if (process.env.HELIUS_API_KEY) {
+  (async () => {
+    const start = Date.now();
+    try {
+      const res = await fetch(`https://api.helius.xyz/v0/addresses/?api-key=${process.env.HELIUS_API_KEY}`, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      // Even a 400 means the API is reachable and key is valid-ish
+      if (res.status === 401 || res.status === 403) throw new Error(`auth failed (${res.status})`);
+      log("startup", `Helius: OK (${Date.now() - start}ms)`);
+    } catch (e) {
+      log("startup", `Helius: FAILED — ${e.message} (${Date.now() - start}ms)`);
+    }
+  })();
+} else {
+  log("startup", "Helius: SKIPPED (not configured)");
+}
+
+// Hive Mind (optional)
+import { isEnabled as hiveMindEnabled, getHivePulse } from "./hive-mind.js";
+if (hiveMindEnabled()) {
+  (async () => {
+    const start = Date.now();
+    try {
+      const pulse = await getHivePulse();
+      if (pulse) {
+        log("startup", `Hive Mind: OK (${Date.now() - start}ms, ${pulse.total_agents} agents, ${pulse.overall_win_rate}% win rate)`);
+      } else {
+        throw new Error("no response");
+      }
+    } catch (e) {
+      log("startup", `Hive Mind: FAILED — ${e.message} (${Date.now() - start}ms)`);
+    }
+  })();
+} else {
+  log("startup", "Hive Mind: SKIPPED (not configured)");
+}
 
 const TP_PCT = config.management.takeProfitFeePct;
 const DEPLOY = config.management.deployAmountSol;
@@ -379,6 +466,60 @@ After executing, write a brief one-line result per position.
   return mgmtReport;
 }
 
+const HIVE_MIN_AGREEMENT = 10;
+const HIVE_MAX_LESSONS = 5;
+const HIVE_MIN_CREDIBILITY = 0.55;
+const HIVE_MIN_SCORE = 5;
+const HIVE_EXCLUDED_TAGS = new Set(["self_tune", "config_change"]);
+
+function formatHiveLessons(lessons) {
+  if (!Array.isArray(lessons) || lessons.length === 0) return "";
+  const filtered = lessons
+    .filter(l => l.agreement_count >= HIVE_MIN_AGREEMENT)
+    .filter(l => (l.avg_credibility ?? 0) >= HIVE_MIN_CREDIBILITY)
+    .filter(l => (l.score ?? 0) >= HIVE_MIN_SCORE)
+    .filter(l => !l.tags?.some(t => HIVE_EXCLUDED_TAGS.has(t)))
+    .slice(0, HIVE_MAX_LESSONS);
+  if (filtered.length === 0) return "";
+  const lines = filtered.map(l => {
+    const icon = l.outcome === "good" || l.outcome === "manual" ? "+" : "-";
+    return `${icon} ${l.representative_rule} (${l.agreement_count} agents, cred ${l.avg_credibility?.toFixed(2) ?? "?"})`;
+  });
+  return `HIVE MIND (supplementary — your own analysis takes priority):\n${lines.join("\n")}`;
+}
+
+const HIVE_MIN_AGENTS = 3;
+const HIVE_MAX_RECENCY_HOURS = 24;
+
+function formatHivePoolLine(hive) {
+  if (!hive || (hive.unique_agents ?? 0) < HIVE_MIN_AGENTS) return null;
+
+  // Layer 3: Skip stale data (> 24h for memecoins)
+  if (hive.last_deploy) {
+    const hoursAgo = (Date.now() - new Date(hive.last_deploy).getTime()) / 3600000;
+    if (hoursAgo > HIVE_MAX_RECENCY_HOURS) return null;
+  }
+
+  // Layer 4: Detect contradictions (PREFER + AVOID/FAILED for same pool)
+  const topLessons = hive.top_lessons || [];
+  const hasPrefer = topLessons.some(l => /^PREFER/i.test(l));
+  const hasAvoid = topLessons.some(l => /^(?:AVOID|FAILED)/i.test(l));
+  const contradicted = hasPrefer && hasAvoid;
+
+  const recency = hive.last_deploy
+    ? `${Math.round((Date.now() - new Date(hive.last_deploy).getTime()) / 3600000)}h ago`
+    : "unknown";
+  const pnlStr = hive.weighted_avg_pnl != null
+    ? `${hive.weighted_avg_pnl >= 0 ? "+" : ""}${hive.weighted_avg_pnl.toFixed(1)}%`
+    : "N/A";
+  const warn = (hive.weighted_win_rate ?? 0) < 50 ? " !!!" : "";
+  const contradictNote = contradicted ? " | CONFLICTING (both PREFER and AVOID signals)" : "";
+  const topLesson = !contradicted && topLessons[0]
+    ? ` | "${topLessons[0].slice(0, 120)}${topLessons[0].length > 120 ? "..." : ""}"`
+    : "";
+  return `  hive: ${hive.unique_agents} agents, ${hive.weighted_win_rate ?? "?"}% win, ${pnlStr} avg, last ${recency}, best_strat=${hive.top_strategy ?? "?"}${warn}${contradictNote}${topLesson}`;
+}
+
 export async function runScreeningCycle({ silent = false } = {}) {
   if (_screeningBusy) {
     log("cron", "Screening skipped — previous cycle still running");
@@ -424,6 +565,19 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const deployAmount = computeDeployAmount(currentBalance.sol);
     log("cron", `Computed deploy amount: ${deployAmount} SOL (wallet: ${currentBalance.sol} SOL)`);
 
+    // Fetch hive lesson consensus (non-blocking — null on failure)
+    const hiveLessons = await queryLessonConsensus().catch(() => null);
+    const hiveLessonBlock = formatHiveLessons(hiveLessons);
+
+    // Load signal weights (learned from past positions via Darwin system)
+    let signalWeightsBlock = "";
+    try {
+      const summary = getWeightsSummary();
+      if (summary && !summary.includes("not been recalculated yet")) {
+        signalWeightsBlock = `\n${summary}\n`;
+      }
+    } catch { /* signal weights are best-effort */ }
+
     // Load active strategy
     const activeStrategy = getActiveStrategy();
     const strategyBlock = activeStrategy
@@ -437,23 +591,26 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const allCandidates = [];
     for (const pool of candidates) {
       const mint = pool.base?.mint;
-      const [smartWallets, narrative, tokenInfo] = await Promise.allSettled([
+      const [smartWallets, narrative, tokenInfo, hivePool] = await Promise.allSettled([
         checkSmartWalletsOnPool({ pool_address: pool.pool }),
         mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
         mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
+        queryPoolConsensus(pool.pool),
       ]);
       allCandidates.push({
         pool,
         sw: smartWallets.status === "fulfilled" ? smartWallets.value : null,
         n: narrative.status === "fulfilled" ? narrative.value : null,
         ti: tokenInfo.status === "fulfilled" ? tokenInfo.value?.results?.[0] : null,
+        hive: hivePool.status === "fulfilled" ? hivePool.value : null,
         mem: recallForPool(pool.pool),
+        memStats: getPoolMemoryStats(pool.pool),
       });
       await new Promise(r => setTimeout(r, 150)); // avoid 429s
     }
 
-    // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
-    const passing = allCandidates.filter(({ pool, ti }) => {
+    // Hard filters after token recon — block launchpads, bots, and 0% win rate pools
+    const passing = allCandidates.filter(({ pool, ti, memStats }) => {
       const launchpad = ti?.launchpad ?? null;
       if (launchpad && config.screening.blockedLaunchpads.includes(launchpad)) {
         log("screening", `Skipping ${pool.name} — blocked launchpad (${launchpad})`);
@@ -463,6 +620,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const maxBotHoldersPct = config.screening.maxBotHoldersPct;
       if (botPct != null && maxBotHoldersPct != null && botPct > maxBotHoldersPct) {
         log("screening", `Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > ${maxBotHoldersPct}%`);
+        return false;
+      }
+      // Block pools with 0% win rate across 3+ deploys
+      if (memStats && memStats.total_deploys >= 3 && memStats.win_rate === 0) {
+        log("screening", `Pool-memory filter: dropped ${pool.name} — 0% win rate over ${memStats.total_deploys} deploys`);
         return false;
       }
       return true;
@@ -479,7 +641,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     );
 
     // Build compact candidate blocks
-    const candidateBlocks = passing.map(({ pool, sw, n, ti, mem }, i) => {
+    const candidateBlocks = passing.map(({ pool, sw, n, ti, hive, mem, memStats }, i) => {
       const botPct = ti?.audit?.bot_holders_pct ?? "?";
       const top10Pct = ti?.audit?.top_holders_pct ?? "?";
       const feesSol = ti?.global_fees_sol ?? "?";
@@ -519,7 +681,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
         activeBin != null ? `  active_bin: ${activeBin}` : null,
         priceChange != null ? `  1h: price${priceChange >= 0 ? "+" : ""}${priceChange}%, net_buyers=${netBuyers ?? "?"}` : null,
         n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
-        mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
+        memStats ? `  pool_history: ${memStats.total_deploys} deploys, ${memStats.win_rate}% win, avg ${memStats.avg_pnl_pct}% PnL, last: ${memStats.last_outcome}${memStats.last_closed_hours_ago != null ? ` ${memStats.last_closed_hours_ago}h ago` : ""}${memStats.pnl_drift != null ? `, trend: ${memStats.pnl_drift >= 0 ? "+" : ""}${memStats.pnl_drift}%` : ""}${memStats.oor_ratio != null && memStats.oor_ratio > 0.3 ? ` ⚠️ OOR ${Math.round(memStats.oor_ratio * 100)}%` : ""}` : null,
+        !memStats && mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
+        formatHivePoolLine(hive),
       ].filter(Boolean).join("\n");
 
       return block;
@@ -529,7 +693,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
 SCREENING CYCLE
 ${strategyBlock}
 Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
-
+${signalWeightsBlock}
 PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
 
@@ -588,6 +752,7 @@ IMPORTANT:
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, 2048, {
         onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
         onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
+        hiveContext: hiveLessonBlock || null,
       });
     screenReport = content;
   } catch (error) {

@@ -99,8 +99,8 @@ const toolMap = {
   block_deployer: blockDev,
   unblock_deployer: unblockDev,
   list_blocked_deployers: listBlockedDevs,
-  add_lesson: ({ rule, tags, pinned, role }) => {
-    addLesson(rule, tags || [], { pinned: !!pinned, role: role || null });
+  add_lesson: async ({ rule, tags, pinned, role }) => {
+    await addLesson(rule, tags || [], { pinned: !!pinned, role: role || null });
     return { saved: true, rule, pinned: !!pinned, role: role || "all" };
   },
   pin_lesson:   ({ id }) => pinLesson(id),
@@ -125,7 +125,7 @@ const toolMap = {
     }
     return { error: "invalid mode" };
   },
-  update_config: ({ changes, reason = "" }) => {
+  update_config: async ({ changes, reason = "" }) => {
     // Flat key → config section mapping (covers everything in config.js)
     const CONFIG_MAP = {
       // screening
@@ -232,7 +232,7 @@ const toolMap = {
     );
     if (lessonsKeys.length > 0) {
       const summary = lessonsKeys.map(k => `${k}=${applied[k]}`).join(", ");
-      addLesson(`[SELF-TUNED] Changed ${summary} — ${reason}`, ["self_tune", "config_change"]);
+      await addLesson(`[SELF-TUNED] Changed ${summary} — ${reason}`, ["self_tune", "config_change"]);
     }
 
     log("config", `Agent self-tuned: ${JSON.stringify(applied)} — ${reason}`);
@@ -364,6 +364,15 @@ export async function executeTool(name, args) {
 async function runSafetyChecks(name, args) {
   switch (name) {
     case "deploy_position": {
+      // Conviction threshold — reject low-confidence deploys
+      const conviction = args.conviction_score ?? 0;
+      if (conviction < 7) {
+        return {
+          pass: false,
+          reason: `Conviction score ${conviction}/10 is below threshold (7). Skip this cycle — it's better to wait for a stronger candidate.`,
+        };
+      }
+
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;
       const maxStep = config.screening.maxBinStep;

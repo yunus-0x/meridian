@@ -19,6 +19,7 @@ import {
   syncOpenPositions,
 } from "../state.js";
 import { recordPerformance } from "../lessons.js";
+import { queryPoolConsensus } from "../hive-mind.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
 
@@ -899,6 +900,12 @@ export async function closePosition({ position_address, reason }) {
         }
       }
 
+      // Layer 5: Record hive signal at close time for future accuracy tracking
+      const hiveAtClose = await queryPoolConsensus(poolAddress).catch(() => null);
+      const hiveSignal = hiveAtClose && (hiveAtClose.unique_agents ?? 0) >= 3
+        ? { win_rate: hiveAtClose.weighted_win_rate, avg_pnl: hiveAtClose.weighted_avg_pnl, agents: hiveAtClose.unique_agents, top_strategy: hiveAtClose.top_strategy }
+        : null;
+
       await recordPerformance({
         position: position_address,
         pool: poolAddress,
@@ -916,6 +923,7 @@ export async function closePosition({ position_address, reason }) {
         minutes_in_range: minutesHeld - minutesOOR,
         minutes_held: minutesHeld,
         close_reason: reason || "agent decision",
+        hive_signal: hiveSignal,
       });
 
       return {
