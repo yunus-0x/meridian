@@ -10,9 +10,38 @@
  * @returns {string} - Complete system prompt
  */
 import { config } from "./config.js";
+import { getActivePatterns } from "./lessons.js";
 
-export function buildSystemPrompt(agentType, portfolio, positions, stateSummary = null, lessons = null, perfSummary = null) {
+export function buildSystemPrompt(agentType, portfolio, positions, stateSummary = null, lessons = null, perfSummary = null, hiveContext = null) {
   const s = config.screening;
+
+  // Filter hive lessons that contradict local lessons (local wins)
+  let filteredHiveContext = hiveContext;
+  if (hiveContext) {
+    try {
+      const localPatterns = getActivePatterns();
+      for (const pattern of localPatterns) {
+        if (!pattern.volatility_range || !pattern.bin_step) continue;
+        const volLow = pattern.volatility_range[0];
+        const stratLabel = pattern.strategy || "";
+        const binLabel = pattern.bin_step;
+        if (pattern.outcome === "bad") {
+          // Local says avoid → filter hive "prefer/good/worked" for same params
+          const regex = new RegExp(`[^\\n]*(?:prefer|good|worked)[^\\n]*${stratLabel}[^\\n]*bin_step[^\\n]*${binLabel}[^\\n]*`, "gi");
+          filteredHiveContext = filteredHiveContext.replace(regex, "");
+        } else if (pattern.outcome === "good") {
+          // Local says prefer → filter hive "avoid/bad/failed" for same params
+          const regex = new RegExp(`[^\\n]*(?:avoid|bad|failed)[^\\n]*${stratLabel}[^\\n]*bin_step[^\\n]*${binLabel}[^\\n]*`, "gi");
+          filteredHiveContext = filteredHiveContext.replace(regex, "");
+        }
+      }
+      // Clean up empty lines from filtering
+      filteredHiveContext = filteredHiveContext.replace(/\n{3,}/g, "\n\n").trim() || null;
+    } catch {
+      // If filtering fails, use original hive context
+      filteredHiveContext = hiveContext;
+    }
+  }
 
   // MANAGER gets a leaner prompt — positions are pre-loaded in the goal, not repeated here
   if (agentType === "MANAGER") {
@@ -126,9 +155,10 @@ DEPLOY RULES:
 - COMPOUNDING: Use the deploy amount from the goal EXACTLY. Do NOT default to a smaller number.
 - bins_below = round(35 + (volatility/5)*34) clamped to [35,69]. bins_above = 0.
 - Bin steps must be [80-125].
-- Pick ONE pool. Deploy or explain why none qualify.
+- Pick ONE pool. Include conviction_score (1-10) in your deploy call. If nothing exceeds 7/10, skip — waiting is better than a bad deploy.
+- conviction_score guide: 8-10 = strong narrative + smart wallets + good metrics. 7 = decent but not great. Below 7 = skip.
 
-${lessons ? `LESSONS LEARNED:\n${lessons}\n` : ""}Timestamp: ${new Date().toISOString()}
+${filteredHiveContext ? `${filteredHiveContext}\n\n` : ""}${lessons ? `LESSONS LEARNED:\n${lessons}\n` : ""}Timestamp: ${new Date().toISOString()}
 `;
   } else if (agentType === "MANAGER") {
     basePrompt += `

@@ -131,7 +131,7 @@ function isSystemRoleError(error) {
 
 function isToolChoiceRequiredError(error) {
   const message = String(error?.message || error?.error?.message || error || "");
-  return /tool_choice/i.test(message) && /required/i.test(message);
+  return /tool_choice/i.test(message);
 }
 
 /**
@@ -142,13 +142,13 @@ function isToolChoiceRequiredError(error) {
  * @returns {string} - The agent's final text response
  */
 export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHistory = [], agentType = "GENERAL", model = null, maxOutputTokens = null, options = {}) {
-  const { requireTool = false, interactive = false, onToolStart = null, onToolFinish = null } = options;
+  const { requireTool = false, interactive = false, onToolStart = null, onToolFinish = null, hiveContext = null } = options;
   // Build dynamic system prompt with current portfolio state
   const [portfolio, positions] = await Promise.all([getWalletBalances(), getMyPositions()]);
   const stateSummary = getStateSummary();
   const lessons = getLessonsForPrompt({ agentType });
   const perfSummary = getPerformanceSummary();
-  const systemPrompt = buildSystemPrompt(agentType, portfolio, positions, stateSummary, lessons, perfSummary);
+  const systemPrompt = buildSystemPrompt(agentType, portfolio, positions, stateSummary, lessons, perfSummary, hiveContext);
 
   let providerMode = "system";
   let messages = buildMessages(systemPrompt, sessionHistory, goal, providerMode);
@@ -180,14 +180,15 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
 
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          response = await client.chat.completions.create({
+          const createParams = {
             model: usedModel,
             messages,
             tools: getToolsForRole(agentType, goal),
-            tool_choice: toolChoice,
             temperature: config.llm.temperature,
             max_tokens: maxOutputTokens ?? config.llm.maxTokens,
-          });
+          };
+          if (toolChoice !== "none") createParams.tool_choice = toolChoice;
+          response = await client.chat.completions.create(createParams);
         } catch (error) {
           if (providerMode === "system" && isSystemRoleError(error)) {
             providerMode = "user_embedded";
@@ -196,9 +197,14 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             attempt -= 1;
             continue;
           }
-          if (toolChoice === "required" && isToolChoiceRequiredError(error)) {
-            toolChoice = "auto";
-            log("agent", "Provider rejected tool_choice=required — retrying with tool_choice=auto");
+          if (isToolChoiceRequiredError(error)) {
+            if (toolChoice === "required") {
+              toolChoice = "auto";
+              log("agent", "Provider rejected tool_choice=required — retrying with tool_choice=auto");
+            } else {
+              toolChoice = "none";
+              log("agent", "Provider rejected tool_choice=auto — retrying without tool_choice");
+            }
             attempt -= 1;
             continue;
           }

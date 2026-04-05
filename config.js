@@ -20,13 +20,14 @@ if (u.dryRun !== undefined) process.env.DRY_RUN ||= String(u.dryRun);
 export const config = {
   // ─── Risk Limits ─────────────────────────
   risk: {
-    maxPositions:    u.maxPositions    ?? 3,
-    maxDeployAmount: u.maxDeployAmount ?? 50,
+    maxPositions:       u.maxPositions       ?? 3,
+    maxDeployAmount:    u.maxDeployAmount    ?? 50,
+    maxPoolExposurePct: u.maxPoolExposurePct ?? 0.02,  // max deploy = X% of pool TVL
   },
 
   // ─── Pool Screening Thresholds ───────────
   screening: {
-    minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
+    minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? u.minFeeTvlRatio ?? 0.05,
     minTvl:            u.minTvl            ?? 10_000,
     maxTvl:            u.maxTvl            ?? 150_000,
     minVolume:         u.minVolume         ?? 500,
@@ -46,6 +47,7 @@ export const config = {
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
     athFilterPct:       u.athFilterPct       ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
+    maxVolatility:      u.maxVolatility      ?? 10,   // max pool volatility — evolved by lessons.js
   },
 
   // ─── Position Management ────────────────
@@ -70,6 +72,13 @@ export const config = {
     trailingTriggerPct:    u.trailingTriggerPct    ?? 3,    // activate trailing at X% PnL
     trailingDropPct:       u.trailingDropPct       ?? 1.5,  // close when drops X% from peak
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
+    // Position age exit — close stale positions
+    maxPositionAgeMinutes: u.maxPositionAgeMinutes ?? 1440, // 24h default, null = disabled
+    maxPositionAgePnlPct:  u.maxPositionAgePnlPct  ?? 2,    // only close aged positions below this PnL %
+    // OOR frequency exit — close positions that keep bouncing OOR
+    oorFrequencyLimit:     u.oorFrequencyLimit     ?? 4,     // close after N OOR events, null = disabled
+    // Volatility spike exit — close if volatility jumped significantly
+    volatilitySpikeRatio:  u.volatilitySpikeRatio  ?? 3,     // close if current vol > N× deploy vol, null = disabled
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
   },
@@ -78,6 +87,15 @@ export const config = {
   strategy: {
     strategy:  u.strategy  ?? "bid_ask",
     binsBelow: u.binsBelow ?? 69,
+  },
+
+  // ─── Lesson Management ──────────────────
+  lessons: {
+    maxLessons:       u.lessons?.maxLessons       ?? u.maxLessons       ?? 20,
+    specificTtlDays:  u.lessons?.specificTtlDays  ?? u.specificTtlDays  ?? 7,
+    patternTtlDays:   u.lessons?.patternTtlDays   ?? u.patternTtlDays   ?? 30,
+    evolvedTtlDays:   u.lessons?.evolvedTtlDays   ?? u.evolvedTtlDays   ?? 14,
+    mergeThreshold:   u.lessons?.mergeThreshold   ?? u.mergeThreshold   ?? 3,
   },
 
   // ─── Scheduling ─────────────────────────
@@ -95,6 +113,18 @@ export const config = {
     managementModel: u.managementModel ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
     screeningModel:  u.screeningModel  ?? process.env.LLM_MODEL ?? "openrouter/hunter-alpha",
     generalModel:    u.generalModel    ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
+  },
+
+  // ─── Darwin Signal Weights ──────────────
+  darwin: {
+    enabled:      u.darwinEnabled      ?? false,
+    windowDays:   u.darwinWindowDays   ?? 60,
+    recalcEvery:  u.darwinRecalcEvery  ?? 5,
+    boostFactor:  u.darwinBoost        ?? 1.05,
+    decayFactor:  u.darwinDecay        ?? 0.95,
+    weightFloor:  u.darwinFloor        ?? 0.3,
+    weightCeiling: u.darwinCeiling     ?? 2.5,
+    minSamples:   u.darwinMinSamples   ?? 10,
   },
 
   // ─── Common Token Mints ────────────────
@@ -117,14 +147,21 @@ export const config = {
  *   3.0 SOL wallet → 0.98 SOL deploy
  *   4.0 SOL wallet → 1.33 SOL deploy
  */
-export function computeDeployAmount(walletSol) {
+export function computeDeployAmount(walletSol, poolTvl = null) {
   const reserve  = config.management.gasReserve      ?? 0.2;
   const pct      = config.management.positionSizePct ?? 0.35;
   const floor    = config.management.deployAmountSol;
   const ceil     = config.risk.maxDeployAmount;
   const deployable = Math.max(0, walletSol - reserve);
-  const dynamic    = deployable * pct;
-  const result     = Math.min(ceil, Math.max(floor, dynamic));
+  let dynamic      = deployable * pct;
+
+  // Cap at maxPoolExposurePct of pool TVL to avoid whale risk
+  if (poolTvl != null && poolTvl > 0) {
+    const maxByTvl = poolTvl * config.risk.maxPoolExposurePct;
+    dynamic = Math.min(dynamic, maxByTvl);
+  }
+
+  const result = Math.min(ceil, Math.max(floor, dynamic));
   return parseFloat(result.toFixed(2));
 }
 
@@ -139,6 +176,7 @@ export function reloadScreeningThresholds() {
     const fresh = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"));
     const s = config.screening;
     if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
+    else if (fresh.minFeeTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeTvlRatio; // backward compat
     if (fresh.minOrganic     != null) s.minOrganic     = fresh.minOrganic;
     if (fresh.minHolders     != null) s.minHolders     = fresh.minHolders;
     if (fresh.minMcap        != null) s.minMcap        = fresh.minMcap;
@@ -155,5 +193,6 @@ export function reloadScreeningThresholds() {
     if (fresh.athFilterPct      !== undefined) s.athFilterPct     = fresh.athFilterPct;
     if (fresh.maxBundlePct      != null) s.maxBundlePct     = fresh.maxBundlePct;
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
+    if (fresh.maxVolatility     != null) s.maxVolatility    = fresh.maxVolatility;
   } catch { /* ignore */ }
 }

@@ -30,19 +30,209 @@ function sanitizeLessonText(text, maxLen = MAX_MANUAL_LESSON_LENGTH) {
   return cleaned || null;
 }
 
+function save(data) {
+  fs.writeFileSync(LESSONS_FILE, JSON.stringify(data, null, 2));
+}
+
+// ─── Lesson Management Helpers ───────────────────────────────
+
+function volatilityBucket(vol) {
+  if (vol == null || !Number.isFinite(vol)) return null;
+  if (vol < 2) return [0, 2];
+  if (vol < 4) return [2, 4];
+  if (vol < 6) return [4, 6];
+  return [6, Infinity];
+}
+
+function extractPattern(perf) {
+  return {
+    volatility_range: volatilityBucket(perf.volatility),
+    bin_step: perf.bin_step ?? null,
+    strategy: perf.strategy ?? null,
+    outcome: perf.pnl_pct >= 5 ? "good" : perf.pnl_pct <= -5 ? "bad" : null,
+    sample_size: 1,
+    pools: perf.pool_name ? [perf.pool_name] : [],
+  };
+}
+
+function patternsMatch(a, b) {
+  if (!a || !b) return false;
+  if (a.outcome !== b.outcome) return false;
+  if (a.bin_step !== b.bin_step) return false;
+  if (a.strategy !== b.strategy) return false;
+  if (!a.volatility_range || !b.volatility_range) return false;
+  return a.volatility_range[0] === b.volatility_range[0] &&
+         a.volatility_range[1] === b.volatility_range[1];
+}
+
+function patternsContradict(a, b) {
+  if (!a || !b) return false;
+  if (a.bin_step !== b.bin_step) return false;
+  if (a.strategy !== b.strategy) return false;
+  if (!a.volatility_range || !b.volatility_range) return false;
+  const sameRange = a.volatility_range[0] === b.volatility_range[0] &&
+                    a.volatility_range[1] === b.volatility_range[1];
+  if (!sameRange) return false;
+  return (a.outcome === "good" && b.outcome === "bad") ||
+         (a.outcome === "bad" && b.outcome === "good");
+}
+
+function computeScore(lesson) {
+  const now = Date.now();
+  const created = new Date(lesson.created_at).getTime();
+  const expires = new Date(lesson.expires_at).getTime();
+  if (!Number.isFinite(created) || !Number.isFinite(expires)) return 0;
+  const totalLifespan = expires - created;
+  const elapsed = now - created;
+  const recencyWeight = totalLifespan > 0
+    ? Math.max(0.1, 1 - (elapsed / totalLifespan) * 0.9)
+    : 0.1;
+  const sampleSize = lesson.pattern?.sample_size ?? 1;
+  const typeMultiplier = lesson.type === "pattern" ? 1.5
+    : lesson.type === "evolved" ? 1.2
+    : 1.0;
+  return sampleSize * recencyWeight * typeMultiplier;
+}
+
+function computeExpiresAt(type, lessonsConfig) {
+  const days = type === "pattern" ? lessonsConfig.patternTtlDays
+    : type === "evolved" ? lessonsConfig.evolvedTtlDays
+    : lessonsConfig.specificTtlDays;
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
 function load() {
   if (!fs.existsSync(LESSONS_FILE)) {
     return { lessons: [], performance: [] };
   }
   try {
-    return JSON.parse(fs.readFileSync(LESSONS_FILE, "utf8"));
+    const data = JSON.parse(fs.readFileSync(LESSONS_FILE, "utf8"));
+    // Backfill legacy lessons missing lifecycle fields
+    let migrated = false;
+    for (const lesson of data.lessons || []) {
+      if (!lesson.type) {
+        lesson.type = lesson.tags?.includes("evolution") ? "evolved" : "specific";
+        migrated = true;
+      }
+      if (!lesson.expires_at && !lesson.pinned) {
+        const ttlDays = lesson.type === "pattern" ? 30
+          : lesson.type === "evolved" ? 14 : 7;
+        lesson.expires_at = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000).toISOString();
+        migrated = true;
+      }
+      if (lesson.score == null) {
+        lesson.score = 1.0;
+        migrated = true;
+      }
+      if (!lesson.pattern && lesson.type === "specific") {
+        lesson.pattern = {
+          volatility_range: volatilityBucket(lesson.volatility ?? null),
+          bin_step: null,
+          strategy: null,
+          outcome: lesson.outcome === "good" ? "good" : lesson.outcome === "bad" ? "bad" : null,
+          sample_size: 1,
+          pools: [],
+        };
+        migrated = true;
+      }
+    }
+    if (migrated) {
+      fs.writeFileSync(LESSONS_FILE, JSON.stringify(data, null, 2));
+      log("lessons", `Migrated ${data.lessons.length} legacy lessons to new format`);
+    }
+    return data;
   } catch {
     return { lessons: [], performance: [] };
   }
 }
 
-function save(data) {
-  fs.writeFileSync(LESSONS_FILE, JSON.stringify(data, null, 2));
+/**
+ * Prune lessons: expire, merge duplicates, resolve contradictions, evict if over cap.
+ */
+function pruneLessons(lessonsConfig) {
+  const data = load();
+  const now = Date.now();
+  const before = data.lessons.length;
+
+  // Step 1: Remove expired (skip pinned and lessons without expires_at)
+  data.lessons = data.lessons.filter(l =>
+    l.pinned || !l.expires_at || new Date(l.expires_at).getTime() > now
+  );
+
+  // Step 2: Merge specifics into patterns
+  const specifics = data.lessons.filter(l => l.type === "specific" && l.pattern?.outcome);
+  const groups = new Map();
+  for (const lesson of specifics) {
+    const key = `${lesson.pattern.outcome}|${lesson.pattern.bin_step}|${lesson.pattern.strategy}|${(lesson.pattern.volatility_range || []).join(",")}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(lesson);
+  }
+
+  for (const [key, members] of groups) {
+    if (members.length < lessonsConfig.mergeThreshold) continue;
+
+    const totalSampleSize = members.reduce((s, l) => s + (l.pattern?.sample_size ?? 1), 0);
+    const allPools = [...new Set(members.flatMap(l => l.pattern?.pools ?? []))];
+    const repr = members[0];
+    const volLabel = repr.pattern.volatility_range
+      ? `volatility ${repr.pattern.volatility_range[0]}-${repr.pattern.volatility_range[1] === Infinity ? "+" : repr.pattern.volatility_range[1]}`
+      : "unknown volatility";
+    const outcomeLabel = repr.pattern.outcome === "good" ? "PATTERN-PREFER" : "PATTERN-AVOID";
+
+    const merged = {
+      id: Date.now(),
+      rule: `${outcomeLabel}: pools with ${volLabel}, bin_step ${repr.pattern.bin_step}, strategy ${repr.pattern.strategy} — ${totalSampleSize} positions (${allPools.join(", ")})`,
+      type: "pattern",
+      tags: [...new Set(members.flatMap(l => l.tags || []))],
+      outcome: repr.pattern.outcome === "good" ? "good" : "bad",
+      pattern: {
+        ...repr.pattern,
+        sample_size: totalSampleSize,
+        pools: allPools,
+      },
+      score: 1.0,
+      expires_at: computeExpiresAt("pattern", lessonsConfig),
+      created_at: new Date().toISOString(),
+    };
+
+    const memberIds = new Set(members.map(l => l.id));
+    data.lessons = data.lessons.filter(l => !memberIds.has(l.id));
+    data.lessons.push(merged);
+  }
+
+  // Step 3: Resolve contradictions (higher sample_size wins)
+  const withPatterns = data.lessons.filter(l => l.pattern?.outcome);
+  const toRemove = new Set();
+  for (let i = 0; i < withPatterns.length; i++) {
+    for (let j = i + 1; j < withPatterns.length; j++) {
+      if (patternsContradict(withPatterns[i].pattern, withPatterns[j].pattern)) {
+        const sizeI = withPatterns[i].pattern.sample_size ?? 1;
+        const sizeJ = withPatterns[j].pattern.sample_size ?? 1;
+        const loser = sizeI >= sizeJ ? withPatterns[j] : withPatterns[i];
+        toRemove.add(loser.id);
+      }
+    }
+  }
+  if (toRemove.size > 0) {
+    data.lessons = data.lessons.filter(l => !toRemove.has(l.id));
+    log("lessons", `Removed ${toRemove.size} contradicted lesson(s)`);
+  }
+
+  // Step 4: Evict lowest-scoring if over cap
+  const maxLessons = lessonsConfig.maxLessons;
+  if (data.lessons.length > maxLessons) {
+    const pinned = data.lessons.filter(l => l.pinned);
+    const unpinned = data.lessons.filter(l => !l.pinned);
+    unpinned.sort((a, b) => computeScore(b) - computeScore(a));
+    const keepCount = Math.max(0, maxLessons - pinned.length);
+    data.lessons = [...pinned, ...unpinned.slice(0, keepCount)];
+    log("lessons", `Evicted ${unpinned.length - keepCount} low-scoring lesson(s) (cap: ${maxLessons})`);
+  }
+
+  if (data.lessons.length !== before) {
+    save(data);
+    log("lessons", `Pruned: ${before} → ${data.lessons.length} lessons`);
+  }
 }
 
 // ─── Record Position Performance ──────────────────────────────
@@ -119,13 +309,17 @@ export async function recordPerformance(perf) {
   data.performance.push(entry);
 
   // Derive and store a lesson
-  const lesson = derivLesson(entry);
+  const lesson = await derivLesson(entry);
   if (lesson) {
     data.lessons.push(lesson);
     log("lessons", `New lesson: ${lesson.rule}`);
   }
 
   save(data);
+
+  // Prune lessons
+  const { config: cfg } = await import("./config.js");
+  pruneLessons(cfg.lessons);
 
   // Update pool-level memory
   if (perf.pool) {
@@ -172,7 +366,7 @@ export async function recordPerformance(perf) {
  * Derive a lesson from a closed position's performance.
  * Only generates a lesson if the outcome was clearly good or bad.
  */
-function derivLesson(perf) {
+async function derivLesson(perf) {
   const tags = [];
 
   // Categorize outcome
@@ -217,15 +411,21 @@ function derivLesson(perf) {
 
   if (!rule) return null;
 
+  const { config } = await import("./config.js");
+
   return {
     id: Date.now(),
     rule,
+    type: "specific",
     tags,
     outcome,
     context,
     pnl_pct: perf.pnl_pct,
     range_efficiency: perf.range_efficiency,
     pool: perf.pool,
+    pattern: extractPattern(perf),
+    score: 1.0,
+    expires_at: computeExpiresAt("specific", config.lessons),
     created_at: new Date().toISOString(),
   };
 }
@@ -243,8 +443,17 @@ function derivLesson(perf) {
 export function evolveThresholds(perfData, config) {
   if (!perfData || perfData.length < MIN_EVOLVE_POSITIONS) return null;
 
-  const winners = perfData.filter((p) => p.pnl_pct > 0);
-  const losers  = perfData.filter((p) => p.pnl_pct < -5);
+  // Rolling window — only learn from recent data
+  const windowMs = (config.darwin?.windowDays ?? 60) * 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - windowMs;
+  const recentData = perfData.filter(p => {
+    const ts = new Date(p.recorded_at).getTime();
+    return Number.isFinite(ts) && ts >= cutoff;
+  });
+  if (recentData.length < MIN_EVOLVE_POSITIONS) return null;
+
+  const winners = recentData.filter((p) => p.pnl_pct > 0);
+  const losers  = recentData.filter((p) => p.pnl_pct < -5);
 
   // Need at least some signal in both directions before adjusting
   const hasSignal = winners.length >= 2 || losers.length >= 2;
@@ -294,7 +503,7 @@ export function evolveThresholds(perfData, config) {
   {
     const winnerFees = winners.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
     const loserFees  = losers.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
-    const current    = config.screening.minFeeTvlRatio;
+    const current    = config.screening.minFeeActiveTvlRatio;
 
     if (winnerFees.length >= 2) {
       // Minimum fee/TVL among winners — we know pools below this don't work for us
@@ -304,8 +513,8 @@ export function evolveThresholds(perfData, config) {
         const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 0.05, 10.0);
         const rounded = Number(newVal.toFixed(2));
         if (rounded > current) {
-          changes.minFeeTvlRatio = rounded;
-          rationale.minFeeTvlRatio = `Lowest winner fee_tvl=${minWinnerFee.toFixed(2)} — raised floor from ${current} → ${rounded}`;
+          changes.minFeeActiveTvlRatio = rounded;
+          rationale.minFeeActiveTvlRatio = `Lowest winner fee_tvl=${minWinnerFee.toFixed(2)} — raised floor from ${current} → ${rounded}`;
         }
       }
     }
@@ -320,9 +529,9 @@ export function evolveThresholds(perfData, config) {
           const target  = maxLoserFee * 1.2;
           const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 0.05, 10.0);
           const rounded = Number(newVal.toFixed(2));
-          if (rounded > current && !changes.minFeeTvlRatio) {
-            changes.minFeeTvlRatio = rounded;
-            rationale.minFeeTvlRatio = `Losers had fee_tvl<=${maxLoserFee.toFixed(2)}, winners higher — raised floor from ${current} → ${rounded}`;
+          if (rounded > current && !changes.minFeeActiveTvlRatio) {
+            changes.minFeeActiveTvlRatio = rounded;
+            rationale.minFeeActiveTvlRatio = `Losers had fee_tvl<=${maxLoserFee.toFixed(2)}, winners higher — raised floor from ${current} → ${rounded}`;
           }
         }
       }
@@ -353,6 +562,80 @@ export function evolveThresholds(perfData, config) {
     }
   }
 
+  // ── 4. minHolders ─────────────────────────────────────────────
+  // Raise holder floor if low-holder tokens consistently lost.
+  {
+    const loserHolders  = losers.map((p) => p.holder_count ?? p.holders).filter(isFiniteNum);
+    const winnerHolders = winners.map((p) => p.holder_count ?? p.holders).filter(isFiniteNum);
+    const current       = config.screening.minHolders;
+
+    if (winnerHolders.length >= 2 && loserHolders.length >= 1) {
+      const avgWinnerHolders = avg(winnerHolders);
+      const avgLoserHolders  = avg(loserHolders);
+      if (avgWinnerHolders - avgLoserHolders >= 100) {
+        const minWinnerHolder = Math.min(...winnerHolders);
+        const target = Math.max(minWinnerHolder - 50, current);
+        const newVal = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 100, 2000);
+        if (newVal > current) {
+          changes.minHolders = newVal;
+          rationale.minHolders = `Winner avg holders ${Math.round(avgWinnerHolders)} vs loser avg ${Math.round(avgLoserHolders)} — raised from ${current} → ${newVal}`;
+        }
+      }
+    }
+  }
+
+  // ── 5. minVolume ──────────────────────────────────────────────
+  // Raise volume floor if low-volume pools consistently lost.
+  {
+    const winnerVols = winners.map((p) => p.volume ?? p.volume_window).filter(isFiniteNum);
+    const loserVols  = losers.map((p) => p.volume ?? p.volume_window).filter(isFiniteNum);
+    const current    = config.screening.minVolume;
+
+    if (winnerVols.length >= 2) {
+      const minWinnerVol = Math.min(...winnerVols);
+      if (minWinnerVol > current * 1.2) {
+        const target  = minWinnerVol * 0.85;
+        const newVal  = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 100, 50000);
+        if (newVal > current) {
+          changes.minVolume = newVal;
+          rationale.minVolume = `Lowest winner volume=${Math.round(minWinnerVol)} — raised floor from ${current} → ${newVal}`;
+        }
+      }
+    }
+  }
+
+  // ── 6. outOfRangeWaitMinutes ──────────────────────────────────
+  // If OOR positions that waited longer eventually profited, loosen.
+  // If OOR positions always lost, tighten.
+  {
+    const oorPositions = recentData.filter(p => (p.minutes_held ?? 0) - (p.minutes_in_range ?? 0) > 5);
+    const oorWinners = oorPositions.filter(p => p.pnl_pct > 0);
+    const oorLosers  = oorPositions.filter(p => p.pnl_pct < -5);
+    const current    = config.management.outOfRangeWaitMinutes;
+
+    if (oorPositions.length >= 3) {
+      if (oorWinners.length >= 2) {
+        const oorWinnerHolds = oorWinners.map(p => p.minutes_held).filter(isFiniteNum);
+        if (oorWinnerHolds.length >= 2) {
+          const medianHold = percentile(oorWinnerHolds, 50);
+          const target = Math.min(medianHold * 0.8, 60);
+          const newVal = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 10, 60);
+          if (newVal > current) {
+            changes.outOfRangeWaitMinutes = newVal;
+            rationale.outOfRangeWaitMinutes = `${oorWinners.length} good OOR recoveries — relaxed from ${current} → ${newVal}m`;
+          }
+        }
+      } else if (oorLosers.length >= 3 && oorWinners.length === 0) {
+        const target = current * 0.8;
+        const newVal = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 10, 60);
+        if (newVal < current) {
+          changes.outOfRangeWaitMinutes = newVal;
+          rationale.outOfRangeWaitMinutes = `All ${oorLosers.length} OOR positions lost — tightened from ${current} → ${newVal}m`;
+        }
+      }
+    }
+  }
+
   if (Object.keys(changes).length === 0) return { changes: {}, rationale: {} };
 
   // ── Persist changes to user-config.json ───────────────────────
@@ -362,24 +645,37 @@ export function evolveThresholds(perfData, config) {
   }
 
   Object.assign(userConfig, changes);
+  // Migrate old key if present
+  if (userConfig.minFeeTvlRatio != null) {
+    if (userConfig.minFeeActiveTvlRatio == null) userConfig.minFeeActiveTvlRatio = userConfig.minFeeTvlRatio;
+    delete userConfig.minFeeTvlRatio;
+  }
   userConfig._lastEvolved = new Date().toISOString();
-  userConfig._positionsAtEvolution = perfData.length;
+  userConfig._positionsAtEvolution = recentData.length;
 
   fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
 
   // Apply to live config object immediately
   const s = config.screening;
-  if (changes.maxVolatility    != null) s.maxVolatility    = changes.maxVolatility;
-  if (changes.minFeeTvlRatio   != null) s.minFeeTvlRatio   = changes.minFeeTvlRatio;
-  if (changes.minOrganic       != null) s.minOrganic       = changes.minOrganic;
+  if (changes.maxVolatility         != null) s.maxVolatility         = changes.maxVolatility;
+  if (changes.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = changes.minFeeActiveTvlRatio;
+  if (changes.minOrganic            != null) s.minOrganic            = changes.minOrganic;
+  if (changes.minHolders            != null) s.minHolders            = changes.minHolders;
+  if (changes.minVolume             != null) s.minVolume             = changes.minVolume;
+  if (changes.outOfRangeWaitMinutes != null) config.management.outOfRangeWaitMinutes = changes.outOfRangeWaitMinutes;
 
   // Log a lesson summarizing the evolution
   const data = load();
+  const windowLabel = config.darwin?.windowDays ?? 60;
   data.lessons.push({
     id: Date.now(),
-    rule: `[AUTO-EVOLVED @ ${perfData.length} positions] ${Object.entries(changes).map(([k, v]) => `${k}=${v}`).join(", ")} — ${Object.values(rationale).join("; ")}`,
+    rule: `[AUTO-EVOLVED @ ${recentData.length} positions (${windowLabel}d window)] ${Object.entries(changes).map(([k, v]) => `${k}=${v}`).join(", ")} — ${Object.values(rationale).join("; ")}`,
+    type: "evolved",
     tags: ["evolution", "config_change"],
     outcome: "manual",
+    pattern: null,
+    score: 1.0,
+    expires_at: computeExpiresAt("evolved", config.lessons),
     created_at: new Date().toISOString(),
   });
   save(data);
@@ -428,20 +724,26 @@ function nudge(current, target, maxChange) {
  * @param {boolean}  opts.pinned - Always inject regardless of cap
  * @param {string}   opts.role   - "SCREENER" | "MANAGER" | "GENERAL" | null (all roles)
  */
-export function addLesson(rule, tags = [], { pinned = false, role = null } = {}) {
+export async function addLesson(rule, tags = [], { pinned = false, role = null } = {}) {
   const safeRule = sanitizeLessonText(rule);
   if (!safeRule) return;
+  const { config } = await import("./config.js");
   const data = load();
   data.lessons.push({
     id: Date.now(),
     rule: safeRule,
+    type: "specific",
     tags,
     outcome: "manual",
     pinned: !!pinned,
     role: role || null,
+    pattern: null,
+    score: 1.0,
+    expires_at: pinned ? null : computeExpiresAt("specific", config.lessons),
     created_at: new Date().toISOString(),
   });
   save(data);
+  pruneLessons(config.lessons);
   log("lessons", `Manual lesson added${pinned ? " [PINNED]" : ""}${role ? ` [${role}]` : ""}: ${safeRule}`);
 }
 
@@ -461,11 +763,16 @@ export function pinLesson(id) {
 /**
  * Unpin a lesson by ID.
  */
-export function unpinLesson(id) {
+export async function unpinLesson(id) {
   const data = load();
   const lesson = data.lessons.find((l) => l.id === id);
   if (!lesson) return { found: false };
   lesson.pinned = false;
+  // Set a fresh TTL so unpinned lessons don't live forever
+  if (!lesson.expires_at) {
+    const { config } = await import("./config.js");
+    lesson.expires_at = computeExpiresAt(lesson.type || "specific", config.lessons);
+  }
   save(data);
   return { found: true, pinned: false, id, rule: lesson.rule };
 }
@@ -567,7 +874,11 @@ export function getLessonsForPrompt(opts = {}) {
   const { agentType = "GENERAL", maxLessons } = opts;
 
   const data = load();
-  if (data.lessons.length === 0) return null;
+  const now = Date.now();
+  const activeLessons = data.lessons.filter(l =>
+    l.pinned || !l.expires_at || new Date(l.expires_at).getTime() > now
+  );
+  if (activeLessons.length === 0) return null;
 
   // Smaller caps for automated cycles — they don't need the full lesson history
   const isAutoCycle = agentType === "SCREENER" || agentType === "MANAGER";
@@ -575,21 +886,20 @@ export function getLessonsForPrompt(opts = {}) {
   const ROLE_CAP    = isAutoCycle ? 6  : 15;
   const RECENT_CAP  = maxLessons ?? (isAutoCycle ? 10 : 35);
 
-  const outcomePriority = { bad: 0, poor: 1, failed: 1, good: 2, worked: 2, manual: 1, neutral: 3, evolution: 2 };
-  const byPriority = (a, b) => (outcomePriority[a.outcome] ?? 3) - (outcomePriority[b.outcome] ?? 3);
+  const byScore = (a, b) => computeScore(b) - computeScore(a);
 
   // ── Tier 1: Pinned ──────────────────────────────────────────────
   // Respect role even for pinned lessons — a pinned SCREENER lesson shouldn't pollute MANAGER
-  const pinned = data.lessons
+  const pinned = activeLessons
     .filter((l) => l.pinned && (!l.role || l.role === agentType || agentType === "GENERAL"))
-    .sort(byPriority)
+    .sort(byScore)
     .slice(0, PINNED_CAP);
 
   const usedIds = new Set(pinned.map((l) => l.id));
 
   // ── Tier 2: Role-matched ────────────────────────────────────────
   const roleTags = ROLE_TAGS[agentType] || [];
-  const roleMatched = data.lessons
+  const roleMatched = activeLessons
     .filter((l) => {
       if (usedIds.has(l.id)) return false;
       // Include if: lesson has no role restriction OR matches this role
@@ -598,7 +908,7 @@ export function getLessonsForPrompt(opts = {}) {
       const tagOk  = roleTags.length === 0 || !l.tags?.length || l.tags.some((t) => roleTags.includes(t));
       return roleOk && tagOk;
     })
-    .sort(byPriority)
+    .sort(byScore)
     .slice(0, ROLE_CAP);
 
   roleMatched.forEach((l) => usedIds.add(l.id));
@@ -606,7 +916,7 @@ export function getLessonsForPrompt(opts = {}) {
   // ── Tier 3: Recent fill ─────────────────────────────────────────
   const remainingBudget = RECENT_CAP - pinned.length - roleMatched.length;
   const recent = remainingBudget > 0
-    ? data.lessons
+    ? activeLessons
         .filter((l) => !usedIds.has(l.id))
         .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""))
         .slice(0, remainingBudget)
@@ -697,4 +1007,15 @@ export function getPerformanceSummary() {
     win_rate_pct: Math.round((wins / p.length) * 100),
     total_lessons: data.lessons.length,
   };
+}
+
+/**
+ * Get active local lesson patterns for hive contradiction filtering.
+ */
+export function getActivePatterns() {
+  const data = load();
+  const now = Date.now();
+  return data.lessons
+    .filter(l => l.pattern?.outcome && (l.pinned || !l.expires_at || new Date(l.expires_at).getTime() > now))
+    .map(l => l.pattern);
 }
