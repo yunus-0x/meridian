@@ -20,8 +20,9 @@ if (u.dryRun !== undefined) process.env.DRY_RUN ||= String(u.dryRun);
 export const config = {
   // ─── Risk Limits ─────────────────────────
   risk: {
-    maxPositions:    u.maxPositions    ?? 3,
-    maxDeployAmount: u.maxDeployAmount ?? 50,
+    maxPositions:       u.maxPositions       ?? 3,
+    maxDeployAmount:    u.maxDeployAmount    ?? 50,
+    maxPoolExposurePct: u.maxPoolExposurePct ?? 0.02,  // max deploy = X% of pool TVL
   },
 
   // ─── Pool Screening Thresholds ───────────
@@ -146,14 +147,21 @@ export const config = {
  *   3.0 SOL wallet → 0.98 SOL deploy
  *   4.0 SOL wallet → 1.33 SOL deploy
  */
-export function computeDeployAmount(walletSol) {
+export function computeDeployAmount(walletSol, poolTvl = null) {
   const reserve  = config.management.gasReserve      ?? 0.2;
   const pct      = config.management.positionSizePct ?? 0.35;
   const floor    = config.management.deployAmountSol;
   const ceil     = config.risk.maxDeployAmount;
   const deployable = Math.max(0, walletSol - reserve);
-  const dynamic    = deployable * pct;
-  const result     = Math.min(ceil, Math.max(floor, dynamic));
+  let dynamic      = deployable * pct;
+
+  // Cap at maxPoolExposurePct of pool TVL to avoid whale risk
+  if (poolTvl != null && poolTvl > 0) {
+    const maxByTvl = poolTvl * config.risk.maxPoolExposurePct;
+    dynamic = Math.min(dynamic, maxByTvl);
+  }
+
+  const result = Math.min(ceil, Math.max(floor, dynamic));
   return parseFloat(result.toFixed(2));
 }
 

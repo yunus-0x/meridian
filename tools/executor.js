@@ -170,6 +170,7 @@ const toolMap = {
       // risk
       maxPositions: ["risk", "maxPositions"],
       maxDeployAmount: ["risk", "maxDeployAmount"],
+      maxPoolExposurePct: ["risk", "maxPoolExposurePct"],
       // schedule
       managementIntervalMin: ["schedule", "managementIntervalMin"],
       screeningIntervalMin: ["schedule", "screeningIntervalMin"],
@@ -435,6 +436,16 @@ async function runSafetyChecks(name, args) {
           pass: false,
           reason: `SOL amount ${amountY} exceeds maximum allowed per position (${config.risk.maxDeployAmount}).`,
         };
+      }
+
+      // Hard cap: max X% of pool TVL
+      if (args.active_tvl != null && args.active_tvl > 0) {
+        const maxByTvl = args.active_tvl * config.risk.maxPoolExposurePct;
+        if (amountY > maxByTvl) {
+          args.amount_y = parseFloat(maxByTvl.toFixed(2));
+          args.amount_sol = args.amount_y;
+          log("safety", `TVL cap: reduced deploy from ${amountY} to ${args.amount_y} SOL (${(config.risk.maxPoolExposurePct * 100).toFixed(0)}% of ${args.active_tvl} TVL)`);
+        }
       }
 
       // Check SOL balance
