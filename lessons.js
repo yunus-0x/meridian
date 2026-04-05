@@ -294,7 +294,7 @@ export function evolveThresholds(perfData, config) {
   {
     const winnerFees = winners.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
     const loserFees  = losers.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
-    const current    = config.screening.minFeeTvlRatio;
+    const current    = config.screening.minFeeActiveTvlRatio;
 
     if (winnerFees.length >= 2) {
       // Minimum fee/TVL among winners — we know pools below this don't work for us
@@ -304,8 +304,8 @@ export function evolveThresholds(perfData, config) {
         const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 0.05, 10.0);
         const rounded = Number(newVal.toFixed(2));
         if (rounded > current) {
-          changes.minFeeTvlRatio = rounded;
-          rationale.minFeeTvlRatio = `Lowest winner fee_tvl=${minWinnerFee.toFixed(2)} — raised floor from ${current} → ${rounded}`;
+          changes.minFeeActiveTvlRatio = rounded;
+          rationale.minFeeActiveTvlRatio = `Lowest winner fee_tvl=${minWinnerFee.toFixed(2)} — raised floor from ${current} → ${rounded}`;
         }
       }
     }
@@ -320,9 +320,9 @@ export function evolveThresholds(perfData, config) {
           const target  = maxLoserFee * 1.2;
           const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 0.05, 10.0);
           const rounded = Number(newVal.toFixed(2));
-          if (rounded > current && !changes.minFeeTvlRatio) {
-            changes.minFeeTvlRatio = rounded;
-            rationale.minFeeTvlRatio = `Losers had fee_tvl<=${maxLoserFee.toFixed(2)}, winners higher — raised floor from ${current} → ${rounded}`;
+          if (rounded > current && !changes.minFeeActiveTvlRatio) {
+            changes.minFeeActiveTvlRatio = rounded;
+            rationale.minFeeActiveTvlRatio = `Losers had fee_tvl<=${maxLoserFee.toFixed(2)}, winners higher — raised floor from ${current} → ${rounded}`;
           }
         }
       }
@@ -362,6 +362,11 @@ export function evolveThresholds(perfData, config) {
   }
 
   Object.assign(userConfig, changes);
+  // Migrate old key if present
+  if (userConfig.minFeeTvlRatio != null) {
+    if (userConfig.minFeeActiveTvlRatio == null) userConfig.minFeeActiveTvlRatio = userConfig.minFeeTvlRatio;
+    delete userConfig.minFeeTvlRatio;
+  }
   userConfig._lastEvolved = new Date().toISOString();
   userConfig._positionsAtEvolution = perfData.length;
 
@@ -370,7 +375,7 @@ export function evolveThresholds(perfData, config) {
   // Apply to live config object immediately
   const s = config.screening;
   if (changes.maxVolatility    != null) s.maxVolatility    = changes.maxVolatility;
-  if (changes.minFeeTvlRatio   != null) s.minFeeTvlRatio   = changes.minFeeTvlRatio;
+  if (changes.minFeeActiveTvlRatio   != null) s.minFeeActiveTvlRatio = changes.minFeeActiveTvlRatio;
   if (changes.minOrganic       != null) s.minOrganic       = changes.minOrganic;
 
   // Log a lesson summarizing the evolution
