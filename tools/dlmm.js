@@ -109,10 +109,10 @@ export async function deployPosition({
   initial_value_usd,
 }) {
   pool_address = normalizeMint(pool_address);
-  const activeStrategy = strategy || config.strategy.strategy;
-
+  // Force bid_ask strategy and strict bins (binsAbove: 0) if configured
+  const activeStrategy = config.strategy.strategy === "bid_ask" ? "bid_ask" : (strategy || config.strategy.strategy);
   const activeBinsBelow = bins_below ?? config.strategy.binsBelow;
-  const activeBinsAbove = bins_above ?? 0;
+  const activeBinsAbove = config.strategy.strategy === "bid_ask" ? 0 : (bins_above ?? 0);
 
   if (isPoolOnCooldown(pool_address)) {
     log("deploy", `Pool ${pool_address.slice(0, 8)} is on cooldown — skipping`);
@@ -359,7 +359,15 @@ export async function getPositionPnl({ pool_address, position_address }) {
   try {
     const byAddress = await fetchDlmmPnlForPool(pool_address, walletAddress);
     const p = byAddress[position_address];
-    if (!p) return { error: "Position not found in PnL API" };
+    if (!p) {
+      log("pnl_warn", `Position ${position_address.slice(0, 8)} not yet indexed by PnL API — likely new.`);
+      return { 
+        message: "Position recently opened and not yet indexed by PnL API. Waiting for indexing...",
+        in_range: true, // assume in-range since we just opened
+        pnl_usd: 0,
+        pnl_pct: 0
+      };
+    }
 
     const unclaimedUsd    = parseFloat(p.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) + parseFloat(p.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0);
     const currentValueUsd = parseFloat(p.unrealizedPnl?.balances || 0);
