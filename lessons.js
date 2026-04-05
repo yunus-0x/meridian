@@ -1003,3 +1003,14 @@ export function getPerformanceSummary() {
     total_lessons: data.lessons.length,
   };
 }
+
+/**
+ * Get active local lesson patterns for hive contradiction filtering.
+ */
+export function getActivePatterns() {
+  const data = load();
+  const now = Date.now();
+  return data.lessons
+    .filter(l => l.pattern?.outcome && (l.pinned || !l.expires_at || new Date(l.expires_at).getTime() > now))
+    .map(l => l.pattern);
+}
