@@ -17,6 +17,7 @@ import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memor
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 import { queryPoolConsensus, queryLessonConsensus } from "./hive-mind.js";
+import { getWeightsSummary } from "./signal-weights.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
@@ -483,6 +484,15 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const hiveLessons = await queryLessonConsensus().catch(() => null);
     const hiveLessonBlock = formatHiveLessons(hiveLessons);
 
+    // Load signal weights (learned from past positions via Darwin system)
+    let signalWeightsBlock = "";
+    try {
+      const summary = getWeightsSummary();
+      if (summary && !summary.includes("not been recalculated yet")) {
+        signalWeightsBlock = `\n${summary}\n`;
+      }
+    } catch { /* signal weights are best-effort */ }
+
     // Load active strategy
     const activeStrategy = getActiveStrategy();
     const strategyBlock = activeStrategy
@@ -591,7 +601,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
 SCREENING CYCLE
 ${strategyBlock}
 Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
-
+${signalWeightsBlock}
 PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
 
