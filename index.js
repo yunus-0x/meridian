@@ -13,7 +13,7 @@ import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isE
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
-import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
+import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolMemoryStats } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 
@@ -448,12 +448,13 @@ export async function runScreeningCycle({ silent = false } = {}) {
         n: narrative.status === "fulfilled" ? narrative.value : null,
         ti: tokenInfo.status === "fulfilled" ? tokenInfo.value?.results?.[0] : null,
         mem: recallForPool(pool.pool),
+        memStats: getPoolMemoryStats(pool.pool),
       });
       await new Promise(r => setTimeout(r, 150)); // avoid 429s
     }
 
-    // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
-    const passing = allCandidates.filter(({ pool, ti }) => {
+    // Hard filters after token recon — block launchpads, bots, and 0% win rate pools
+    const passing = allCandidates.filter(({ pool, ti, memStats }) => {
       const launchpad = ti?.launchpad ?? null;
       if (launchpad && config.screening.blockedLaunchpads.includes(launchpad)) {
         log("screening", `Skipping ${pool.name} — blocked launchpad (${launchpad})`);
@@ -463,6 +464,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const maxBotHoldersPct = config.screening.maxBotHoldersPct;
       if (botPct != null && maxBotHoldersPct != null && botPct > maxBotHoldersPct) {
         log("screening", `Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > ${maxBotHoldersPct}%`);
+        return false;
+      }
+      // Block pools with 0% win rate across 3+ deploys
+      if (memStats && memStats.total_deploys >= 3 && memStats.win_rate === 0) {
+        log("screening", `Pool-memory filter: dropped ${pool.name} — 0% win rate over ${memStats.total_deploys} deploys`);
         return false;
       }
       return true;
@@ -479,7 +485,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     );
 
     // Build compact candidate blocks
-    const candidateBlocks = passing.map(({ pool, sw, n, ti, mem }, i) => {
+    const candidateBlocks = passing.map(({ pool, sw, n, ti, mem, memStats }, i) => {
       const botPct = ti?.audit?.bot_holders_pct ?? "?";
       const top10Pct = ti?.audit?.top_holders_pct ?? "?";
       const feesSol = ti?.global_fees_sol ?? "?";
@@ -519,7 +525,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
         activeBin != null ? `  active_bin: ${activeBin}` : null,
         priceChange != null ? `  1h: price${priceChange >= 0 ? "+" : ""}${priceChange}%, net_buyers=${netBuyers ?? "?"}` : null,
         n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
-        mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
+        memStats ? `  pool_history: ${memStats.total_deploys} deploys, ${memStats.win_rate}% win, avg ${memStats.avg_pnl_pct}% PnL, last: ${memStats.last_outcome}${memStats.last_closed_hours_ago != null ? ` ${memStats.last_closed_hours_ago}h ago` : ""}${memStats.pnl_drift != null ? `, trend: ${memStats.pnl_drift >= 0 ? "+" : ""}${memStats.pnl_drift}%` : ""}${memStats.oor_ratio != null && memStats.oor_ratio > 0.3 ? ` ⚠️ OOR ${Math.round(memStats.oor_ratio * 100)}%` : ""}` : null,
+        !memStats && mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
       ].filter(Boolean).join("\n");
 
       return block;
