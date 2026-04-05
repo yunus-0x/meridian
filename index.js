@@ -382,26 +382,44 @@ After executing, write a brief one-line result per position.
 
 const HIVE_MIN_AGREEMENT = 10;
 const HIVE_MAX_LESSONS = 5;
+const HIVE_MIN_CREDIBILITY = 0.55;
+const HIVE_MIN_SCORE = 5;
 const HIVE_EXCLUDED_TAGS = new Set(["self_tune", "config_change"]);
 
 function formatHiveLessons(lessons) {
   if (!Array.isArray(lessons) || lessons.length === 0) return "";
   const filtered = lessons
     .filter(l => l.agreement_count >= HIVE_MIN_AGREEMENT)
+    .filter(l => (l.avg_credibility ?? 0) >= HIVE_MIN_CREDIBILITY)
+    .filter(l => (l.score ?? 0) >= HIVE_MIN_SCORE)
     .filter(l => !l.tags?.some(t => HIVE_EXCLUDED_TAGS.has(t)))
     .slice(0, HIVE_MAX_LESSONS);
   if (filtered.length === 0) return "";
   const lines = filtered.map(l => {
     const icon = l.outcome === "good" || l.outcome === "manual" ? "+" : "-";
-    return `${icon} ${l.representative_rule} (${l.agreement_count} agents)`;
+    return `${icon} ${l.representative_rule} (${l.agreement_count} agents, cred ${l.avg_credibility?.toFixed(2) ?? "?"})`;
   });
   return `HIVE MIND (supplementary — your own analysis takes priority):\n${lines.join("\n")}`;
 }
 
 const HIVE_MIN_AGENTS = 3;
+const HIVE_MAX_RECENCY_HOURS = 24;
 
 function formatHivePoolLine(hive) {
   if (!hive || (hive.unique_agents ?? 0) < HIVE_MIN_AGENTS) return null;
+
+  // Layer 3: Skip stale data (> 24h for memecoins)
+  if (hive.last_deploy) {
+    const hoursAgo = (Date.now() - new Date(hive.last_deploy).getTime()) / 3600000;
+    if (hoursAgo > HIVE_MAX_RECENCY_HOURS) return null;
+  }
+
+  // Layer 4: Detect contradictions (PREFER + AVOID/FAILED for same pool)
+  const topLessons = hive.top_lessons || [];
+  const hasPrefer = topLessons.some(l => /^PREFER/i.test(l));
+  const hasAvoid = topLessons.some(l => /^(?:AVOID|FAILED)/i.test(l));
+  const contradicted = hasPrefer && hasAvoid;
+
   const recency = hive.last_deploy
     ? `${Math.round((Date.now() - new Date(hive.last_deploy).getTime()) / 3600000)}h ago`
     : "unknown";
@@ -409,10 +427,11 @@ function formatHivePoolLine(hive) {
     ? `${hive.weighted_avg_pnl >= 0 ? "+" : ""}${hive.weighted_avg_pnl.toFixed(1)}%`
     : "N/A";
   const warn = (hive.weighted_win_rate ?? 0) < 50 ? " !!!" : "";
-  const topLesson = hive.top_lessons?.[0]
-    ? ` | "${hive.top_lessons[0].slice(0, 120)}${hive.top_lessons[0].length > 120 ? "..." : ""}"`
+  const contradictNote = contradicted ? " | CONFLICTING (both PREFER and AVOID signals)" : "";
+  const topLesson = !contradicted && topLessons[0]
+    ? ` | "${topLessons[0].slice(0, 120)}${topLessons[0].length > 120 ? "..." : ""}"`
     : "";
-  return `  hive: ${hive.unique_agents} agents, ${hive.weighted_win_rate ?? "?"}% win, ${pnlStr} avg, last ${recency}, best_strat=${hive.top_strategy ?? "?"}${warn}${topLesson}`;
+  return `  hive: ${hive.unique_agents} agents, ${hive.weighted_win_rate ?? "?"}% win, ${pnlStr} avg, last ${recency}, best_strat=${hive.top_strategy ?? "?"}${warn}${contradictNote}${topLesson}`;
 }
 
 export async function runScreeningCycle({ silent = false } = {}) {
