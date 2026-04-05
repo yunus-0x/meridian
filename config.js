@@ -46,6 +46,7 @@ export const config = {
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
     athFilterPct:       u.athFilterPct       ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
+    maxVolatility:      u.maxVolatility      ?? 10,   // max pool volatility — evolved by lessons.js
   },
 
   // ─── Position Management ────────────────
@@ -95,6 +96,18 @@ export const config = {
     managementModel: u.managementModel ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
     screeningModel:  u.screeningModel  ?? process.env.LLM_MODEL ?? "openrouter/hunter-alpha",
     generalModel:    u.generalModel    ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
+  },
+
+  // ─── Darwin Signal Weights ──────────────
+  darwin: {
+    enabled:      u.darwinEnabled      ?? false,
+    windowDays:   u.darwinWindowDays   ?? 60,
+    recalcEvery:  u.darwinRecalcEvery  ?? 5,
+    boostFactor:  u.darwinBoost        ?? 1.05,
+    decayFactor:  u.darwinDecay        ?? 0.95,
+    weightFloor:  u.darwinFloor        ?? 0.3,
+    weightCeiling: u.darwinCeiling     ?? 2.5,
+    minSamples:   u.darwinMinSamples   ?? 10,
   },
 
   // ─── Common Token Mints ────────────────
@@ -155,5 +168,6 @@ export function reloadScreeningThresholds() {
     if (fresh.athFilterPct      !== undefined) s.athFilterPct     = fresh.athFilterPct;
     if (fresh.maxBundlePct      != null) s.maxBundlePct     = fresh.maxBundlePct;
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
+    if (fresh.maxVolatility     != null) s.maxVolatility    = fresh.maxVolatility;
   } catch { /* ignore */ }
 }
