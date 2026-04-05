@@ -284,6 +284,48 @@ export function recordPositionSnapshot(poolAddress, snapshot) {
 }
 
 /**
+ * Get structured pool memory data for screening hard filters and candidate blocks.
+ * Returns an object (not free text) for programmatic use.
+ */
+export function getPoolMemoryStats(poolAddress) {
+  if (!poolAddress) return null;
+  const db = load();
+  const entry = db[poolAddress];
+  if (!entry || !entry.total_deploys) return null;
+
+  const lastDeploy = entry.deploys?.[entry.deploys.length - 1];
+  const lastClosedAt = lastDeploy?.closed_at ?? null;
+  const hoursAgo = lastClosedAt
+    ? Math.round((Date.now() - new Date(lastClosedAt).getTime()) / 3600000)
+    : null;
+
+  // Snapshot trend (last 6 cycles)
+  const snaps = (entry.snapshots || []).slice(-6);
+  let pnlDrift = null;
+  let oorRatio = null;
+  if (snaps.length >= 2) {
+    const first = snaps[0];
+    const last = snaps[snaps.length - 1];
+    if (last.pnl_pct != null && first.pnl_pct != null) {
+      pnlDrift = Number((last.pnl_pct - first.pnl_pct).toFixed(2));
+    }
+    oorRatio = snaps.filter(s => s.in_range === false).length / snaps.length;
+  }
+
+  return {
+    total_deploys: entry.total_deploys,
+    win_rate: entry.win_rate,
+    adjusted_win_rate: entry.adjusted_win_rate,
+    avg_pnl_pct: entry.avg_pnl_pct,
+    last_outcome: entry.last_outcome,
+    last_closed_hours_ago: hoursAgo,
+    pnl_drift: pnlDrift,
+    oor_ratio: oorRatio,
+    on_cooldown: !!(entry.cooldown_until && new Date(entry.cooldown_until) > new Date()),
+  };
+}
+
+/**
  * Recall focused context for a specific pool — used before screening or management.
  * Returns a short formatted string ready for injection into the agent goal.
  */
