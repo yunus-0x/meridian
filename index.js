@@ -23,7 +23,9 @@ log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
 log("startup", `Model: ${process.env.LLM_MODEL || "hermes-3-405b"}`);
 
-// OKX API health check
+// ─── Startup health checks (fire-and-forget) ───
+
+// OKX API
 import { healthCheck as okxHealthCheck } from "./tools/okx.js";
 okxHealthCheck().then((r) => {
   if (r.ok && r.authError) {
@@ -34,6 +36,77 @@ okxHealthCheck().then((r) => {
     log("startup", `OKX API: FAILED — ${r.error} (auth: ${r.auth ? "yes" : "no"})`);
   }
 }).catch(() => {});
+
+// Jupiter API
+(async () => {
+  const start = Date.now();
+  try {
+    const res = await fetch("https://api.jup.ag/price/v3?ids=So11111111111111111111111111111111111111112", {
+      headers: { "x-api-key": "b15d42e9-e0e4-4f90-a424-ae41ceeaa382" },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    log("startup", `Jupiter: OK (${Date.now() - start}ms)`);
+  } catch (e) {
+    log("startup", `Jupiter: FAILED — ${e.message} (${Date.now() - start}ms)`);
+  }
+})();
+
+// LLM (OpenRouter or compatible)
+(async () => {
+  const start = Date.now();
+  const baseURL = process.env.LLM_BASE_URL || "https://openrouter.ai/api/v1";
+  const apiKey = process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY;
+  try {
+    const res = await fetch(`${baseURL}/models`, {
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    log("startup", `LLM: OK (${Date.now() - start}ms, ${baseURL})`);
+  } catch (e) {
+    log("startup", `LLM: FAILED — ${e.message} (${Date.now() - start}ms)`);
+  }
+})();
+
+// Helius (optional)
+if (process.env.HELIUS_API_KEY) {
+  (async () => {
+    const start = Date.now();
+    try {
+      const res = await fetch(`https://api.helius.xyz/v0/addresses/?api-key=${process.env.HELIUS_API_KEY}`, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      // Even a 400 means the API is reachable and key is valid-ish
+      if (res.status === 401 || res.status === 403) throw new Error(`auth failed (${res.status})`);
+      log("startup", `Helius: OK (${Date.now() - start}ms)`);
+    } catch (e) {
+      log("startup", `Helius: FAILED — ${e.message} (${Date.now() - start}ms)`);
+    }
+  })();
+} else {
+  log("startup", "Helius: SKIPPED (not configured)");
+}
+
+// Hive Mind (optional)
+import { isEnabled as hiveMindEnabled, getHivePulse } from "./hive-mind.js";
+if (hiveMindEnabled()) {
+  (async () => {
+    const start = Date.now();
+    try {
+      const pulse = await getHivePulse();
+      if (pulse) {
+        log("startup", `Hive Mind: OK (${Date.now() - start}ms, ${pulse.active_agents || "?"} agents)`);
+      } else {
+        throw new Error("no response");
+      }
+    } catch (e) {
+      log("startup", `Hive Mind: FAILED — ${e.message} (${Date.now() - start}ms)`);
+    }
+  })();
+} else {
+  log("startup", "Hive Mind: SKIPPED (not configured)");
+}
 
 const TP_PCT = config.management.takeProfitFeePct;
 const DEPLOY = config.management.deployAmountSol;
