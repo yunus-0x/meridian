@@ -164,8 +164,6 @@ export async function recordPerformance(perf) {
     }
   }
 
-  // Fire-and-forget sync to hive mind (if enabled)
-  import("./hive-mind.js").then(m => m.syncToHive()).catch(() => {});
 }
 
 /**

@@ -26,11 +26,13 @@ export const config = {
 
   // ─── Pool Screening Thresholds ───────────
   screening: {
+    excludeHighSupplyConcentration: u.excludeHighSupplyConcentration ?? true,
     minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
     minTvl:            u.minTvl            ?? 10_000,
-    maxTvl:            u.maxTvl            ?? 150_000,
+    maxTvl:            u.maxTvl !== undefined ? u.maxTvl : 150_000,
     minVolume:         u.minVolume         ?? 500,
     minOrganic:        u.minOrganic        ?? 60,
+    minQuoteOrganic:   u.minQuoteOrganic   ?? 60,
     minHolders:        u.minHolders        ?? 500,
     minMcap:           u.minMcap           ?? 150_000,
     maxMcap:           u.maxMcap           ?? 10_000_000,
@@ -39,9 +41,18 @@ export const config = {
     timeframe:         u.timeframe         ?? "5m",
     category:          u.category          ?? "trending",
     minTokenFeesSol:   u.minTokenFeesSol   ?? 30,  // global fees paid (priority+jito tips). below = bundled/scam
+<<<<<<< HEAD
     maxBundlePct:      u.maxBundlePct      ?? 30,  // max bundle holding % (OKX advanced-info)
     maxBotHoldersPct:  u.maxBotHoldersPct  ?? 30,  // max bot holder addresses % (Jupiter audit)
     maxTop10Pct:       u.maxTop10Pct       ?? 60,  // max top 10 holders concentration
+=======
+    avoidPvpSymbols:   u.avoidPvpSymbols   ?? true, // avoid exact-symbol rivals with real active pools
+    blockPvpSymbols:   u.blockPvpSymbols   ?? false, // hard-filter PVP rivals before the LLM sees them
+    maxBundlePct:      u.maxBundlePct      ?? 30,  // max bundle holding % (OKX advanced-info)
+    maxBotHoldersPct:  u.maxBotHoldersPct  ?? 30,  // max bot holder addresses % (Jupiter audit)
+    maxTop10Pct:       u.maxTop10Pct       ?? 60,  // max top 10 holders concentration
+    allowedLaunchpads: u.allowedLaunchpads ?? [],  // allow-list launchpads, [] = no allow-list
+>>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
     blockedLaunchpads:  u.blockedLaunchpads  ?? [],  // e.g. ["letsbonk.fun", "pump.fun"]
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
@@ -97,6 +108,18 @@ export const config = {
     generalModel:    u.generalModel    ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
   },
 
+  // ─── Darwinian Signal Weighting ───────
+  darwin: {
+    enabled:        u.darwinEnabled     ?? true,
+    windowDays:     u.darwinWindowDays  ?? 60,
+    recalcEvery:    u.darwinRecalcEvery ?? 5,    // recalc every N closes
+    boostFactor:    u.darwinBoost       ?? 1.05,
+    decayFactor:    u.darwinDecay       ?? 0.95,
+    weightFloor:    u.darwinFloor       ?? 0.3,
+    weightCeiling:  u.darwinCeiling     ?? 2.5,
+    minSamples:     u.darwinMinSamples  ?? 10,
+  },
+
   // ─── Common Token Mints ────────────────
   tokens: {
     SOL:  "So11111111111111111111111111111111111111112",
@@ -139,12 +162,14 @@ export function reloadScreeningThresholds() {
     const fresh = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"));
     const s = config.screening;
     if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
+    if (fresh.excludeHighSupplyConcentration !== undefined) s.excludeHighSupplyConcentration = fresh.excludeHighSupplyConcentration;
     if (fresh.minOrganic     != null) s.minOrganic     = fresh.minOrganic;
+    if (fresh.minQuoteOrganic != null) s.minQuoteOrganic = fresh.minQuoteOrganic;
     if (fresh.minHolders     != null) s.minHolders     = fresh.minHolders;
     if (fresh.minMcap        != null) s.minMcap        = fresh.minMcap;
     if (fresh.maxMcap        != null) s.maxMcap        = fresh.maxMcap;
     if (fresh.minTvl         != null) s.minTvl         = fresh.minTvl;
-    if (fresh.maxTvl         != null) s.maxTvl         = fresh.maxTvl;
+    if (fresh.maxTvl         !== undefined) s.maxTvl   = fresh.maxTvl;
     if (fresh.minVolume      != null) s.minVolume      = fresh.minVolume;
     if (fresh.minBinStep     != null) s.minBinStep     = fresh.minBinStep;
     if (fresh.maxBinStep     != null) s.maxBinStep     = fresh.maxBinStep;
@@ -154,6 +179,14 @@ export function reloadScreeningThresholds() {
     if (fresh.maxTokenAgeHours  !== undefined) s.maxTokenAgeHours = fresh.maxTokenAgeHours;
     if (fresh.athFilterPct      !== undefined) s.athFilterPct     = fresh.athFilterPct;
     if (fresh.maxBundlePct      != null) s.maxBundlePct     = fresh.maxBundlePct;
+<<<<<<< HEAD
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
+=======
+    if (fresh.avoidPvpSymbols   !== undefined) s.avoidPvpSymbols = fresh.avoidPvpSymbols;
+    if (fresh.blockPvpSymbols   !== undefined) s.blockPvpSymbols = fresh.blockPvpSymbols;
+    if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
+    if (fresh.allowedLaunchpads !== undefined) s.allowedLaunchpads = fresh.allowedLaunchpads;
+    if (fresh.blockedLaunchpads !== undefined) s.blockedLaunchpads = fresh.blockedLaunchpads;
+>>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
   } catch { /* ignore */ }
 }

@@ -119,6 +119,11 @@ export async function deployPosition({
     return { success: false, error: "Pool on cooldown — was recently closed with a cooldown reason. Try a different pool." };
   }
 
+  if (isPoolOnCooldown(pool_address)) {
+    log("deploy", `Pool ${pool_address.slice(0, 8)} is on cooldown — skipping`);
+    return { success: false, error: "Pool on cooldown — was recently closed with a cooldown reason. Try a different pool." };
+  }
+
   if (process.env.DRY_RUN === "true") {
     const totalBins = activeBinsBelow + activeBinsAbove;
     return {
@@ -420,6 +425,7 @@ function deriveOpenPnlPct(binData, solMode = false) {
   return (pnl / deposit) * 100;
 }
 
+<<<<<<< HEAD
 function deriveLpAgentPnlPct(lpData, solMode = false) {
   if (!lpData) return null;
   const deposit = solMode ? safeNum(lpData.inputNative) : safeNum(lpData.inputValue);
@@ -431,6 +437,8 @@ function deriveLpAgentPnlPct(lpData, solMode = false) {
   return (pnl / deposit) * 100;
 }
 
+=======
+>>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
 // ─── Get My Positions ──────────────────────────────────────────
 export async function getMyPositions({ force = false, silent = false } = {}) {
   if (!force && _positionsCache && Date.now() - _positionsCacheAt < POSITIONS_CACHE_TTL) {
@@ -446,8 +454,12 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
   }
 
   _positionsInflight = (async () => { try {
+<<<<<<< HEAD
     // Portfolio API discovers open pools/positions for this wallet.
     // Detailed range data stays on Meteora PnL API; value/PnL can be overridden by LPAgent below.
+=======
+    // Single portfolio API call — returns all positions with full PnL data
+>>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
     if (!silent) log("positions", "Fetching portfolio via Meteora portfolio API...");
     const portfolioUrl = `https://dlmm.datapi.meteora.ag/portfolio/open?user=${walletAddress}`;
     const res = await fetch(portfolioUrl);
@@ -462,7 +474,10 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
     const binDataByPool = {};
     const pnlMaps = await Promise.all(pools.map(pool => fetchDlmmPnlForPool(pool.poolAddress, walletAddress)));
     pools.forEach((pool, i) => { binDataByPool[pool.poolAddress] = pnlMaps[i]; });
+<<<<<<< HEAD
     const lpAgentByPosition = await fetchLpAgentOpenPositions(walletAddress);
+=======
+>>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
 
     const positions = [];
     for (const pool of pools) {
@@ -481,11 +496,15 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
         const lowerBin  = binData?.lowerBinId      ?? tracked?.bin_range?.min ?? null;
         const upperBin  = binData?.upperBinId      ?? tracked?.bin_range?.max ?? null;
         const activeBin = binData?.poolActiveBinId ?? tracked?.bin_range?.active ?? null;
+<<<<<<< HEAD
         const lpData = lpAgentByPosition[positionAddress] || null;
+=======
+>>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
 
         const ageFromState = tracked?.deployed_at
           ? Math.floor((Date.now() - new Date(tracked.deployed_at).getTime()) / 60000)
           : null;
+<<<<<<< HEAD
         const reportedPnlPct = lpData
           ? parseFloat(config.management.solMode ? (lpData.pnl?.percentNative || 0) : (lpData.pnl?.percent || 0))
           : binData
@@ -496,6 +515,12 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
           : binData
             ? deriveOpenPnlPct(binData, config.management.solMode)
             : null;
+=======
+        const reportedPnlPct = binData
+          ? parseFloat(config.management.solMode ? (binData.pnlSolPctChange || 0) : (binData.pnlPctChange || 0))
+          : null;
+        const derivedPnlPct = binData ? deriveOpenPnlPct(binData, config.management.solMode) : null;
+>>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
         const pnlPctDiff = reportedPnlPct != null && derivedPnlPct != null
           ? Math.abs(reportedPnlPct - derivedPnlPct)
           : null;
@@ -513,6 +538,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
           upper_bin:          upperBin,
           active_bin:         activeBin,
           in_range:           binData ? !binData.isOutOfRange : !isOOR,
+<<<<<<< HEAD
           unclaimed_fees_usd: lpData
             ? Math.round((
                 config.management.solMode
@@ -520,12 +546,16 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
                   : safeNum(lpData.unCollectedFee)
               ) * 10000) / 10000
             : binData
+=======
+          unclaimed_fees_usd: binData
+>>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
             ? Math.round((
                 config.management.solMode
                   ? parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.amountSol || 0) + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.amountSol || 0)
                   : parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0)
               ) * 10000) / 10000
             : null,
+<<<<<<< HEAD
           total_value_usd:    lpData
             ? Math.round((
                 config.management.solMode
@@ -533,6 +563,9 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
                   : safeNum(lpData.value)
               ) * 10000) / 10000
             : binData
+=======
+          total_value_usd:    binData
+>>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
             ? Math.round((
                 config.management.solMode
                   ? parseFloat(binData.unrealizedPnl?.balancesSol || 0)
@@ -540,6 +573,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
               ) * 10000) / 10000
             : null,
           // Always-USD fields for internal accounting and lesson recording.
+<<<<<<< HEAD
           total_value_true_usd: lpData
             ? Math.round(safeNum(lpData.value) * 10000) / 10000
             : binData
@@ -574,14 +608,36 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
             ? Math.round(parseFloat(binData.pnlUsd || 0) * 10000) / 10000
             : null,
           pnl_pct:            (lpData || binData)
+=======
+          total_value_true_usd: binData
+            ? Math.round(parseFloat(binData.unrealizedPnl?.balances || 0) * 10000) / 10000
+            : null,
+          collected_fees_usd: binData
+            ? Math.round(parseFloat(config.management.solMode ? (binData.allTimeFees?.total?.sol || 0) : (binData.allTimeFees?.total?.usd || 0)) * 10000) / 10000
+            : null,
+          collected_fees_true_usd: binData
+            ? Math.round(parseFloat(binData.allTimeFees?.total?.usd || 0) * 10000) / 10000
+            : null,
+          pnl_usd:            binData
+            ? Math.round(parseFloat(config.management.solMode ? (binData.pnlSol || 0) : (binData.pnlUsd || 0)) * 10000) / 10000
+            : null,
+          pnl_true_usd:       binData
+            ? Math.round(parseFloat(binData.pnlUsd || 0) * 10000) / 10000
+            : null,
+          pnl_pct:            binData
+>>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
             ? Math.round(reportedPnlPct * 100) / 100
             : null,
           pnl_pct_derived:    derivedPnlPct != null ? Math.round(derivedPnlPct * 100) / 100 : null,
           pnl_pct_diff:       pnlPctDiff != null ? Math.round(pnlPctDiff * 100) / 100 : null,
           pnl_pct_suspicious: !!pnlPctSuspicious,
+<<<<<<< HEAD
           unclaimed_fees_true_usd: lpData
             ? Math.round(safeNum(lpData.unCollectedFee) * 10000) / 10000
             : binData
+=======
+          unclaimed_fees_true_usd: binData
+>>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
             ? Math.round((parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0)) * 10000) / 10000
             : null,
           fee_per_tvl_24h:    binData
@@ -805,7 +861,11 @@ export async function closePosition({ position_address, reason }) {
         closeTxHashes.push(txHash);
       }
     } else {
+<<<<<<< HEAD
       log("close", `Step 2: Position is empty, forcing close account`);
+=======
+      log("close", `Step 2: No position liquidity detected, closing account`);
+>>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
       const closeTx = await pool.closePosition({
         owner: wallet.publicKey,
         position: { publicKey: positionPubKey },

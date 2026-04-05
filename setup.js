@@ -288,8 +288,13 @@ const screeningIntervalMin = await askNum(
   { min: 5 }
 );
 
+<<<<<<< HEAD
 // ─── Section 8: LLM Provider ─────────────────────────────────────────────────
 console.log("\n── LLM Provider ──────────────────────────────────────────────");
+=======
+// ─── LLM Provider ─────────────────────────────────────────────────────────────
+console.log("\n── LLM Provider ──────────────────────────────");
+>>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
 
 const LLM_PROVIDERS = [
   {
@@ -337,13 +342,28 @@ if (provider.key === "local" || provider.key === "custom") {
   llmBaseUrl = await ask("Base URL", e("llmBaseUrl", provider.baseUrl || "http://localhost:1234/v1"));
 }
 
+<<<<<<< HEAD
 const llmApiKeyExisting = e("llmApiKey", existingEnv.LLM_API_KEY || existingEnv.OPENROUTER_API_KEY || "");
 const llmApiKeyRaw = await ask("API Key", llmApiKeyExisting ? "*** (already set)" : (provider.keyHint || ""));
 const llmApiKey   = llmApiKeyRaw.startsWith("***") ? llmApiKeyExisting : llmApiKeyRaw;
+=======
+const llmApiKeyExisting = e("llmApiKey", process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY || "");
+const llmApiKeyPrompt   = llmApiKeyExisting ? "*** (already set)" : (provider.keyHint || "");
+const llmApiKeyRaw      = await ask("API Key", llmApiKeyExisting ? "*** (already set)" : "");
+const llmApiKey         = llmApiKeyRaw.startsWith("***") ? llmApiKeyExisting : llmApiKeyRaw;
+>>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
 
 const llmModel = await ask(
   "Model name",
   e("llmModel", process.env.LLM_MODEL || provider.modelDefault)
+<<<<<<< HEAD
+=======
+);
+
+const dryRun = await ask(
+  "Dry run mode? (true = no real transactions)",
+  e("dryRun", "false")
+>>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
 );
 
 rl.close();
@@ -384,8 +404,12 @@ const userConfig = {
   llmBaseUrl,
   llmModel,
   ...(llmApiKey ? { llmApiKey } : {}),
+<<<<<<< HEAD
   telegramChatId: telegramChatId || "",
   dryRun,
+=======
+  dryRun: dryRun === "true",
+>>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
 };
 
 // Remove legacy key if present
@@ -404,6 +428,7 @@ console.log(`
   Preset:       ${presetName}
   Dry run:      ${dryRun ? "YES — no real transactions" : "NO — live trading"}
 
+<<<<<<< HEAD
   Deploy:       ${deployAmountSol} SOL/position  ·  max ${maxPositions} positions
   Min balance:  ${minSolToOpen} SOL to open new position
   Timeframe:    ${timeframe}  ·  organic ≥ ${minOrganic}  ·  holders ≥ ${minHolders}
@@ -419,6 +444,22 @@ console.log(`
   Telegram:     ${telegramToken ? "enabled" : "disabled"}
   .env:         ${ENV_PATH}
   Config:       ${CONFIG_PATH}
+=======
+  Deploy:     ${deployAmountSol} SOL/position  |  Max: ${maxPositions} positions
+  Min balance: ${minSolToOpen} SOL to open
+  Take profit: fees >= ${takeProfitFeePct}%
+  Volatility:  max ${maxVolatility}
+  Organic:     min ${minOrganic}
+  Holders:     min ${minHolders}
+  Max mcap:    $${maxMcap.toLocaleString()}
+  OOR close:   after ${outOfRangeWaitMinutes} min
+  Mgmt:        every ${managementIntervalMin} min
+  Screening:   every ${screeningIntervalMin} min
+  Provider:    ${provider.label.split("(")[0].trim()}
+  Model:       ${llmModel}
+  Base URL:    ${llmBaseUrl}
+  Dry run:     ${dryRun}
+>>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
 
 Run "npm start" to launch the agent.
 ${dryRun ? '\n  ⚠ DRY RUN is ON — set dryRun: false in user-config.json when ready for live trading.\n' : ""}
