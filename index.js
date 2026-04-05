@@ -16,6 +16,7 @@ import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
+import { queryPoolConsensus, queryLessonConsensus } from "./hive-mind.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
@@ -379,6 +380,41 @@ After executing, write a brief one-line result per position.
   return mgmtReport;
 }
 
+const HIVE_MIN_AGREEMENT = 10;
+const HIVE_MAX_LESSONS = 5;
+const HIVE_EXCLUDED_TAGS = new Set(["self_tune", "config_change"]);
+
+function formatHiveLessons(lessons) {
+  if (!Array.isArray(lessons) || lessons.length === 0) return "";
+  const filtered = lessons
+    .filter(l => l.agreement_count >= HIVE_MIN_AGREEMENT)
+    .filter(l => !l.tags?.some(t => HIVE_EXCLUDED_TAGS.has(t)))
+    .slice(0, HIVE_MAX_LESSONS);
+  if (filtered.length === 0) return "";
+  const lines = filtered.map(l => {
+    const icon = l.outcome === "good" || l.outcome === "manual" ? "+" : "-";
+    return `${icon} ${l.representative_rule} (${l.agreement_count} agents)`;
+  });
+  return `HIVE MIND (supplementary — your own analysis takes priority):\n${lines.join("\n")}`;
+}
+
+const HIVE_MIN_AGENTS = 3;
+
+function formatHivePoolLine(hive) {
+  if (!hive || (hive.unique_agents ?? 0) < HIVE_MIN_AGENTS) return null;
+  const recency = hive.last_deploy
+    ? `${Math.round((Date.now() - new Date(hive.last_deploy).getTime()) / 3600000)}h ago`
+    : "unknown";
+  const pnlStr = hive.weighted_avg_pnl != null
+    ? `${hive.weighted_avg_pnl >= 0 ? "+" : ""}${hive.weighted_avg_pnl.toFixed(1)}%`
+    : "N/A";
+  const warn = (hive.weighted_win_rate ?? 0) < 50 ? " !!!" : "";
+  const topLesson = hive.top_lessons?.[0]
+    ? ` | "${hive.top_lessons[0].slice(0, 120)}${hive.top_lessons[0].length > 120 ? "..." : ""}"`
+    : "";
+  return `  hive: ${hive.unique_agents} agents, ${hive.weighted_win_rate ?? "?"}% win, ${pnlStr} avg, last ${recency}, best_strat=${hive.top_strategy ?? "?"}${warn}${topLesson}`;
+}
+
 export async function runScreeningCycle({ silent = false } = {}) {
   if (_screeningBusy) {
     log("cron", "Screening skipped — previous cycle still running");
@@ -424,6 +460,10 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const deployAmount = computeDeployAmount(currentBalance.sol);
     log("cron", `Computed deploy amount: ${deployAmount} SOL (wallet: ${currentBalance.sol} SOL)`);
 
+    // Fetch hive lesson consensus (non-blocking — null on failure)
+    const hiveLessons = await queryLessonConsensus().catch(() => null);
+    const hiveLessonBlock = formatHiveLessons(hiveLessons);
+
     // Load active strategy
     const activeStrategy = getActiveStrategy();
     const strategyBlock = activeStrategy
@@ -437,16 +477,18 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const allCandidates = [];
     for (const pool of candidates) {
       const mint = pool.base?.mint;
-      const [smartWallets, narrative, tokenInfo] = await Promise.allSettled([
+      const [smartWallets, narrative, tokenInfo, hivePool] = await Promise.allSettled([
         checkSmartWalletsOnPool({ pool_address: pool.pool }),
         mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
         mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
+        queryPoolConsensus(pool.pool),
       ]);
       allCandidates.push({
         pool,
         sw: smartWallets.status === "fulfilled" ? smartWallets.value : null,
         n: narrative.status === "fulfilled" ? narrative.value : null,
         ti: tokenInfo.status === "fulfilled" ? tokenInfo.value?.results?.[0] : null,
+        hive: hivePool.status === "fulfilled" ? hivePool.value : null,
         mem: recallForPool(pool.pool),
       });
       await new Promise(r => setTimeout(r, 150)); // avoid 429s
@@ -479,7 +521,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     );
 
     // Build compact candidate blocks
-    const candidateBlocks = passing.map(({ pool, sw, n, ti, mem }, i) => {
+    const candidateBlocks = passing.map(({ pool, sw, n, ti, hive, mem }, i) => {
       const botPct = ti?.audit?.bot_holders_pct ?? "?";
       const top10Pct = ti?.audit?.top_holders_pct ?? "?";
       const feesSol = ti?.global_fees_sol ?? "?";
@@ -520,6 +562,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         priceChange != null ? `  1h: price${priceChange >= 0 ? "+" : ""}${priceChange}%, net_buyers=${netBuyers ?? "?"}` : null,
         n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
         mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
+        formatHivePoolLine(hive),
       ].filter(Boolean).join("\n");
 
       return block;
@@ -588,6 +631,7 @@ IMPORTANT:
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, 2048, {
         onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
         onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
+        hiveContext: hiveLessonBlock || null,
       });
     screenReport = content;
   } catch (error) {
