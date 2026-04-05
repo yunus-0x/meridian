@@ -362,6 +362,11 @@ export function evolveThresholds(perfData, config) {
   }
 
   Object.assign(userConfig, changes);
+  // Migrate old key if present
+  if (userConfig.minFeeTvlRatio != null) {
+    if (userConfig.minFeeActiveTvlRatio == null) userConfig.minFeeActiveTvlRatio = userConfig.minFeeTvlRatio;
+    delete userConfig.minFeeTvlRatio;
+  }
   userConfig._lastEvolved = new Date().toISOString();
   userConfig._positionsAtEvolution = perfData.length;
 
