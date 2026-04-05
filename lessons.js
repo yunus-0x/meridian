@@ -112,6 +112,95 @@ function computeExpiresAt(type, lessonsConfig) {
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 }
 
+/**
+ * Prune lessons: expire, merge duplicates, resolve contradictions, evict if over cap.
+ */
+function pruneLessons(lessonsConfig) {
+  const data = load();
+  const now = Date.now();
+  const before = data.lessons.length;
+
+  // Step 1: Remove expired (skip pinned and lessons without expires_at)
+  data.lessons = data.lessons.filter(l =>
+    l.pinned || !l.expires_at || new Date(l.expires_at).getTime() > now
+  );
+
+  // Step 2: Merge specifics into patterns
+  const specifics = data.lessons.filter(l => l.type === "specific" && l.pattern?.outcome);
+  const groups = new Map();
+  for (const lesson of specifics) {
+    const key = `${lesson.pattern.outcome}|${lesson.pattern.bin_step}|${lesson.pattern.strategy}|${(lesson.pattern.volatility_range || []).join(",")}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(lesson);
+  }
+
+  for (const [key, members] of groups) {
+    if (members.length < lessonsConfig.mergeThreshold) continue;
+
+    const totalSampleSize = members.reduce((s, l) => s + (l.pattern?.sample_size ?? 1), 0);
+    const allPools = [...new Set(members.flatMap(l => l.pattern?.pools ?? []))];
+    const repr = members[0];
+    const volLabel = repr.pattern.volatility_range
+      ? `volatility ${repr.pattern.volatility_range[0]}-${repr.pattern.volatility_range[1] === Infinity ? "+" : repr.pattern.volatility_range[1]}`
+      : "unknown volatility";
+    const outcomeLabel = repr.pattern.outcome === "good" ? "PATTERN-PREFER" : "PATTERN-AVOID";
+
+    const merged = {
+      id: Date.now(),
+      rule: `${outcomeLabel}: pools with ${volLabel}, bin_step ${repr.pattern.bin_step}, strategy ${repr.pattern.strategy} — ${totalSampleSize} positions (${allPools.join(", ")})`,
+      type: "pattern",
+      tags: [...new Set(members.flatMap(l => l.tags || []))],
+      outcome: repr.pattern.outcome === "good" ? "good" : "bad",
+      pattern: {
+        ...repr.pattern,
+        sample_size: totalSampleSize,
+        pools: allPools,
+      },
+      score: 1.0,
+      expires_at: computeExpiresAt("pattern", lessonsConfig),
+      created_at: new Date().toISOString(),
+    };
+
+    const memberIds = new Set(members.map(l => l.id));
+    data.lessons = data.lessons.filter(l => !memberIds.has(l.id));
+    data.lessons.push(merged);
+  }
+
+  // Step 3: Resolve contradictions (higher sample_size wins)
+  const withPatterns = data.lessons.filter(l => l.pattern?.outcome);
+  const toRemove = new Set();
+  for (let i = 0; i < withPatterns.length; i++) {
+    for (let j = i + 1; j < withPatterns.length; j++) {
+      if (patternsContradict(withPatterns[i].pattern, withPatterns[j].pattern)) {
+        const sizeI = withPatterns[i].pattern.sample_size ?? 1;
+        const sizeJ = withPatterns[j].pattern.sample_size ?? 1;
+        const loser = sizeI >= sizeJ ? withPatterns[j] : withPatterns[i];
+        toRemove.add(loser.id);
+      }
+    }
+  }
+  if (toRemove.size > 0) {
+    data.lessons = data.lessons.filter(l => !toRemove.has(l.id));
+    log("lessons", `Removed ${toRemove.size} contradicted lesson(s)`);
+  }
+
+  // Step 4: Evict lowest-scoring if over cap
+  const maxLessons = lessonsConfig.maxLessons;
+  if (data.lessons.length > maxLessons) {
+    const pinned = data.lessons.filter(l => l.pinned);
+    const unpinned = data.lessons.filter(l => !l.pinned);
+    unpinned.sort((a, b) => computeScore(b) - computeScore(a));
+    const keepCount = Math.max(0, maxLessons - pinned.length);
+    data.lessons = [...pinned, ...unpinned.slice(0, keepCount)];
+    log("lessons", `Evicted ${unpinned.length - keepCount} low-scoring lesson(s) (cap: ${maxLessons})`);
+  }
+
+  if (data.lessons.length !== before) {
+    save(data);
+    log("lessons", `Pruned: ${before} → ${data.lessons.length} lessons`);
+  }
+}
+
 // ─── Record Position Performance ──────────────────────────────
 
 /**
@@ -193,6 +282,10 @@ export async function recordPerformance(perf) {
   }
 
   save(data);
+
+  // Prune lessons
+  const { config: cfg } = await import("./config.js");
+  pruneLessons(cfg.lessons);
 
   // Update pool-level memory
   if (perf.pool) {
@@ -616,6 +709,7 @@ export async function addLesson(rule, tags = [], { pinned = false, role = null }
     created_at: new Date().toISOString(),
   });
   save(data);
+  pruneLessons(config.lessons);
   log("lessons", `Manual lesson added${pinned ? " [PINNED]" : ""}${role ? ` [${role}]` : ""}: ${safeRule}`);
 }
 
