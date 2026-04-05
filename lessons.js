@@ -763,11 +763,16 @@ export function pinLesson(id) {
 /**
  * Unpin a lesson by ID.
  */
-export function unpinLesson(id) {
+export async function unpinLesson(id) {
   const data = load();
   const lesson = data.lessons.find((l) => l.id === id);
   if (!lesson) return { found: false };
   lesson.pinned = false;
+  // Set a fresh TTL so unpinned lessons don't live forever
+  if (!lesson.expires_at) {
+    const { config } = await import("./config.js");
+    lesson.expires_at = computeExpiresAt(lesson.type || "specific", config.lessons);
+  }
   save(data);
   return { found: true, pinned: false, id, rule: lesson.rule };
 }
