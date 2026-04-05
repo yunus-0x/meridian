@@ -294,6 +294,36 @@ const POSITIONS_CACHE_TTL = 5 * 60_000; // 5 minutes
 let _positionsCache = null;
 let _positionsCacheAt = 0;
 let _positionsInflight = null; // deduplicates concurrent calls
+const LPAGENT_API = "https://api.lpagent.io/open-api/v1";
+
+async function fetchLpAgentOpenPositions(walletAddress) {
+  if (!process.env.LPAGENT_API_KEY) return {};
+
+  const url = `${LPAGENT_API}/lp-positions/opening?owner=${walletAddress}`;
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "x-api-key": process.env.LPAGENT_API_KEY,
+      },
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      log("lpagent_api", `HTTP ${res.status} for owner ${walletAddress.slice(0, 8)}: ${body.slice(0, 160)}`);
+      return {};
+    }
+    const data = await res.json();
+    const positions = data?.data || [];
+    const byAddress = {};
+    for (const p of positions) {
+      const addr = p.position || p.id || p.tokenId;
+      if (addr) byAddress[addr] = p;
+    }
+    return byAddress;
+  } catch (e) {
+    log("lpagent_api", `Fetch error for owner ${walletAddress.slice(0, 8)}: ${e.message}`);
+    return {};
+  }
+}
 
 // ─── Fetch DLMM PnL API for all positions in a pool ────────────
 async function fetchDlmmPnlForPool(poolAddress, walletAddress) {
@@ -383,6 +413,17 @@ function deriveOpenPnlPct(binData, solMode = false) {
   return (pnl / deposit) * 100;
 }
 
+function deriveLpAgentPnlPct(lpData, solMode = false) {
+  if (!lpData) return null;
+  const deposit = solMode ? safeNum(lpData.inputNative) : safeNum(lpData.inputValue);
+  if (deposit <= 0) return null;
+
+  const currentValue = solMode ? safeNum(lpData.valueNative) : safeNum(lpData.value);
+  const unclaimedFees = solMode ? safeNum(lpData.unCollectedFeeNative) : safeNum(lpData.unCollectedFee);
+  const pnl = currentValue + unclaimedFees - deposit;
+  return (pnl / deposit) * 100;
+}
+
 // ─── Get My Positions ──────────────────────────────────────────
 export async function getMyPositions({ force = false, silent = false } = {}) {
   if (!force && _positionsCache && Date.now() - _positionsCacheAt < POSITIONS_CACHE_TTL) {
@@ -398,7 +439,8 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
   }
 
   _positionsInflight = (async () => { try {
-    // Single portfolio API call — returns all positions with full PnL data
+    // Portfolio API discovers open pools/positions for this wallet.
+    // Detailed range data stays on Meteora PnL API; value/PnL can be overridden by LPAgent below.
     if (!silent) log("positions", "Fetching portfolio via Meteora portfolio API...");
     const portfolioUrl = `https://dlmm.datapi.meteora.ag/portfolio/open?user=${walletAddress}`;
     const res = await fetch(portfolioUrl);
@@ -413,6 +455,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
     const binDataByPool = {};
     const pnlMaps = await Promise.all(pools.map(pool => fetchDlmmPnlForPool(pool.poolAddress, walletAddress)));
     pools.forEach((pool, i) => { binDataByPool[pool.poolAddress] = pnlMaps[i]; });
+    const lpAgentByPosition = await fetchLpAgentOpenPositions(walletAddress);
 
     const positions = [];
     for (const pool of pools) {
@@ -431,14 +474,21 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
         const lowerBin  = binData?.lowerBinId      ?? tracked?.bin_range?.min ?? null;
         const upperBin  = binData?.upperBinId      ?? tracked?.bin_range?.max ?? null;
         const activeBin = binData?.poolActiveBinId ?? tracked?.bin_range?.active ?? null;
+        const lpData = lpAgentByPosition[positionAddress] || null;
 
         const ageFromState = tracked?.deployed_at
           ? Math.floor((Date.now() - new Date(tracked.deployed_at).getTime()) / 60000)
           : null;
-        const reportedPnlPct = binData
-          ? parseFloat(config.management.solMode ? (binData.pnlSolPctChange || 0) : (binData.pnlPctChange || 0))
-          : null;
-        const derivedPnlPct = binData ? deriveOpenPnlPct(binData, config.management.solMode) : null;
+        const reportedPnlPct = lpData
+          ? parseFloat(config.management.solMode ? (lpData.pnl?.percentNative || 0) : (lpData.pnl?.percent || 0))
+          : binData
+            ? parseFloat(config.management.solMode ? (binData.pnlSolPctChange || 0) : (binData.pnlPctChange || 0))
+            : null;
+        const derivedPnlPct = lpData
+          ? deriveLpAgentPnlPct(lpData, config.management.solMode)
+          : binData
+            ? deriveOpenPnlPct(binData, config.management.solMode)
+            : null;
         const pnlPctDiff = reportedPnlPct != null && derivedPnlPct != null
           ? Math.abs(reportedPnlPct - derivedPnlPct)
           : null;
@@ -456,14 +506,26 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
           upper_bin:          upperBin,
           active_bin:         activeBin,
           in_range:           binData ? !binData.isOutOfRange : !isOOR,
-          unclaimed_fees_usd: binData
+          unclaimed_fees_usd: lpData
+            ? Math.round((
+                config.management.solMode
+                  ? safeNum(lpData.unCollectedFeeNative)
+                  : safeNum(lpData.unCollectedFee)
+              ) * 10000) / 10000
+            : binData
             ? Math.round((
                 config.management.solMode
                   ? parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.amountSol || 0) + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.amountSol || 0)
                   : parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0)
               ) * 10000) / 10000
             : null,
-          total_value_usd:    binData
+          total_value_usd:    lpData
+            ? Math.round((
+                config.management.solMode
+                  ? safeNum(lpData.valueNative)
+                  : safeNum(lpData.value)
+              ) * 10000) / 10000
+            : binData
             ? Math.round((
                 config.management.solMode
                   ? parseFloat(binData.unrealizedPnl?.balancesSol || 0)
@@ -471,28 +533,48 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
               ) * 10000) / 10000
             : null,
           // Always-USD fields for internal accounting and lesson recording.
-          total_value_true_usd: binData
+          total_value_true_usd: lpData
+            ? Math.round(safeNum(lpData.value) * 10000) / 10000
+            : binData
             ? Math.round(parseFloat(binData.unrealizedPnl?.balances || 0) * 10000) / 10000
             : null,
-          collected_fees_usd: binData
+          collected_fees_usd: lpData
+            ? Math.round((
+                config.management.solMode
+                  ? safeNum(lpData.collectedFeeNative)
+                  : safeNum(lpData.collectedFee)
+              ) * 10000) / 10000
+            : binData
             ? Math.round(parseFloat(config.management.solMode ? (binData.allTimeFees?.total?.sol || 0) : (binData.allTimeFees?.total?.usd || 0)) * 10000) / 10000
             : null,
-          collected_fees_true_usd: binData
+          collected_fees_true_usd: lpData
+            ? Math.round(safeNum(lpData.collectedFee) * 10000) / 10000
+            : binData
             ? Math.round(parseFloat(binData.allTimeFees?.total?.usd || 0) * 10000) / 10000
             : null,
-          pnl_usd:            binData
+          pnl_usd:            lpData
+            ? Math.round((
+                config.management.solMode
+                  ? safeNum(lpData.pnl?.valueNative)
+                  : safeNum(lpData.pnl?.value)
+              ) * 10000) / 10000
+            : binData
             ? Math.round(parseFloat(config.management.solMode ? (binData.pnlSol || 0) : (binData.pnlUsd || 0)) * 10000) / 10000
             : null,
-          pnl_true_usd:       binData
+          pnl_true_usd:       lpData
+            ? Math.round(safeNum(lpData.pnl?.value) * 10000) / 10000
+            : binData
             ? Math.round(parseFloat(binData.pnlUsd || 0) * 10000) / 10000
             : null,
-          pnl_pct:            binData
+          pnl_pct:            (lpData || binData)
             ? Math.round(reportedPnlPct * 100) / 100
             : null,
           pnl_pct_derived:    derivedPnlPct != null ? Math.round(derivedPnlPct * 100) / 100 : null,
           pnl_pct_diff:       pnlPctDiff != null ? Math.round(pnlPctDiff * 100) / 100 : null,
           pnl_pct_suspicious: !!pnlPctSuspicious,
-          unclaimed_fees_true_usd: binData
+          unclaimed_fees_true_usd: lpData
+            ? Math.round(safeNum(lpData.unCollectedFee) * 10000) / 10000
+            : binData
             ? Math.round((parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0)) * 10000) / 10000
             : null,
           fee_per_tvl_24h:    binData
