@@ -195,9 +195,6 @@ export async function getPriceInfo(tokenAddress, chainIndex = CHAIN_SOLANA) {
 }
 
 /**
- * Fetch all three in parallel — use this during screening enrichment.
- */
-/**
  * Startup health check — verifies OKX API connectivity and auth status.
  * Returns { ok, auth, latencyMs, error? }
  */

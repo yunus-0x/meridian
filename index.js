@@ -4,7 +4,7 @@ import readline from "readline";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
-import { getWalletBalances } from "./tools/wallet.js";
+import { getWalletBalances, JUPITER_API_KEY } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
@@ -42,7 +42,7 @@ okxHealthCheck().then((r) => {
   const start = Date.now();
   try {
     const res = await fetch("https://api.jup.ag/price/v3?ids=So11111111111111111111111111111111111111112", {
-      headers: { "x-api-key": "b15d42e9-e0e4-4f90-a424-ae41ceeaa382" },
+      headers: { "x-api-key": JUPITER_API_KEY },
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
