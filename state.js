@@ -28,14 +28,21 @@ function sanitizeStoredText(text, maxLen = MAX_INSTRUCTION_LENGTH) {
 }
 
 function load() {
+  const defaults = { positions: {}, recentEvents: [], lastUpdated: null };
   if (!fs.existsSync(STATE_FILE)) {
-    return { positions: {}, recentEvents: [], lastUpdated: null };
+    return defaults;
   }
   try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+    const data = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+    return {
+      ...defaults,
+      ...data,
+      positions: data.positions || {},
+      recentEvents: data.recentEvents || [],
+    };
   } catch (err) {
     log("state_error", `Failed to read state.json: ${err.message}`);
-    return { positions: {}, lastUpdated: null };
+    return defaults;
   }
 }
 

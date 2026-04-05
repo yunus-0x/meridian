@@ -183,7 +183,7 @@ export async function runManagementCycle({ silent = false } = {}) {
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
 
-    if (positions.length === 0) {
+    if (!positions || positions.length === 0) {
       log("cron", "No open positions — triggering screening cycle");
       mgmtReport = "No open positions. Triggering screening cycle.";
       runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
@@ -300,8 +300,8 @@ export async function runManagementCycle({ silent = false } = {}) {
       return line;
     });
 
-    const needsAction = [...actionMap.values()].filter(a => a.action !== "STAY");
-    const actionSummary = needsAction.length > 0
+    const needsAction = [...actionMap.values()].filter(a => a?.action !== "STAY");
+    const actionSummary = needsAction?.length > 0
       ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL instruction" : `${a.action}${a.reason ? ` (${a.reason})` : ""}`).join(", ")
       : "no action";
 
@@ -356,7 +356,7 @@ After executing, write a brief one-line result per position.
 
     // Trigger screening after management
     const afterPositions = await getMyPositions({ force: true }).catch(() => null);
-    const afterCount = afterPositions?.positions?.length ?? 0;
+    const afterCount = afterPositions?.total_positions ?? afterPositions?.positions?.length ?? 0;
     if (afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs) {
       log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions — triggering screening`);
       runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));

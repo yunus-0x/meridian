@@ -35,7 +35,11 @@ function load() {
     return { lessons: [], performance: [] };
   }
   try {
-    return JSON.parse(fs.readFileSync(LESSONS_FILE, "utf8"));
+    const data = JSON.parse(fs.readFileSync(LESSONS_FILE, "utf8"));
+    return {
+      lessons: data.lessons || [],
+      performance: data.performance || [],
+    };
   } catch {
     return { lessons: [], performance: [] };
   }

@@ -233,7 +233,11 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
         log("error", `Bad API response: ${JSON.stringify(response).slice(0, 200)}`);
         throw new Error(`API returned no choices: ${response.error?.message || JSON.stringify(response)}`);
       }
-      const msg = response.choices[0].message;
+      const msg = response?.choices?.[0]?.message;
+      if (!msg) {
+        log("error", "API returned success but no message — jumping to next step");
+        continue;
+      }
       // Repair malformed tool call JSON before pushing to history —
       // the API rejects the next request if history contains invalid JSON args
       if (msg.tool_calls) {
@@ -256,7 +260,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       messages.push(msg);
 
       // If the model didn't call any tools, it's done
-      if (!msg.tool_calls || msg.tool_calls.length === 0) {
+      if (!msg.tool_calls || msg.tool_calls?.length === 0) {
         // Hermes sometimes returns null content — pop the empty message and retry once
         if (!msg.content) {
           messages.pop(); // remove the empty assistant message
