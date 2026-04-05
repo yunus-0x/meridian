@@ -364,6 +364,15 @@ export async function executeTool(name, args) {
 async function runSafetyChecks(name, args) {
   switch (name) {
     case "deploy_position": {
+      // Conviction threshold — reject low-confidence deploys
+      const conviction = args.conviction_score ?? 0;
+      if (conviction < 7) {
+        return {
+          pass: false,
+          reason: `Conviction score ${conviction}/10 is below threshold (7). Skip this cycle — it's better to wait for a stronger candidate.`,
+        };
+      }
+
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;
       const maxStep = config.screening.maxBinStep;
