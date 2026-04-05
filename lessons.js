@@ -30,17 +30,6 @@ function sanitizeLessonText(text, maxLen = MAX_MANUAL_LESSON_LENGTH) {
   return cleaned || null;
 }
 
-function load() {
-  if (!fs.existsSync(LESSONS_FILE)) {
-    return { lessons: [], performance: [] };
-  }
-  try {
-    return JSON.parse(fs.readFileSync(LESSONS_FILE, "utf8"));
-  } catch {
-    return { lessons: [], performance: [] };
-  }
-}
-
 function save(data) {
   fs.writeFileSync(LESSONS_FILE, JSON.stringify(data, null, 2));
 }
@@ -110,6 +99,51 @@ function computeExpiresAt(type, lessonsConfig) {
     : type === "evolved" ? lessonsConfig.evolvedTtlDays
     : lessonsConfig.specificTtlDays;
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function load() {
+  if (!fs.existsSync(LESSONS_FILE)) {
+    return { lessons: [], performance: [] };
+  }
+  try {
+    const data = JSON.parse(fs.readFileSync(LESSONS_FILE, "utf8"));
+    // Backfill legacy lessons missing lifecycle fields
+    let migrated = false;
+    for (const lesson of data.lessons || []) {
+      if (!lesson.type) {
+        lesson.type = lesson.tags?.includes("evolution") ? "evolved" : "specific";
+        migrated = true;
+      }
+      if (!lesson.expires_at && !lesson.pinned) {
+        const ttlDays = lesson.type === "pattern" ? 30
+          : lesson.type === "evolved" ? 14 : 7;
+        lesson.expires_at = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000).toISOString();
+        migrated = true;
+      }
+      if (lesson.score == null) {
+        lesson.score = 1.0;
+        migrated = true;
+      }
+      if (!lesson.pattern && lesson.type === "specific") {
+        lesson.pattern = {
+          volatility_range: volatilityBucket(lesson.volatility ?? null),
+          bin_step: null,
+          strategy: null,
+          outcome: lesson.outcome === "good" ? "good" : lesson.outcome === "bad" ? "bad" : null,
+          sample_size: 1,
+          pools: [],
+        };
+        migrated = true;
+      }
+    }
+    if (migrated) {
+      fs.writeFileSync(LESSONS_FILE, JSON.stringify(data, null, 2));
+      log("lessons", `Migrated ${data.lessons.length} legacy lessons to new format`);
+    }
+    return data;
+  } catch {
+    return { lessons: [], performance: [] };
+  }
 }
 
 /**
@@ -835,7 +869,11 @@ export function getLessonsForPrompt(opts = {}) {
   const { agentType = "GENERAL", maxLessons } = opts;
 
   const data = load();
-  if (data.lessons.length === 0) return null;
+  const now = Date.now();
+  const activeLessons = data.lessons.filter(l =>
+    l.pinned || !l.expires_at || new Date(l.expires_at).getTime() > now
+  );
+  if (activeLessons.length === 0) return null;
 
   // Smaller caps for automated cycles — they don't need the full lesson history
   const isAutoCycle = agentType === "SCREENER" || agentType === "MANAGER";
@@ -843,21 +881,20 @@ export function getLessonsForPrompt(opts = {}) {
   const ROLE_CAP    = isAutoCycle ? 6  : 15;
   const RECENT_CAP  = maxLessons ?? (isAutoCycle ? 10 : 35);
 
-  const outcomePriority = { bad: 0, poor: 1, failed: 1, good: 2, worked: 2, manual: 1, neutral: 3, evolution: 2 };
-  const byPriority = (a, b) => (outcomePriority[a.outcome] ?? 3) - (outcomePriority[b.outcome] ?? 3);
+  const byScore = (a, b) => computeScore(b) - computeScore(a);
 
   // ── Tier 1: Pinned ──────────────────────────────────────────────
   // Respect role even for pinned lessons — a pinned SCREENER lesson shouldn't pollute MANAGER
-  const pinned = data.lessons
+  const pinned = activeLessons
     .filter((l) => l.pinned && (!l.role || l.role === agentType || agentType === "GENERAL"))
-    .sort(byPriority)
+    .sort(byScore)
     .slice(0, PINNED_CAP);
 
   const usedIds = new Set(pinned.map((l) => l.id));
 
   // ── Tier 2: Role-matched ────────────────────────────────────────
   const roleTags = ROLE_TAGS[agentType] || [];
-  const roleMatched = data.lessons
+  const roleMatched = activeLessons
     .filter((l) => {
       if (usedIds.has(l.id)) return false;
       // Include if: lesson has no role restriction OR matches this role
@@ -866,7 +903,7 @@ export function getLessonsForPrompt(opts = {}) {
       const tagOk  = roleTags.length === 0 || !l.tags?.length || l.tags.some((t) => roleTags.includes(t));
       return roleOk && tagOk;
     })
-    .sort(byPriority)
+    .sort(byScore)
     .slice(0, ROLE_CAP);
 
   roleMatched.forEach((l) => usedIds.add(l.id));
@@ -874,7 +911,7 @@ export function getLessonsForPrompt(opts = {}) {
   // ── Tier 3: Recent fill ─────────────────────────────────────────
   const remainingBudget = RECENT_CAP - pinned.length - roleMatched.length;
   const recent = remainingBudget > 0
-    ? data.lessons
+    ? activeLessons
         .filter((l) => !usedIds.has(l.id))
         .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""))
         .slice(0, remainingBudget)
