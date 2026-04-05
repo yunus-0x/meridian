@@ -196,7 +196,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             tool_choice: toolChoice,
             temperature: config.llm.temperature,
             max_tokens: maxOutputTokens ?? config.llm.maxTokens,
-          });
+          }, { signal: AbortSignal.timeout(45_000) });
         } catch (error) {
           if (providerMode === "system" && isSystemRoleError(error)) {
             providerMode = "user_embedded";

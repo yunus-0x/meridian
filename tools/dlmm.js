@@ -306,9 +306,8 @@ async function fetchLpAgentOpenPositions(walletAddress) {
   const url = `${LPAGENT_API}/lp-positions/opening?owner=${walletAddress}`;
   try {
     const res = await fetch(url, {
-      headers: {
-        "x-api-key": process.env.LPAGENT_API_KEY,
-      },
+      headers: { "x-api-key": process.env.LPAGENT_API_KEY },
+      signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
@@ -333,7 +332,7 @@ async function fetchLpAgentOpenPositions(walletAddress) {
 async function fetchDlmmPnlForPool(poolAddress, walletAddress) {
   const url = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${walletAddress}&status=open&pageSize=100&page=1`;
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       log("pnl_api", `HTTP ${res.status} for pool ${poolAddress.slice(0, 8)}: ${body.slice(0, 120)}`);
@@ -454,7 +453,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
     // Detailed range data stays on Meteora PnL API; value/PnL can be overridden by LPAgent below.
     if (!silent) log("positions", "Fetching portfolio via Meteora portfolio API...");
     const portfolioUrl = `https://dlmm.datapi.meteora.ag/portfolio/open?user=${walletAddress}`;
-    const res = await fetch(portfolioUrl);
+    const res = await fetch(portfolioUrl, { signal: AbortSignal.timeout(15_000) });
     if (!res.ok) throw new Error(`Portfolio API ${res.status}: ${await res.text().catch(() => "")}`);
     const portfolio = await res.json();
 
@@ -665,7 +664,7 @@ export async function getWalletPositions({ wallet_address }) {
 // ─── Search Pools by Query ─────────────────────────────────────
 export async function searchPools({ query, limit = 10 }) {
   const url = `https://dlmm.datapi.meteora.ag/pools?query=${encodeURIComponent(query)}`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
   if (!res.ok) throw new Error(`Pool search API error: ${res.status} ${res.statusText}`);
   const data = await res.json();
   const pools = (Array.isArray(data) ? data : data.data || []).slice(0, limit);
