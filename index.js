@@ -96,7 +96,7 @@ if (hiveMindEnabled()) {
     try {
       const pulse = await getHivePulse();
       if (pulse) {
-        log("startup", `Hive Mind: OK (${Date.now() - start}ms, ${pulse.active_agents || "?"} agents)`);
+        log("startup", `Hive Mind: OK (${Date.now() - start}ms, ${pulse.total_agents} agents, ${pulse.overall_win_rate}% win rate)`);
       } else {
         throw new Error("no response");
       }
