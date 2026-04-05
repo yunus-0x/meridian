@@ -45,6 +45,73 @@ function save(data) {
   fs.writeFileSync(LESSONS_FILE, JSON.stringify(data, null, 2));
 }
 
+// ─── Lesson Management Helpers ───────────────────────────────
+
+function volatilityBucket(vol) {
+  if (vol == null || !Number.isFinite(vol)) return null;
+  if (vol < 2) return [0, 2];
+  if (vol < 4) return [2, 4];
+  if (vol < 6) return [4, 6];
+  return [6, Infinity];
+}
+
+function extractPattern(perf) {
+  return {
+    volatility_range: volatilityBucket(perf.volatility),
+    bin_step: perf.bin_step ?? null,
+    strategy: perf.strategy ?? null,
+    outcome: perf.pnl_pct >= 5 ? "good" : perf.pnl_pct <= -5 ? "bad" : null,
+    sample_size: 1,
+    pools: perf.pool_name ? [perf.pool_name] : [],
+  };
+}
+
+function patternsMatch(a, b) {
+  if (!a || !b) return false;
+  if (a.outcome !== b.outcome) return false;
+  if (a.bin_step !== b.bin_step) return false;
+  if (a.strategy !== b.strategy) return false;
+  if (!a.volatility_range || !b.volatility_range) return false;
+  return a.volatility_range[0] === b.volatility_range[0] &&
+         a.volatility_range[1] === b.volatility_range[1];
+}
+
+function patternsContradict(a, b) {
+  if (!a || !b) return false;
+  if (a.bin_step !== b.bin_step) return false;
+  if (a.strategy !== b.strategy) return false;
+  if (!a.volatility_range || !b.volatility_range) return false;
+  const sameRange = a.volatility_range[0] === b.volatility_range[0] &&
+                    a.volatility_range[1] === b.volatility_range[1];
+  if (!sameRange) return false;
+  return (a.outcome === "good" && b.outcome === "bad") ||
+         (a.outcome === "bad" && b.outcome === "good");
+}
+
+function computeScore(lesson) {
+  const now = Date.now();
+  const created = new Date(lesson.created_at).getTime();
+  const expires = new Date(lesson.expires_at).getTime();
+  if (!Number.isFinite(created) || !Number.isFinite(expires)) return 0;
+  const totalLifespan = expires - created;
+  const elapsed = now - created;
+  const recencyWeight = totalLifespan > 0
+    ? Math.max(0.1, 1 - (elapsed / totalLifespan) * 0.9)
+    : 0.1;
+  const sampleSize = lesson.pattern?.sample_size ?? 1;
+  const typeMultiplier = lesson.type === "pattern" ? 1.5
+    : lesson.type === "evolved" ? 1.2
+    : 1.0;
+  return sampleSize * recencyWeight * typeMultiplier;
+}
+
+function computeExpiresAt(type, lessonsConfig) {
+  const days = type === "pattern" ? lessonsConfig.patternTtlDays
+    : type === "evolved" ? lessonsConfig.evolvedTtlDays
+    : lessonsConfig.specificTtlDays;
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
 // ─── Record Position Performance ──────────────────────────────
 
 /**
@@ -119,7 +186,7 @@ export async function recordPerformance(perf) {
   data.performance.push(entry);
 
   // Derive and store a lesson
-  const lesson = derivLesson(entry);
+  const lesson = await derivLesson(entry);
   if (lesson) {
     data.lessons.push(lesson);
     log("lessons", `New lesson: ${lesson.rule}`);
@@ -172,7 +239,7 @@ export async function recordPerformance(perf) {
  * Derive a lesson from a closed position's performance.
  * Only generates a lesson if the outcome was clearly good or bad.
  */
-function derivLesson(perf) {
+async function derivLesson(perf) {
   const tags = [];
 
   // Categorize outcome
@@ -217,15 +284,21 @@ function derivLesson(perf) {
 
   if (!rule) return null;
 
+  const { config } = await import("./config.js");
+
   return {
     id: Date.now(),
     rule,
+    type: "specific",
     tags,
     outcome,
     context,
     pnl_pct: perf.pnl_pct,
     range_efficiency: perf.range_efficiency,
     pool: perf.pool,
+    pattern: extractPattern(perf),
+    score: 1.0,
+    expires_at: computeExpiresAt("specific", config.lessons),
     created_at: new Date().toISOString(),
   };
 }
@@ -470,8 +543,12 @@ export function evolveThresholds(perfData, config) {
   data.lessons.push({
     id: Date.now(),
     rule: `[AUTO-EVOLVED @ ${recentData.length} positions (${windowLabel}d window)] ${Object.entries(changes).map(([k, v]) => `${k}=${v}`).join(", ")} — ${Object.values(rationale).join("; ")}`,
+    type: "evolved",
     tags: ["evolution", "config_change"],
     outcome: "manual",
+    pattern: null,
+    score: 1.0,
+    expires_at: computeExpiresAt("evolved", config.lessons),
     created_at: new Date().toISOString(),
   });
   save(data);
@@ -520,17 +597,22 @@ function nudge(current, target, maxChange) {
  * @param {boolean}  opts.pinned - Always inject regardless of cap
  * @param {string}   opts.role   - "SCREENER" | "MANAGER" | "GENERAL" | null (all roles)
  */
-export function addLesson(rule, tags = [], { pinned = false, role = null } = {}) {
+export async function addLesson(rule, tags = [], { pinned = false, role = null } = {}) {
   const safeRule = sanitizeLessonText(rule);
   if (!safeRule) return;
+  const { config } = await import("./config.js");
   const data = load();
   data.lessons.push({
     id: Date.now(),
     rule: safeRule,
+    type: "specific",
     tags,
     outcome: "manual",
     pinned: !!pinned,
     role: role || null,
+    pattern: null,
+    score: 1.0,
+    expires_at: pinned ? null : computeExpiresAt("specific", config.lessons),
     created_at: new Date().toISOString(),
   });
   save(data);

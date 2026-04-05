@@ -88,6 +88,15 @@ export const config = {
     binsBelow: u.binsBelow ?? 69,
   },
 
+  // ─── Lesson Management ──────────────────
+  lessons: {
+    maxLessons:       u.lessons?.maxLessons       ?? u.maxLessons       ?? 20,
+    specificTtlDays:  u.lessons?.specificTtlDays  ?? u.specificTtlDays  ?? 7,
+    patternTtlDays:   u.lessons?.patternTtlDays   ?? u.patternTtlDays   ?? 30,
+    evolvedTtlDays:   u.lessons?.evolvedTtlDays   ?? u.evolvedTtlDays   ?? 14,
+    mergeThreshold:   u.lessons?.mergeThreshold   ?? u.mergeThreshold   ?? 3,
+  },
+
   // ─── Scheduling ─────────────────────────
   schedule: {
     managementIntervalMin:  u.managementIntervalMin  ?? 10,
