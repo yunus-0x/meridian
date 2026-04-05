@@ -37,11 +37,7 @@ const INTENT_TOOLS = {
   selfupdate:  new Set(["self_update"]),
   balance:     new Set(["get_wallet_balance", "get_my_positions", "get_wallet_positions"]),
   positions:   new Set(["get_my_positions", "get_position_pnl", "get_wallet_balance", "set_position_note", "get_wallet_positions"]),
-<<<<<<< HEAD
-  strategy:    new Set(["list_strategies", "get_strategy", "add_strategy", "remove_strategy", "set_active_strategy"]),
-=======
   strategy:    new Set(["list_strategies", "get_strategy", "add_strategy", "update_strategy", "delete_strategy", "remove_strategy", "set_active_strategy"]),
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
   screen:      new Set(["get_top_candidates", "get_token_holders", "get_token_narrative", "get_token_info", "search_pools", "check_smart_wallets_on_pool", "get_pool_detail", "get_my_positions", "discover_pools"]),
   memory:      new Set(["get_pool_memory", "add_pool_note", "list_blacklist", "add_to_blacklist", "remove_from_blacklist"]),
   smartwallet: new Set(["add_smart_wallet", "remove_smart_wallet", "list_smart_wallets", "check_smart_wallets_on_pool"]),
@@ -102,24 +98,13 @@ const client = new OpenAI({
 
 const DEFAULT_MODEL = process.env.LLM_MODEL || "openrouter/healer-alpha";
 
-<<<<<<< HEAD
 const TOOL_REQUIRED_INTENTS = /\b(deploy|open position|open|add liquidity|lp into|invest in|close|exit|withdraw|remove liquidity|claim|harvest|collect|swap|convert|sell|exchange|block|unblock|blacklist|self.?update|pull latest|git pull|update yourself|config|setting|threshold|set |change|update |balance|wallet|position|portfolio|pnl|yield|range|screen|candidate|find pool|search|research|token|smart wallet|whale|watch.?list|tracked wallet|study top|top lpers?|lp behavior|who.?s lping|performance|history|stats|report|lesson|learned|teach|pin|unpin)\b/i;
-
-function shouldRequireRealToolUse(goal, agentType, requireTool) {
-  if (requireTool) return true;
-  if (agentType === "MANAGER") return false;
-  return TOOL_REQUIRED_INTENTS.test(goal);
-=======
-const MUTATING_TOOL_INTENTS = /\b(deploy|open position|add liquidity|lp into|invest in|close|exit|withdraw|remove liquidity|claim|harvest|collect|swap|convert|sell|exchange|block|unblock|blacklist|add smart wallet|remove smart wallet|add wallet|remove wallet|pin|unpin|clear lesson|add lesson|set active strategy|remove strategy|add strategy|set |change |update |self.?update|pull latest|git pull|update yourself)\b/i;
-const LIVE_DATA_TOOL_INTENTS = /\b(balance|wallet|position|portfolio|pnl|yield|range|show positions|open positions|screen|candidate|find pool|search|research|analyze|check pool|token holders|narrative|study top|top lpers?|lp behavior|who.?s lping|performance|history|stats|report|list smart wallets|list blacklist|list blocked deployers|list lessons)\b/i;
 const CONFIG_READ_ONLY_INTENTS = /\b(check|show|what(?:'s| is)?|review|inspect|see)\b.*\b(config|settings?|thresholds?)\b/i;
 
 function shouldRequireRealToolUse(goal, agentType, interactive = false) {
   if (agentType === "MANAGER") return false;
   if (CONFIG_READ_ONLY_INTENTS.test(goal)) return false;
-  if (MUTATING_TOOL_INTENTS.test(goal)) return true;
-  return interactive && LIVE_DATA_TOOL_INTENTS.test(goal);
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
+  return interactive && TOOL_REQUIRED_INTENTS.test(goal);
 }
 
 function buildMessages(systemPrompt, sessionHistory, goal, providerMode = "system") {
@@ -158,11 +143,7 @@ function isToolChoiceRequiredError(error) {
  * @returns {string} - The agent's final text response
  */
 export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHistory = [], agentType = "GENERAL", model = null, maxOutputTokens = null, options = {}) {
-<<<<<<< HEAD
-  const { requireTool = false, interactive = false, onToolStart = null, onToolFinish = null } = options;
-=======
   const { interactive = false, onToolStart = null, onToolFinish = null } = options;
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
   // Build dynamic system prompt with current portfolio state
   const [portfolio, positions] = await Promise.all([getWalletBalances(), getMyPositions()]);
   const stateSummary = getStateSummary();
@@ -187,11 +168,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   // These lock after first attempt regardless of success — retrying them is always wrong
   const NO_RETRY_TOOLS = new Set(["deploy_position"]);
   const firedOnce = new Set();
-<<<<<<< HEAD
-  const mustUseRealTool = shouldRequireRealToolUse(goal, agentType, requireTool);
-=======
   const mustUseRealTool = shouldRequireRealToolUse(goal, agentType, interactive);
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
   let sawToolCall = false;
   let noToolRetryCount = 0;
 

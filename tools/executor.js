@@ -144,11 +144,6 @@ const toolMap = {
       timeframe: ["screening", "timeframe"],
       category: ["screening", "category"],
       minTokenFeesSol: ["screening", "minTokenFeesSol"],
-<<<<<<< HEAD
-      maxBundlePct:     ["screening", "maxBundlePct"],
-      maxBotHoldersPct: ["screening", "maxBotHoldersPct"],
-      maxTop10Pct: ["screening", "maxTop10Pct"],
-=======
       avoidPvpSymbols: ["screening", "avoidPvpSymbols"],
       blockPvpSymbols: ["screening", "blockPvpSymbols"],
       maxBundlePct:     ["screening", "maxBundlePct"],
@@ -156,7 +151,6 @@ const toolMap = {
       maxTop10Pct: ["screening", "maxTop10Pct"],
       allowedLaunchpads: ["screening", "allowedLaunchpads"],
       blockedLaunchpads: ["screening", "blockedLaunchpads"],
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
       minTokenAgeHours: ["screening", "minTokenAgeHours"],
       maxTokenAgeHours: ["screening", "maxTokenAgeHours"],
       athFilterPct:     ["screening", "athFilterPct"],

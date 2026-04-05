@@ -98,7 +98,6 @@ Returns top pool candidates fully enriched: pool metrics, token audit, holders, 
 Output: { candidates: [{name, pool, bin_step, fee_pct, volume, tvl, organic_score, active_bin, smart_wallets, token: {holders, audit, global_fees_sol, ...}, holders, narrative, pool_memory}] }
 \`\`\`
 
-<<<<<<< HEAD
 ### meridian study --pool <addr> [--limit 4]
 Studies top LPers on a pool. Returns behaviour patterns, hold times, win rates, strategies.
 \`\`\`
@@ -146,9 +145,6 @@ Returns DLMM positions for any wallet address.
 \`\`\`
 Output: { wallet, positions: [...], total_positions }
 \`\`\`
-
-=======
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
 ### meridian config get
 Returns the full runtime config.
 
@@ -158,7 +154,15 @@ Updates a config key. Parses value as JSON when possible.
 Valid keys: minTvl, maxTvl, minVolume, maxPositions, deployAmountSol, managementIntervalMin, screeningIntervalMin, managementModel, screeningModel, generalModel, autoSwapAfterClaim, minClaimAmount, outOfRangeWaitMinutes
 \`\`\`
 
-<<<<<<< HEAD
+### meridian config get
+Returns the full runtime config.
+
+### meridian config set <key> <value>
+Updates a config key. Parses value as JSON when possible.
+\`\`\`
+Valid keys: minTvl, maxTvl, minVolume, maxPositions, deployAmountSol, managementIntervalMin, screeningIntervalMin, managementModel, screeningModel, generalModel, autoSwapAfterClaim, minClaimAmount, outOfRangeWaitMinutes
+\`\`\`
+
 ### meridian lessons [--limit 50]
 Lists all lessons from lessons.json. Shows rule, tags, pinned status, outcome, role.
 \`\`\`
@@ -206,9 +210,6 @@ Shows pending Discord signal queue from the discord-listener process.
 \`\`\`
 Output: { count, pending, processed, signals: [{id, symbol, pool, author, channel, queued_at, rug_score, status}] }
 \`\`\`
-
-=======
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
 ### meridian start [--dry-run]
 Starts the autonomous agent with cron jobs (management + screening).
 
@@ -241,7 +242,6 @@ const { values: flags } = parseArgs({
     from:       { type: "string" },
     to:         { type: "string" },
     strategy:   { type: "string" },
-<<<<<<< HEAD
     query:      { type: "string" },
     mint:       { type: "string" },
     wallet:     { type: "string" },
@@ -253,10 +253,6 @@ const { values: flags } = parseArgs({
     "amount-y":   { type: "string" },
     "bps":        { type: "string" },
     "no-claim":   { type: "boolean" },
-=======
-    "bins-below": { type: "string" },
-    "bins-above": { type: "string" },
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
     "skip-swap":  { type: "boolean" },
     "dry-run":    { type: "boolean" },
     "silent":     { type: "boolean" },
@@ -305,14 +301,10 @@ switch (subcommand) {
       poolAddress = found.pool;
     }
 
-<<<<<<< HEAD
     const pnl = await getPositionPnl({ pool_address: poolAddress, position_address: positionAddress });
     if (tracked?.strategy) pnl.strategy = tracked.strategy;
     if (tracked?.instruction) pnl.instruction = tracked.instruction;
     out(pnl);
-=======
-    out(await getPositionPnl({ pool_address: poolAddress, position_address: positionAddress }));
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
     break;
   }
 
@@ -379,7 +371,6 @@ switch (subcommand) {
     break;
   }
 
-<<<<<<< HEAD
   // ── token-info ──────────────────────────────────────────────────
   case "token-info": {
     const query = flags.query || flags.mint || argv.find((a, i) => !a.startsWith("-") && i > 0 && a !== "token-info");
@@ -448,17 +439,10 @@ switch (subcommand) {
     if (!flags.pool) die("Usage: meridian deploy --pool <addr> --amount <sol>");
     const amountX = flags["amount-x"] ? parseFloat(flags["amount-x"]) : undefined;
     if (!flags.amount && !amountX) die("--amount or --amount-x is required");
-=======
-  // ── deploy ───────────────────────────────────────────────────────
-  case "deploy": {
-    if (!flags.pool) die("Usage: meridian deploy --pool <addr> --amount <sol>");
-    if (!flags.amount) die("--amount is required");
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
 
     const { executeTool } = await import("./tools/executor.js");
     out(await executeTool("deploy_position", {
       pool_address: flags.pool,
-<<<<<<< HEAD
       amount_y: flags.amount ? parseFloat(flags.amount) : undefined,
       amount_x: amountX,
       strategy: flags.strategy,
@@ -466,12 +450,6 @@ switch (subcommand) {
       bins_below: flags["bins-below"] ? parseInt(flags["bins-below"]) : undefined,
       bins_above: flags["bins-above"] ? parseInt(flags["bins-above"]) : undefined,
       allow_duplicate_pool: argv.includes("--allow-duplicate-pool"),
-=======
-      amount_y: parseFloat(flags.amount),
-      strategy: flags.strategy,
-      bins_below: flags["bins-below"] ? parseInt(flags["bins-below"]) : undefined,
-      bins_above: flags["bins-above"] ? parseInt(flags["bins-above"]) : undefined,
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
     }));
     break;
   }
@@ -542,7 +520,6 @@ switch (subcommand) {
     break;
   }
 
-<<<<<<< HEAD
   // ── study ────────────────────────────────────────────────────────
   case "study": {
     if (!flags.pool) die("Usage: meridian study --pool <addr> [--limit 4]");
@@ -551,9 +528,6 @@ switch (subcommand) {
     out(await studyTopLPers({ pool_address: flags.pool, limit }));
     break;
   }
-
-=======
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
   // ── start ────────────────────────────────────────────────────────
   case "start": {
     const { startCronJobs } = await import("./index.js");
@@ -562,7 +536,69 @@ switch (subcommand) {
     break;
   }
 
-<<<<<<< HEAD
+  // ── token-info ──────────────────────────────────────────────────
+  case "token-info": {
+    const query = flags.query || flags.mint || argv.find((a, i) => !a.startsWith("-") && i > 0 && a !== "token-info");
+    if (!query) die("Usage: meridian token-info --query <mint_or_symbol>");
+    const { getTokenInfo } = await import("./tools/token.js");
+    out(await getTokenInfo({ query }));
+    break;
+  }
+
+  // ── token-holders ─────────────────────────────────────────────
+  case "token-holders": {
+    const mint = flags.mint || argv.find((a, i) => !a.startsWith("-") && i > 0 && a !== "token-holders");
+    if (!mint) die("Usage: meridian token-holders --mint <addr>");
+    const { getTokenHolders } = await import("./tools/token.js");
+    const limit = flags.limit ? parseInt(flags.limit) : 20;
+    out(await getTokenHolders({ mint, limit }));
+    break;
+  }
+
+  // ── token-narrative ───────────────────────────────────────────
+  case "token-narrative": {
+    const mint = flags.mint || argv.find((a, i) => !a.startsWith("-") && i > 0 && a !== "token-narrative");
+    if (!mint) die("Usage: meridian token-narrative --mint <addr>");
+    const { getTokenNarrative } = await import("./tools/token.js");
+    out(await getTokenNarrative({ mint }));
+    break;
+  }
+
+  // ── pool-detail ───────────────────────────────────────────────
+  case "pool-detail": {
+    if (!flags.pool) die("Usage: meridian pool-detail --pool <addr> [--timeframe 5m]");
+    const { getPoolDetail } = await import("./tools/screening.js");
+    out(await getPoolDetail({ pool_address: flags.pool, timeframe: flags.timeframe || "5m" }));
+    break;
+  }
+
+  // ── search-pools ──────────────────────────────────────────────
+  case "search-pools": {
+    const query = flags.query || argv.find((a, i) => !a.startsWith("-") && i > 0 && a !== "search-pools");
+    if (!query) die("Usage: meridian search-pools --query <name_or_symbol>");
+    const { searchPools } = await import("./tools/dlmm.js");
+    const limit = flags.limit ? parseInt(flags.limit) : 10;
+    out(await searchPools({ query, limit }));
+    break;
+  }
+
+  // ── active-bin ────────────────────────────────────────────────
+  case "active-bin": {
+    if (!flags.pool) die("Usage: meridian active-bin --pool <addr>");
+    const { getActiveBin } = await import("./tools/dlmm.js");
+    out(await getActiveBin({ pool_address: flags.pool }));
+    break;
+  }
+
+  // ── wallet-positions ──────────────────────────────────────────
+  case "wallet-positions": {
+    const wallet = flags.wallet || argv.find((a, i) => !a.startsWith("-") && i > 0 && a !== "wallet-positions");
+    if (!wallet) die("Usage: meridian wallet-positions --wallet <addr>");
+    const { getWalletPositions } = await import("./tools/dlmm.js");
+    out(await getWalletPositions({ wallet_address: wallet }));
+    break;
+  }
+
   // ── lessons ──────────────────────────────────────────────────────
   case "lessons": {
     if (sub2 === "add") {
@@ -700,9 +736,6 @@ switch (subcommand) {
     }));
     break;
   }
-
-=======
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
   default:
     die(`Unknown command: ${subcommand}. Run 'meridian help' for usage.`);
 }

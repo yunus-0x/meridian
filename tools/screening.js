@@ -115,18 +115,12 @@ export async function discoverPools({
     `dlmm_bin_step<=${s.maxBinStep}`,
     `fee_active_tvl_ratio>=${s.minFeeActiveTvlRatio}`,
     `base_token_organic_score>=${s.minOrganic}`,
-<<<<<<< HEAD
-    "quote_token_organic_score>=60",
-    s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
-    s.maxTokenAgeHours != null ? `base_token_created_at>=${Date.now() - s.maxTokenAgeHours * 3_600_000}` : null,
-=======
     `quote_token_organic_score>=${s.minQuoteOrganic}`,
     s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
     s.maxTokenAgeHours != null ? `base_token_created_at>=${Date.now() - s.maxTokenAgeHours * 3_600_000}` : null,
     Array.isArray(s.allowedLaunchpads) && s.allowedLaunchpads.length > 0
       ? `base_token_launchpad=[${s.allowedLaunchpads.join(",")}]`
       : null,
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
   ].filter(Boolean).join("&&");
 
   const url = `${POOL_DISCOVERY_BASE}/pools?` +
@@ -229,8 +223,6 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     })
     .slice(0, limit);
 
-<<<<<<< HEAD
-=======
   if (config.screening.avoidPvpSymbols && eligible.length > 0) {
     await enrichPvpRisk(eligible);
     if (config.screening.blockPvpSymbols) {
@@ -241,8 +233,6 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       }
     }
   }
-
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
   // Enrich with OKX data — advanced info (risk/bundle/sniper) + ATH price (no API key required)
   if (eligible.length > 0) {
     const { getAdvancedInfo, getPriceInfo, getClusterList, getRiskFlags } = await import("./okx.js");

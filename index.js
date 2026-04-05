@@ -16,11 +16,8 @@ import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
-<<<<<<< HEAD
-=======
 import { stageSignals } from "./signal-tracker.js";
 import { getWeightsSummary } from "./signal-weights.js";
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
@@ -460,13 +457,10 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
     const passing = allCandidates.filter(({ pool, ti }) => {
       const launchpad = ti?.launchpad ?? null;
-<<<<<<< HEAD
-=======
       if (launchpad && config.screening.allowedLaunchpads?.length > 0 && !config.screening.allowedLaunchpads.includes(launchpad)) {
         log("screening", `Skipping ${pool.name} — launchpad ${launchpad} not in allow-list`);
         return false;
       }
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
       if (launchpad && config.screening.blockedLaunchpads.includes(launchpad)) {
         log("screening", `Skipping ${pool.name} — blocked launchpad (${launchpad})`);
         return false;
@@ -481,11 +475,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     });
 
     if (passing.length === 0) {
-<<<<<<< HEAD
-      screenReport = `No candidates available (all blocked by launchpad filter).`;
-=======
       screenReport = `No candidates available (all filtered by launchpad / holder-quality rules).`;
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
       return screenReport;
     }
 
@@ -523,21 +513,15 @@ export async function runScreeningCycle({ silent = false } = {}) {
         pool.dex_screener_paid  ? "dex_screener_paid"  : null,
         pool.dev_sold_all       ? "dev_sold_all(bullish)" : null,
       ].filter(Boolean).join(", ");
-<<<<<<< HEAD
-=======
       const pvpLine = pool.is_pvp
         ? `  pvp: HIGH — rival ${pool.pvp_rival_name || pool.pvp_symbol} (${pool.pvp_rival_mint?.slice(0, 8)}...) has pool ${pool.pvp_rival_pool?.slice(0, 8)}..., tvl=$${pool.pvp_rival_tvl}, holders=${pool.pvp_rival_holders}, fees=${pool.pvp_rival_fees}SOL`
         : null;
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
 
       const block = [
         `POOL: ${pool.name} (${pool.pool})`,
         `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.active_tvl}, volatility=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
         `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
-<<<<<<< HEAD
-=======
         pvpLine,
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
         okxParts ? `  okx: ${okxParts}` : okxUnavailable ? `  okx: unavailable` : null,
         okxTags  ? `  tags: ${okxTags}` : null,
         pool.price_vs_ath_pct != null ? `  ath: price_vs_ath=${pool.price_vs_ath_pct}%${pool.top_cluster_trend ? `, top_cluster=${pool.top_cluster_trend}` : ""}` : null,
@@ -548,11 +532,6 @@ export async function runScreeningCycle({ silent = false } = {}) {
         mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
       ].filter(Boolean).join("\n");
 
-<<<<<<< HEAD
-      return block;
-    });
-
-=======
       // Stage signals for Darwinian weighting — captured before LLM decides
       if (config.darwin?.enabled) {
         stageSignals(pool.pool, {
@@ -571,8 +550,6 @@ export async function runScreeningCycle({ silent = false } = {}) {
     });
 
     const weightsSummary = config.darwin?.enabled ? getWeightsSummary() : null;
-
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
     const { content } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
@@ -886,10 +863,6 @@ async function telegramHandler(msg) {
     const agentModel = agentRole === "SCREENER" ? config.llm.screeningModel : config.llm.generalModel;
     liveMessage = await createLiveMessage("🤖 Live Update", `Request: ${text.slice(0, 240)}`);
     const { content } = await agentLoop(text, config.llm.maxSteps, sessionHistory, agentRole, agentModel, null, {
-<<<<<<< HEAD
-      requireTool: true,
-=======
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
       interactive: true,
       onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
       onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
@@ -1195,11 +1168,7 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
     // ── Free-form chat ───────────────────────
     await runBusy(async () => {
       log("user", input);
-<<<<<<< HEAD
-      const { content } = await agentLoop(input, config.llm.maxSteps, sessionHistory, "GENERAL", config.llm.generalModel, null, { requireTool: true });
-=======
       const { content } = await agentLoop(input, config.llm.maxSteps, sessionHistory, "GENERAL", config.llm.generalModel, null, { interactive: true });
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
       appendHistory(input, content);
       console.log(`\n${content}\n`);
     });

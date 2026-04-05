@@ -18,18 +18,12 @@
 
   "timeframe": "5m",
   "category": "trending",
-<<<<<<< HEAD
-=======
   "excludeHighSupplyConcentration": true,
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
   "minTvl": 10000,
   "maxTvl": 150000,
   "minVolume": 500,
   "minOrganic": 60,
-<<<<<<< HEAD
-=======
   "minQuoteOrganic": 60,
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
   "minHolders": 500,
   "minMcap": 150000,
   "maxMcap": 10000000,
@@ -37,18 +31,12 @@
   "maxBinStep": 125,
   "minFeeActiveTvlRatio": 0.05,
   "minTokenFeesSol": 30,
-<<<<<<< HEAD
-  "maxBundlePct": 30,
-  "maxBotHoldersPct": 30,
-  "maxTop10Pct": 60,
-=======
   "avoidPvpSymbols": true,
   "blockPvpSymbols": false,
   "maxBundlePct": 30,
   "maxBotHoldersPct": 30,
   "maxTop10Pct": 60,
   "allowedLaunchpads": [],
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
   "blockedLaunchpads": [],
   "minTokenAgeHours": null,
   "maxTokenAgeHours": null,
@@ -91,10 +79,7 @@
   "darwinFloor": 0.3,
   "darwinCeiling": 2.5,
   "darwinMinSamples": 10,
-<<<<<<< HEAD
-=======
 
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
   "telegramChatId": "",
   "hiveMindUrl": "",
   "hiveMindApiKey": ""
