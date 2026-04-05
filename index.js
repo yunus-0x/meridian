@@ -21,6 +21,18 @@ log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
 log("startup", `Model: ${process.env.LLM_MODEL || "hermes-3-405b"}`);
 
+// OKX API health check
+import { healthCheck as okxHealthCheck } from "./tools/okx.js";
+okxHealthCheck().then((r) => {
+  if (r.ok && r.authError) {
+    log("startup", `OKX API: OK (${r.latencyMs}ms, public mode — ${r.authError})`);
+  } else if (r.ok) {
+    log("startup", `OKX API: OK (${r.latencyMs}ms, auth: ${r.auth ? "yes" : "no"})`);
+  } else {
+    log("startup", `OKX API: FAILED — ${r.error} (auth: ${r.auth ? "yes" : "no"})`);
+  }
+}).catch(() => {});
+
 const TP_PCT = config.management.takeProfitFeePct;
 const DEPLOY = config.management.deployAmountSol;
 
