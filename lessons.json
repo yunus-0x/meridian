@@ -1,0 +1,20 @@
+[
+  {
+    "rule": "STRATEGY: Use ONLY 'bid_ask' strategy with SOL-side deployment (X token). Max Price must be 0% (no bins above active). Min Price must cover -40% to -70% range. Use 'deployAmountSol: 0.7'.",
+    "tags": ["strategy", "rules"],
+    "role": "SCREENER",
+    "pinned": true
+  },
+  {
+    "rule": "EXIT: Close position immediately if Fee/TVL 24h (Yield) drops below 7%.",
+    "tags": ["exit", "yield"],
+    "role": "MANAGER",
+    "pinned": true
+  },
+  {
+    "rule": "EXIT: Close position if Out-of-Range (OOR) > 15 minutes, or price drops -10% from entry, or take profit 5% with trailing stop 3% from peak.",
+    "tags": ["exit", "oor", "sl", "tp"],
+    "role": "MANAGER",
+    "pinned": true
+  }
+]
