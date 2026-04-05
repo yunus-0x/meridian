@@ -423,7 +423,6 @@ All fields are optional — defaults shown. Edit `user-config.json`.
 | `screeningModel` | `openai/gpt-oss-20b:free` | LLM for screening cycles |
 | `generalModel` | `openai/gpt-oss-20b:free` | LLM for REPL / chat |
 
-<<<<<<< HEAD
 > Override model at runtime: `node cli.js config set screeningModel anthropic/claude-opus-4-5`
 
 ---

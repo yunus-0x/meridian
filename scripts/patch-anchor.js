@@ -64,7 +64,6 @@ if (fs.existsSync(dlmmMjs)) {
   // Fix 3: ESM cannot find named export 'BN' from CommonJS anchor
   // We rewrite the imports to remove BN and then add a single top-level BN import.
 
-<<<<<<< HEAD
   // Strip any existing `import BN from "bn.js"` lines (any quote style)
   src = src.replace(/^import BN from ["']bn\.js["'];\n/gm, "");
   // Also strip CJS-style BN re-exports that some bundle versions emit
@@ -73,13 +72,6 @@ if (fs.existsSync(dlmmMjs)) {
 
   // Add exactly one canonical BN import at the top if BN is used anywhere
   if (src.includes('BN')) {
-=======
-  // Strip any existing duplicate `import BN from "bn.js"` lines first
-  src = src.replace(/^import BN from "bn\.js";\n/gm, "");
-
-  // Add exactly one BN import at the top if BN is used
-  if (src.includes('from "@coral-xyz/anchor"') && src.includes('BN')) {
->>>>>>> 6655b71cfbbf7ff87d54d1ac68fcd27885480052
     src = 'import BN from "bn.js";\n' + src;
   }
 
