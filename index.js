@@ -300,10 +300,23 @@ export async function runManagementCycle({ silent = false } = {}) {
         actionMap.set(p.position, { action: "CLOSE", rule: 6, reason: `fee velocity ${p.fee_velocity_pct}% of peak — volume dying` });
         continue;
       }
-      // Claim rule
-      if ((p.unclaimed_fees_usd ?? 0) >= config.management.minClaimAmount) {
-        actionMap.set(p.position, { action: "CLAIM" });
-        continue;
+      // Claim rule — dynamic threshold based on fee velocity
+      // Hot pool (fees accelerating): claim early to lock in gains before unexpected close
+      // Cold pool (fees slowing): wait for larger accumulation to justify gas cost
+      {
+        const baseThreshold = config.management.minClaimAmount ?? 5;
+        const vel = p.fee_velocity_pct;
+        const hotMult  = config.management.smartClaimHotMult  ?? 0.4;
+        const coldMult = config.management.smartClaimColdMult ?? 2.0;
+        const effectiveThreshold = vel != null
+          ? vel > 150 ? baseThreshold * hotMult   // fees surging → claim soon
+          : vel < 50  ? baseThreshold * coldMult  // fees slow → save gas
+          : baseThreshold
+          : baseThreshold;
+        if ((p.unclaimed_fees_usd ?? 0) >= effectiveThreshold) {
+          actionMap.set(p.position, { action: "CLAIM" });
+          continue;
+        }
       }
       actionMap.set(p.position, { action: "STAY" });
     }
@@ -463,17 +476,32 @@ export async function runScreeningCycle({ silent = false } = {}) {
   try {
     // Reuse pre-fetched balance — no extra RPC call needed
     const currentBalance = preBalance;
-    const deployAmount = computeDeployAmount(currentBalance.sol);
-    log("cron", `Computed deploy amount: ${deployAmount} SOL (wallet: ${currentBalance.sol} SOL)`);
+    const baseDeployAmount = computeDeployAmount(currentBalance.sol);
 
+    // Graduated position sizing: scale deploy amount by pool quality score.
+    // top_score is available after getTopCandidates() — fetched below, then applied.
+    // We pass adjustedDeployAmount to the LLM prompt so it deploys the right size.
+    // Multipliers: score≥70 → +30%, score<50 → −25%, else flat.
+    const topCandidates = await getTopCandidates({ limit: 10 }).catch(() => null);
+    const topScore = topCandidates?.top_score ?? 50;
+    const sizeMult = topScore >= 70
+      ? (config.screening.highScoreSizeMult ?? 1.3)
+      : topScore < 50
+        ? (config.screening.lowScoreSizeMult ?? 0.75)
+        : 1.0;
+    const deployAmount = parseFloat(
+      Math.min(config.risk.maxDeployAmount,
+        Math.max(config.management.deployAmountSol, baseDeployAmount * sizeMult)
+      ).toFixed(2)
+    );
+    log("cron", `Deploy sizing: base=${baseDeployAmount} SOL × ${sizeMult} (score=${topScore}) = ${deployAmount} SOL`);
     // Load active strategy
     const activeStrategy = getActiveStrategy();
     const strategyBlock = activeStrategy
       ? `ACTIVE STRATEGY: ${activeStrategy.name} — LP: ${activeStrategy.lp_strategy} | bins_above: ${activeStrategy.range?.bins_above ?? 0} (FIXED — never change) | deposit: ${activeStrategy.entry?.single_side === "sol" ? "SOL only (amount_y, amount_x=0)" : "dual-sided"} | best for: ${activeStrategy.best_for}`
-      : `No active strategy — use default bid_ask, bins_above: 0, SOL only.`;
+      : `No active strategy — use recommended_strategy from each pool (bid_ask or spot), bins_above: 0, SOL only.`;
 
-    // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
-    const topCandidates = await getTopCandidates({ limit: 10 }).catch(() => null);
+    // topCandidates already fetched above for position sizing — reuse result
     const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);
     const earlyFilteredExamples = topCandidates?.filtered_examples || [];
 
@@ -578,6 +606,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
         `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
         activeBin != null ? `  active_bin: ${activeBin}` : null,
         priceChange != null ? `  1h: price${priceChange >= 0 ? "+" : ""}${priceChange}%, net_buyers=${netBuyers ?? "?"}` : null,
+        pool.volume_change_pct != null ? `  volume_change: ${pool.volume_change_pct >= 0 ? "+" : ""}${pool.volume_change_pct}% (${pool.volume_change_pct > 20 ? "accelerating" : pool.volume_change_pct < -30 ? "declining" : "stable"})` : null,
+        `  quality_score: ${pool.quality_score ?? "?"}/100 | recommended_strategy: ${pool.recommended_strategy ?? "bid_ask"}`,
         n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
         mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
       ].filter(Boolean).join("\n");
@@ -594,9 +624,12 @@ PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
 
 STEPS:
-1. Pick the best candidate based on narrative quality, smart wallets, and pool metrics.
+1. Pick the HIGHEST quality_score candidate that passes your qualitative check (narrative, smart wallets).
+   quality_score is pre-computed — use it as primary ranking signal.
 2. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
-   bins_below = round(35 + (volatility/5)*55) clamped to [35,90].
+   - strategy: use recommended_strategy from the pool (bid_ask or spot). Override only if user specified.
+   - bins_below: do NOT pass — auto-calculated from volatility server-side.
+   - amount_y: use exactly ${deployAmount} SOL.
 3. Report in this exact format (no tables, no extra sections):
    🚀 DEPLOYED
 

@@ -52,6 +52,21 @@ export const config = {
     // minEntry5mPricePct: e.g. -15 = skip if price already -15% (token in freefall)
     maxEntry5mPricePct: u.maxEntry5mPricePct ?? null, // null = disabled
     minEntry5mPricePct: u.minEntry5mPricePct ?? null, // null = disabled
+    // Pool age window: avoid very new pools (inflated metrics) and very old (saturated).
+    // Uses token_age_hours as proxy. null = disabled.
+    minPoolAgeHours:    u.minPoolAgeHours    ?? 4,    // skip pools where token < 4h old
+    maxPoolAgeHours:    u.maxPoolAgeHours    ?? 168,  // skip pools where token > 7 days old
+    // Volume acceleration: bonus/penalty based on whether volume is growing or shrinking.
+    // minVolumeAccelPct: skip pools where volume_change_pct < this value (e.g. -50 = volume collapsing)
+    minVolumeAccelPct:  u.minVolumeAccelPct  ?? -60,  // skip if volume fell >60% in window
+    // Time-of-day bias: during off-peak hours (low global volume), apply stricter thresholds.
+    // off-peak = outside US hours (14:00-22:00 UTC) and Asian hours (01:00-08:00 UTC)
+    timeOfDayBias:      u.timeOfDayBias      ?? true,
+    offPeakMultiplier:  u.offPeakMultiplier  ?? 1.3,  // raise volume/fee thresholds by 30% off-peak
+    // Position sizing multipliers by quality_score bracket
+    // Final deploy = computeDeployAmount(wallet) × sizeMultiplier, capped at maxDeployAmount
+    highScoreSizeMult:  u.highScoreSizeMult  ?? 1.3,  // score ≥ 70 → deploy 30% more
+    lowScoreSizeMult:   u.lowScoreSizeMult   ?? 0.75, // score < 50 → deploy 25% less
   },
 
   // ─── Position Management ────────────────
@@ -67,6 +82,11 @@ export const config = {
     oorCooldownHours:       u.oorCooldownHours       ?? 12,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
     stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
+    // Adaptive (PnL-based) stop-loss: as position peaks, stop-loss floor rises automatically.
+    // effectiveSL = max(stopLossPct, peak_pnl - maxDrawdownFromPeak)
+    // Example: peak=+8%, maxDrawdown=12 → floor=-4% (never lose more than 12% from peak)
+    // Set to 0 to disable (use fixed stopLossPct only).
+    maxDrawdownFromPeak:   u.maxDrawdownFromPeak   ?? 12,
     takeProfitFeePct:      u.takeProfitFeePct      ?? 5,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
@@ -79,6 +99,11 @@ export const config = {
     // close the position and immediately redeploy at the new active bin in the same pool.
     // Skips screening cycle and keeps capital working with zero dead time.
     rebalanceOnOOR:        u.rebalanceOnOOR        ?? true,
+    // Smart claim: dynamic threshold based on fee velocity.
+    // When fees are hot (velocity >150%), claim at minClaimAmount × smartClaimHotMult (lower threshold = capture more).
+    // When fees are slow (velocity <50%), claim at minClaimAmount × smartClaimColdMult (save gas).
+    smartClaimHotMult:     u.smartClaimHotMult     ?? 0.4,  // hot: claim at 40% of base threshold
+    smartClaimColdMult:    u.smartClaimColdMult    ?? 2.0,  // cold: claim at 200% of base threshold
     minSolToOpen:          u.minSolToOpen          ?? 0.55,
     deployAmountSol:       u.deployAmountSol       ?? 0.5,
     gasReserve:            u.gasReserve            ?? 0.2,
@@ -183,11 +208,21 @@ export function reloadScreeningThresholds() {
     if (fresh.maxVolatility         !== undefined) s.maxVolatility         = fresh.maxVolatility;
     if (fresh.maxEntry5mPricePct    !== undefined) s.maxEntry5mPricePct    = fresh.maxEntry5mPricePct;
     if (fresh.minEntry5mPricePct    !== undefined) s.minEntry5mPricePct    = fresh.minEntry5mPricePct;
+    if (fresh.minPoolAgeHours       !== undefined) s.minPoolAgeHours       = fresh.minPoolAgeHours;
+    if (fresh.maxPoolAgeHours       !== undefined) s.maxPoolAgeHours       = fresh.maxPoolAgeHours;
+    if (fresh.minVolumeAccelPct     !== undefined) s.minVolumeAccelPct     = fresh.minVolumeAccelPct;
+    if (fresh.timeOfDayBias         !== undefined) s.timeOfDayBias         = fresh.timeOfDayBias;
+    if (fresh.offPeakMultiplier     !== undefined) s.offPeakMultiplier     = fresh.offPeakMultiplier;
+    if (fresh.highScoreSizeMult     !== undefined) s.highScoreSizeMult     = fresh.highScoreSizeMult;
+    if (fresh.lowScoreSizeMult      !== undefined) s.lowScoreSizeMult      = fresh.lowScoreSizeMult;
     if (fresh.belowOORWaitMinutes   != null) config.management.belowOORWaitMinutes   = fresh.belowOORWaitMinutes;
     if (fresh.binsAbove             != null) config.strategy.binsAbove               = fresh.binsAbove;
     if (fresh.marketMode            != null) config.marketMode                       = fresh.marketMode;
     if (fresh.minFeeVelocityPct     != null) config.management.minFeeVelocityPct     = fresh.minFeeVelocityPct;
     if (fresh.feeVelocityMinAgeMin  != null) config.management.feeVelocityMinAgeMin  = fresh.feeVelocityMinAgeMin;
     if (fresh.rebalanceOnOOR        != null) config.management.rebalanceOnOOR        = fresh.rebalanceOnOOR;
+    if (fresh.maxDrawdownFromPeak   != null) config.management.maxDrawdownFromPeak   = fresh.maxDrawdownFromPeak;
+    if (fresh.smartClaimHotMult     != null) config.management.smartClaimHotMult     = fresh.smartClaimHotMult;
+    if (fresh.smartClaimColdMult    != null) config.management.smartClaimColdMult    = fresh.smartClaimColdMult;
   } catch { /* ignore */ }
 }

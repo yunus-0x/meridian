@@ -228,6 +228,81 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       return true;
     }));
 
+    // ── Pool age window filter ────────────────────────────────────────
+    // Very new tokens (<4h): metrics inflated — first LPs capture all fees, volume unsustained.
+    // Very old tokens (>7d): established but possibly saturated with LPs.
+    {
+      const minAge = config.screening.minPoolAgeHours;
+      const maxAge = config.screening.maxPoolAgeHours;
+      if (minAge != null || maxAge != null) {
+        const before = eligible.length;
+        eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+          const age = p.token_age_hours;
+          if (age == null) return true; // no data → don't filter
+          if (minAge != null && age < minAge) {
+            log("screening", `Age filter: dropped ${p.name} — token only ${age.toFixed(1)}h old (min ${minAge}h)`);
+            pushFilteredReason(filteredOut, p, `token age ${age.toFixed(1)}h < min ${minAge}h`);
+            return false;
+          }
+          if (maxAge != null && age > maxAge) {
+            log("screening", `Age filter: dropped ${p.name} — token ${age.toFixed(1)}h old (max ${maxAge}h)`);
+            pushFilteredReason(filteredOut, p, `token age ${age.toFixed(1)}h > max ${maxAge}h`);
+            return false;
+          }
+          return true;
+        }));
+        if (eligible.length < before) log("screening", `Age filter removed ${before - eligible.length} pool(s)`);
+      }
+    }
+
+    // ── Volume acceleration filter ────────────────────────────────────
+    // Skip pools where volume is already collapsing — fees will dry up fast.
+    {
+      const minAccel = config.screening.minVolumeAccelPct;
+      if (minAccel != null) {
+        const before = eligible.length;
+        eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+          const accel = p.volume_change_pct;
+          if (accel == null) return true;
+          if (accel < minAccel) {
+            log("screening", `Volume accel filter: dropped ${p.name} — volume ${accel}% (min ${minAccel}%)`);
+            pushFilteredReason(filteredOut, p, `volume change ${accel}% < min ${minAccel}%`);
+            return false;
+          }
+          return true;
+        }));
+        if (eligible.length < before) log("screening", `Volume accel filter removed ${before - eligible.length} pool(s)`);
+      }
+    }
+
+    // ── Time-of-day bias ─────────────────────────────────────────────
+    // During off-peak hours (low global volume), require higher minimum thresholds.
+    // Peak: US hours 14:00-22:00 UTC + Asian partial 01:00-08:00 UTC
+    if (config.screening.timeOfDayBias) {
+      const hour = new Date().getUTCHours();
+      const isPeak = (hour >= 14 && hour < 22) || (hour >= 1 && hour < 8);
+      if (!isPeak) {
+        const mult = config.screening.offPeakMultiplier ?? 1.3;
+        const effectiveMinVolume = (config.screening.minVolume ?? 500) * mult;
+        const effectiveMinFeeRatio = (config.screening.minFeeActiveTvlRatio ?? 0.05) * mult;
+        const before = eligible.length;
+        eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+          if (p.volume_window != null && p.volume_window < effectiveMinVolume) {
+            log("screening", `Off-peak filter: dropped ${p.name} — vol $${p.volume_window} < $${effectiveMinVolume.toFixed(0)} (off-peak)`);
+            pushFilteredReason(filteredOut, p, `off-peak volume $${p.volume_window} < $${effectiveMinVolume.toFixed(0)}`);
+            return false;
+          }
+          if (p.fee_active_tvl_ratio != null && p.fee_active_tvl_ratio < effectiveMinFeeRatio) {
+            log("screening", `Off-peak filter: dropped ${p.name} — fee/tvl ${p.fee_active_tvl_ratio} < ${effectiveMinFeeRatio.toFixed(3)} (off-peak)`);
+            pushFilteredReason(filteredOut, p, `off-peak fee/tvl ${p.fee_active_tvl_ratio} < ${effectiveMinFeeRatio.toFixed(3)}`);
+            return false;
+          }
+          return true;
+        }));
+        if (eligible.length < before) log("screening", `Off-peak filter removed ${before - eligible.length} pool(s) [UTC hour: ${hour}]`);
+      }
+    }
+
     // Price momentum guard — skip pools where price just pumped hard in the timeframe window.
     // Deploying into a post-pump pool = you LP at/near the top, then price dumps below your range.
     // Token with strong downtrend (price_change_pct very negative) is also risky — already in freefall.
@@ -307,6 +382,16 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       if (p.dev_sold_all)      score += 5;
       if (p.dex_boost)         score += 3;
 
+      // ── Volume acceleration bonus/penalty ─────────────────────────
+      // volume_change_pct: how much volume changed in the timeframe window
+      // Accelerating volume = more fees incoming; collapsing volume = fees dying
+      if (p.volume_change_pct != null) {
+        if (p.volume_change_pct > 50)       score += 10; // volume surging
+        else if (p.volume_change_pct > 20)  score += 5;  // volume growing
+        else if (p.volume_change_pct < -30) score -= 8;  // volume declining
+        else if (p.volume_change_pct < -50) score -= 15; // volume collapsing
+      }
+
       // ── Risk penalties ────────────────────────────────────────────
       if (p.is_rugpull)        score -= 40;
       if (p.bundle_pct  != null) score -= p.bundle_pct * 0.4;
@@ -314,6 +399,21 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       if (p.sniper_pct  != null) score -= p.sniper_pct * 0.2;
 
       p.quality_score = Math.round(Math.max(0, Math.min(100, score)));
+
+      // ── Strategy recommendation ───────────────────────────────────
+      // bid_ask: optimal for volatile/meme tokens — single-sided SOL, earn from price swings
+      // spot: better for established/stable tokens — both-sided, lower IL risk
+      const age   = p.token_age_hours;
+      const mcap  = p.mcap;
+      const vol   = p.volatility;
+      const org   = p.organic_score;
+      if (vol >= 2.5 && (mcap == null || mcap < 3_000_000) && (age == null || age < 72)) {
+        p.recommended_strategy = "bid_ask";
+      } else if (org >= 75 && mcap != null && mcap >= 2_000_000) {
+        p.recommended_strategy = "spot";
+      } else {
+        p.recommended_strategy = "bid_ask"; // safe default
+      }
     }
 
     // Sort descending by quality score before returning to LLM

@@ -482,12 +482,28 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   if (changed) save(state);
 
-  // ── Stop loss ──────────────────────────────────────────────────
-  if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
-    return {
-      action: "STOP_LOSS",
-      reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%`,
-    };
+  // ── Adaptive stop-loss (PnL-based trailing floor) ─────────────
+  // effectiveSL = max(stopLossPct, peak_pnl - maxDrawdownFromPeak)
+  // As position peaks, the floor rises automatically — never lose more
+  // than maxDrawdownFromPeak% from the best PnL ever seen.
+  if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null) {
+    const baseSL = mgmtConfig.stopLossPct;
+    const maxDrawdown = mgmtConfig.maxDrawdownFromPeak ?? 0;
+    const peakPnl = pos.peak_pnl_pct ?? 0;
+    // Only tighten floor if peak was meaningful (>1%) to avoid noise tightening SL prematurely
+    const effectiveSL = (maxDrawdown > 0 && peakPnl > 1)
+      ? Math.max(baseSL, peakPnl - maxDrawdown)
+      : baseSL;
+
+    if (currentPnlPct <= effectiveSL) {
+      const adaptive = effectiveSL > baseSL;
+      return {
+        action: "STOP_LOSS",
+        reason: adaptive
+          ? `Adaptive SL: PnL ${currentPnlPct.toFixed(2)}% ≤ floor ${effectiveSL.toFixed(2)}% (peak was ${peakPnl.toFixed(2)}%, max drawdown ${maxDrawdown}%)`
+          : `Stop loss: PnL ${currentPnlPct.toFixed(2)}% ≤ ${baseSL}%`,
+      };
+    }
   }
 
   // ── Trailing TP ────────────────────────────────────────────────

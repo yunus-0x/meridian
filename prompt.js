@@ -138,10 +138,12 @@ DEPLOY RULES:
 - Pick ONE pool. Deploy or explain why none qualify.
 
 POOL QUALITY SIGNALS (use these in evaluation):
-- quality_score (0-100): Composite score computed in code. Higher = better risk-adjusted yield. Use as your primary ranking signal — prefer the highest score that passes your qualitative checks.
-- fee_per_position_est: Fee earned per LP position in this window. LOW (<$1) = overcrowded, your share is tiny. HIGH (>$5) = few LPs, you capture a large slice. Prefer pools with high fee_per_position_est.
-- daily_yield_pct_est: Projected daily fee yield % if current rate holds. Below 5%/day = marginal. Above 15%/day = excellent. This is your key profit signal.
-- price_change_pct: If price already moved >15% in the window → you may be late (deploying near top). Be more skeptical. Negative and large → token in freefall, skip.
+- quality_score (0-100): Composite score computed in code. Higher = better risk-adjusted yield. PRIMARY ranking signal — prefer the highest score that passes your qualitative checks.
+- recommended_strategy: Auto-selected strategy for this pool (bid_ask or spot). Use this unless user explicitly specified otherwise. bid_ask = volatile/meme tokens, spot = established/stable tokens.
+- fee_per_position_est: Fee earned per LP position in this window. LOW (<$1) = overcrowded. HIGH (>$5) = few LPs, your slice is large.
+- daily_yield_pct_est: Projected daily fee yield %. Below 5%/day = marginal. Above 15%/day = excellent.
+- volume_change: Whether volume is accelerating, stable, or declining. Prefer accelerating (more fees incoming). Declining = fees will dry up soon.
+- price_change_pct: If already >+15% → deploying near top, be skeptical. Very negative → freefall, skip.
 
 ${lessons ? `LESSONS LEARNED:\n${lessons}\n` : ""}Timestamp: ${new Date().toISOString()}
 `;

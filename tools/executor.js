@@ -196,10 +196,20 @@ const toolMap = {
       maxVolatility:       ["screening", "maxVolatility"],
       maxEntry5mPricePct:  ["screening", "maxEntry5mPricePct"],
       minEntry5mPricePct:  ["screening", "minEntry5mPricePct"],
+      minPoolAgeHours:     ["screening", "minPoolAgeHours"],
+      maxPoolAgeHours:     ["screening", "maxPoolAgeHours"],
+      minVolumeAccelPct:   ["screening", "minVolumeAccelPct"],
+      timeOfDayBias:       ["screening", "timeOfDayBias"],
+      offPeakMultiplier:   ["screening", "offPeakMultiplier"],
+      highScoreSizeMult:   ["screening", "highScoreSizeMult"],
+      lowScoreSizeMult:    ["screening", "lowScoreSizeMult"],
       // management (extended)
       minFeeVelocityPct:    ["management", "minFeeVelocityPct"],
       feeVelocityMinAgeMin: ["management", "feeVelocityMinAgeMin"],
       rebalanceOnOOR:       ["management", "rebalanceOnOOR"],
+      maxDrawdownFromPeak:  ["management", "maxDrawdownFromPeak"],
+      smartClaimHotMult:    ["management", "smartClaimHotMult"],
+      smartClaimColdMult:   ["management", "smartClaimColdMult"],
     };
 
     const applied = {};
