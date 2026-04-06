@@ -48,6 +48,7 @@ export const config = {
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
     athFilterPct:       u.athFilterPct       ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
     maxVolatility:      u.maxVolatility      ?? 10,   // max pool volatility — evolved by lessons.js
+    excludeHighSupplyConcentration: u.excludeHighSupplyConcentration ?? true,
   },
 
   // ─── Position Management ────────────────

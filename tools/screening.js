@@ -21,6 +21,7 @@ export async function discoverPools({
   const filters = [
     "base_token_has_critical_warnings=false",
     "quote_token_has_critical_warnings=false",
+    s.excludeHighSupplyConcentration ? "base_token_has_high_supply_concentration=false" : null,
     "base_token_has_high_single_ownership=false",
     "pool_type=dlmm",
     `base_token_market_cap>=${s.minMcap}`,
