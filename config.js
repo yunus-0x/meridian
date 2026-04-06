@@ -46,6 +46,7 @@ export const config = {
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
     athFilterPct:       u.athFilterPct       ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
+    maxVolatility:      u.maxVolatility      ?? null, // null = no max; e.g. 5.0 = skip pools with volatility > 5
   },
 
   // ─── Position Management ────────────────
@@ -78,7 +79,14 @@ export const config = {
   strategy: {
     strategy:  u.strategy  ?? "bid_ask",
     binsBelow: u.binsBelow ?? 69,
+    binsAbove: u.binsAbove ?? 0,  // bins above active price (0 = single-sided below only)
   },
+
+  // ─── Market Mode ────────────────────────
+  // Preset parameter bundles for different market conditions.
+  // "auto" = use base config values (no preset applied)
+  // "bullish" | "bearish" | "sideways" | "volatile" | "conservative"
+  marketMode: u.marketMode ?? "auto",
 
   // ─── Scheduling ─────────────────────────
   schedule: {
@@ -155,5 +163,8 @@ export function reloadScreeningThresholds() {
     if (fresh.athFilterPct      !== undefined) s.athFilterPct     = fresh.athFilterPct;
     if (fresh.maxBundlePct      != null) s.maxBundlePct     = fresh.maxBundlePct;
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
+    if (fresh.maxVolatility      !== undefined) s.maxVolatility    = fresh.maxVolatility;
+    if (fresh.binsAbove          != null) config.strategy.binsAbove = fresh.binsAbove;
+    if (fresh.marketMode         != null) config.marketMode         = fresh.marketMode;
   } catch { /* ignore */ }
 }

@@ -21,6 +21,7 @@ import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
 import { config, reloadScreeningThresholds } from "../config.js";
+import { setMarketMode, getMarketMode, MARKET_PRESETS } from "../market-mode.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -64,6 +65,16 @@ const toolMap = {
     if (!ok) return { error: `Position ${position_address} not found in state` };
     return { saved: true, position: position_address, instruction: instruction || null };
   },
+  set_market_mode: ({ mode }) => {
+    const result = setMarketMode(mode, { applyToConfig: config });
+    if (result.success) {
+      // Immediately apply screening changes so next cycle uses new thresholds
+      reloadScreeningThresholds();
+    }
+    return result;
+  },
+  get_market_mode: () => getMarketMode(),
+
   self_update: async () => {
     try {
       const result = execSync("git pull", { cwd: process.cwd(), encoding: "utf8" }).trim();
@@ -179,6 +190,9 @@ const toolMap = {
       generalModel: ["llm", "generalModel"],
       // strategy
       binsBelow: ["strategy", "binsBelow"],
+      binsAbove: ["strategy", "binsAbove"],
+      // screening (extended)
+      maxVolatility: ["screening", "maxVolatility"],
     };
 
     const applied = {};

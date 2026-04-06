@@ -36,6 +36,7 @@ export async function discoverPools({
     "quote_token_organic_score>=60",
     s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
     s.maxTokenAgeHours != null ? `base_token_created_at>=${Date.now() - s.maxTokenAgeHours * 3_600_000}` : null,
+    s.maxVolatility    != null ? `volatility<=${s.maxVolatility}` : null,
   ].filter(Boolean).join("&&");
 
   const url = `${POOL_DISCOVERY_BASE}/pools?` +
