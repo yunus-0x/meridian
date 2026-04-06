@@ -47,6 +47,11 @@ export const config = {
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
     athFilterPct:       u.athFilterPct       ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
     maxVolatility:      u.maxVolatility      ?? null, // null = no max; e.g. 5.0 = skip pools with volatility > 5
+    // Price momentum guard — skip pools where price moved too fast in the timeframe window
+    // maxEntry5mPricePct: e.g. 20 = skip if price already +20% (deploying at the top)
+    // minEntry5mPricePct: e.g. -15 = skip if price already -15% (token in freefall)
+    maxEntry5mPricePct: u.maxEntry5mPricePct ?? null, // null = disabled
+    minEntry5mPricePct: u.minEntry5mPricePct ?? null, // null = disabled
   },
 
   // ─── Position Management ────────────────
@@ -55,6 +60,9 @@ export const config = {
     autoSwapAfterClaim:    u.autoSwapAfterClaim    ?? false,
     outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 10,
     outOfRangeWaitMinutes: u.outOfRangeWaitMinutes ?? 30,
+    // belowOORWaitMinutes: when price drops BELOW your range (token dumping), close faster.
+    // Position is now 100% base token with IL maximized — waiting helps nothing.
+    belowOORWaitMinutes: u.belowOORWaitMinutes ?? 15,
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
     oorCooldownHours:       u.oorCooldownHours       ?? 12,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
@@ -163,8 +171,11 @@ export function reloadScreeningThresholds() {
     if (fresh.athFilterPct      !== undefined) s.athFilterPct     = fresh.athFilterPct;
     if (fresh.maxBundlePct      != null) s.maxBundlePct     = fresh.maxBundlePct;
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
-    if (fresh.maxVolatility      !== undefined) s.maxVolatility    = fresh.maxVolatility;
-    if (fresh.binsAbove          != null) config.strategy.binsAbove = fresh.binsAbove;
-    if (fresh.marketMode         != null) config.marketMode         = fresh.marketMode;
+    if (fresh.maxVolatility         !== undefined) s.maxVolatility         = fresh.maxVolatility;
+    if (fresh.maxEntry5mPricePct    !== undefined) s.maxEntry5mPricePct    = fresh.maxEntry5mPricePct;
+    if (fresh.minEntry5mPricePct    !== undefined) s.minEntry5mPricePct    = fresh.minEntry5mPricePct;
+    if (fresh.belowOORWaitMinutes   != null) config.management.belowOORWaitMinutes = fresh.belowOORWaitMinutes;
+    if (fresh.binsAbove             != null) config.strategy.binsAbove             = fresh.binsAbove;
+    if (fresh.marketMode            != null) config.marketMode                     = fresh.marketMode;
   } catch { /* ignore */ }
 }

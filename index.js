@@ -269,6 +269,15 @@ export async function runManagementCycle({ silent = false } = {}) {
         actionMap.set(p.position, { action: "CLOSE", rule: 4, reason: "OOR" });
         continue;
       }
+      // Rule 4b: below range — token dumped below lower bin
+      // Position is now 100% base token held at a loss. IL is maximum and increasing.
+      // Close faster than above-range OOR to limit further decay.
+      if (p.active_bin != null && p.lower_bin != null &&
+          p.active_bin < p.lower_bin &&
+          (p.minutes_out_of_range ?? 0) >= config.management.belowOORWaitMinutes) {
+        actionMap.set(p.position, { action: "CLOSE", rule: "4b", reason: "below range OOR — token dump" });
+        continue;
+      }
       // Rule 5: fee yield too low
       if (p.fee_per_tvl_24h != null &&
           p.fee_per_tvl_24h < config.management.minFeePerTvl24h &&
@@ -374,7 +383,10 @@ After executing, write a brief one-line result per position.
         else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
       }
       for (const p of positions) {
-        if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
+        const oorThreshold = (p.active_bin != null && p.lower_bin != null && p.active_bin < p.lower_bin)
+          ? config.management.belowOORWaitMinutes
+          : config.management.outOfRangeWaitMinutes;
+        if (!p.in_range && p.minutes_out_of_range >= oorThreshold) {
           notifyOutOfRange({ pair: p.pair, minutesOOR: p.minutes_out_of_range }).catch(() => { });
         }
       }

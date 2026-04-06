@@ -165,6 +165,7 @@ const toolMap = {
       autoSwapAfterClaim: ["management", "autoSwapAfterClaim"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
+      belowOORWaitMinutes: ["management", "belowOORWaitMinutes"],
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
       oorCooldownHours: ["management", "oorCooldownHours"],
       minVolumeToRebalance: ["management", "minVolumeToRebalance"],
@@ -192,7 +193,9 @@ const toolMap = {
       binsBelow: ["strategy", "binsBelow"],
       binsAbove: ["strategy", "binsAbove"],
       // screening (extended)
-      maxVolatility: ["screening", "maxVolatility"],
+      maxVolatility:       ["screening", "maxVolatility"],
+      maxEntry5mPricePct:  ["screening", "maxEntry5mPricePct"],
+      minEntry5mPricePct:  ["screening", "minEntry5mPricePct"],
     };
 
     const applied = {};

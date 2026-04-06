@@ -133,9 +133,14 @@ POOL MEMORY: Past losses or problems → strong skip signal.
 
 DEPLOY RULES:
 - COMPOUNDING: Use the deploy amount from the goal EXACTLY. Do NOT default to a smaller number.
-- bins_below = round(35 + (volatility/5)*34) clamped to [35,69]. bins_above = 0.
+- bins_below = round(35 + (volatility/5)*34) clamped to [35,69]. bins_above = ${config.strategy.binsAbove ?? 0}.
 - Bin steps must be [80-125].
 - Pick ONE pool. Deploy or explain why none qualify.
+
+POOL QUALITY SIGNALS (use these in evaluation):
+- fee_per_position_est: Fee earned per LP position in this window. LOW (<$1) = overcrowded, your share is tiny. HIGH (>$5) = few LPs, you capture a large slice. Prefer pools with high fee_per_position_est.
+- daily_yield_pct_est: Projected daily fee yield % if current rate holds. Below 5%/day = marginal. Above 15%/day = excellent. This is your key profit signal.
+- price_change_pct: If price already moved >15% in the window → you may be late (deploying near top). Be more skeptical. Negative and large → token in freefall, skip.
 
 ${lessons ? `LESSONS LEARNED:\n${lessons}\n` : ""}Timestamp: ${new Date().toISOString()}
 `;

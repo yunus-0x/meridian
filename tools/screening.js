@@ -228,6 +228,31 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       return true;
     }));
 
+    // Price momentum guard — skip pools where price just pumped hard in the timeframe window.
+    // Deploying into a post-pump pool = you LP at/near the top, then price dumps below your range.
+    // Token with strong downtrend (price_change_pct very negative) is also risky — already in freefall.
+    const maxPump = config.screening.maxEntry5mPricePct;
+    const maxDump = config.screening.minEntry5mPricePct;
+    if (maxPump != null || maxDump != null) {
+      const before = eligible.length;
+      eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+        const chg = p.price_change_pct;
+        if (chg == null) return true; // no data → don't filter
+        if (maxPump != null && chg > maxPump) {
+          log("screening", `Momentum filter: dropped ${p.name} — price +${chg}% (limit +${maxPump}%)`);
+          pushFilteredReason(filteredOut, p, `price +${chg}% exceeds pump limit +${maxPump}%`);
+          return false;
+        }
+        if (maxDump != null && chg < maxDump) {
+          log("screening", `Momentum filter: dropped ${p.name} — price ${chg}% (limit ${maxDump}%)`);
+          pushFilteredReason(filteredOut, p, `price ${chg}% below dump limit ${maxDump}%`);
+          return false;
+        }
+        return true;
+      }));
+      if (eligible.length < before) log("screening", `Momentum filter removed ${before - eligible.length} pool(s)`);
+    }
+
     // ATH filter — drop pools where price is too close to ATH
     const athFilter = config.screening.athFilterPct;
     if (athFilter != null) {
@@ -339,6 +364,29 @@ function condensePool(p) {
     active_positions: p.active_positions,
     active_pct: fix(p.active_positions_pct, 1),
     open_positions: p.open_positions,
+
+    // ── Fee dilution signal ──────────────────────────────────────────
+    // fee_per_position_est: estimated fee earned per LP position in this timeframe window.
+    // Low = pool is overcrowded → your share is tiny even if total fees look high.
+    // High = few LPs sharing fees → you capture a large slice.
+    // Formula: fee_window / active_positions (raw $, not normalised by position size)
+    fee_per_position_est: (p.active_positions > 0 && p.fee != null)
+      ? fix(p.fee / p.active_positions, 2)
+      : null,
+
+    // ── Daily yield projection ────────────────────────────────────────
+    // Annualised fee yield based on the active timeframe window.
+    // daily_yield_pct = fee_active_tvl_ratio * (minutes_in_24h / timeframe_minutes)
+    // Tells the screener: "if this rate holds, 1 SOL deployed earns X% today."
+    // Use 5m=288 periods, 15m=96, 1h=24, 4h=6, 24h=1 multiplier.
+    daily_yield_pct_est: (() => {
+      const tfMinutes = { "5m": 5, "15m": 15, "1h": 60, "2h": 120, "4h": 240, "24h": 1440 };
+      const tf = tfMinutes[p.timeframe] || 5;
+      const ratio = p.fee_active_tvl_ratio > 0
+        ? p.fee_active_tvl_ratio
+        : (p.active_tvl > 0 ? (p.fee / p.active_tvl) * 100 : 0);
+      return ratio > 0 ? fix(ratio * (1440 / tf), 2) : null;
+    })(),
 
     // Price action
     price: p.pool_price,
