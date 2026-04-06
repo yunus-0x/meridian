@@ -15,6 +15,7 @@ const STATE_FILE = "./state.json";
 
 const MAX_RECENT_EVENTS = 20;
 const MAX_INSTRUCTION_LENGTH = 280;
+const MAX_FEE_SNAPSHOTS = 18; // 18 × 10-min cycles = 3 hours of history
 
 function sanitizeStoredText(text, maxLen = MAX_INSTRUCTION_LENGTH) {
   if (text == null) return null;
@@ -379,6 +380,68 @@ export function getStateSummary() {
  * @param {object} mgmtConfig
  * Returns { action, reason } or null if no exit needed.
  */
+/**
+ * Record a fee accumulation snapshot for a position.
+ * Called every management cycle. Tracks total fees (unclaimed + all-time collected)
+ * over time so we can detect when fee income is decelerating.
+ *
+ * @param {string} position_address
+ * @param {number} unclaimed_fees_usd
+ * @param {number} [collected_fees_usd] - all-time claimed fees for this position
+ */
+export function recordFeeSnapshot(position_address, unclaimed_fees_usd, collected_fees_usd = 0) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return;
+
+  if (!pos.fee_snapshots) pos.fee_snapshots = [];
+  pos.fee_snapshots.push({
+    t: Date.now(),
+    unclaimed: unclaimed_fees_usd ?? 0,
+    collected: collected_fees_usd ?? 0,
+    total: (unclaimed_fees_usd ?? 0) + (collected_fees_usd ?? 0),
+  });
+  // Keep only the last N snapshots
+  if (pos.fee_snapshots.length > MAX_FEE_SNAPSHOTS) {
+    pos.fee_snapshots = pos.fee_snapshots.slice(-MAX_FEE_SNAPSHOTS);
+  }
+
+  save(state);
+}
+
+/**
+ * Calculate current fee velocity as a percentage of the peak rate seen so far.
+ * Returns null if not enough data. Returns 0–100+ (can exceed 100 if accelerating).
+ *
+ * @param {string} position_address
+ * @returns {number|null} velocity_pct — 100 = current rate equals peak, <20 = dying
+ */
+export function getFeeVelocityPct(position_address) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || !pos.fee_snapshots || pos.fee_snapshots.length < 4) return null;
+
+  const snaps = pos.fee_snapshots;
+  // Calculate fee delta (fees earned per hour) for each consecutive window
+  const rates = [];
+  for (let i = 1; i < snaps.length; i++) {
+    const deltaFees = snaps[i].total - snaps[i - 1].total;
+    const deltaHours = (snaps[i].t - snaps[i - 1].t) / 3_600_000;
+    if (deltaHours > 0 && deltaFees >= 0) {
+      rates.push(deltaFees / deltaHours);
+    }
+  }
+  if (rates.length < 3) return null;
+
+  // Peak rate: max over all windows (excludes current window to avoid noise)
+  const peakRate = Math.max(...rates.slice(0, -1));
+  if (peakRate <= 0) return null;
+
+  // Current rate: average of last 2 windows (smoothed)
+  const currentRate = (rates[rates.length - 1] + (rates[rates.length - 2] ?? 0)) / 2;
+  return Math.round((currentRate / peakRate) * 100);
+}
+
 export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig) {
   const { pnl_pct: currentPnlPct, pnl_pct_suspicious, in_range, fee_per_tvl_24h } = positionData;
   const state = load();

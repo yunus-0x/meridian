@@ -11,7 +11,7 @@ import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { registerCronRestarter } from "./tools/executor.js";
 import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isEnabled as telegramEnabled, createLiveMessage } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, recordFeeSnapshot, getFeeVelocityPct } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
@@ -192,10 +192,13 @@ export async function runManagementCycle({ silent = false } = {}) {
       return mgmtReport;
     }
 
-    // Snapshot + load pool memory
+    // Snapshot + load pool memory + fee velocity recording
     const positionData = positions.map((p) => {
       recordPositionSnapshot(p.pool, p);
-      return { ...p, recall: recallForPool(p.pool) };
+      // Record fee snapshot for velocity tracking (unclaimed + collected over time)
+      recordFeeSnapshot(p.position, p.unclaimed_fees_usd ?? 0, p.collected_fees_usd ?? 0);
+      const feeVelocityPct = getFeeVelocityPct(p.position);
+      return { ...p, recall: recallForPool(p.pool), fee_velocity_pct: feeVelocityPct };
     });
 
     // JS trailing TP check
@@ -262,27 +265,39 @@ export async function runManagementCycle({ silent = false } = {}) {
         actionMap.set(p.position, { action: "CLOSE", rule: 3, reason: "pumped far above range" });
         continue;
       }
-      // Rule 4: stale above range
+      // Rule 4: stale above range — price pumped, position left behind
+      // If rebalanceOnOOR=true: close + redeploy at new active bin (same pool)
+      // This keeps capital working without a full screening cycle
       if (p.active_bin != null && p.upper_bin != null &&
           p.active_bin > p.upper_bin &&
           (p.minutes_out_of_range ?? 0) >= config.management.outOfRangeWaitMinutes) {
-        actionMap.set(p.position, { action: "CLOSE", rule: 4, reason: "OOR" });
+        const action = config.management.rebalanceOnOOR ? "REBALANCE" : "CLOSE";
+        actionMap.set(p.position, { action, rule: 4, reason: "OOR — price pumped above range", pool: p.pool, pair: p.pair });
         continue;
       }
       // Rule 4b: below range — token dumped below lower bin
-      // Position is now 100% base token held at a loss. IL is maximum and increasing.
-      // Close faster than above-range OOR to limit further decay.
+      // Position is 100% base token at max IL. Do NOT rebalance — token is in freefall.
+      // Always close immediately (faster than above-range OOR).
       if (p.active_bin != null && p.lower_bin != null &&
           p.active_bin < p.lower_bin &&
           (p.minutes_out_of_range ?? 0) >= config.management.belowOORWaitMinutes) {
         actionMap.set(p.position, { action: "CLOSE", rule: "4b", reason: "below range OOR — token dump" });
         continue;
       }
-      // Rule 5: fee yield too low
+      // Rule 5: fee yield too low (24h metric)
       if (p.fee_per_tvl_24h != null &&
           p.fee_per_tvl_24h < config.management.minFeePerTvl24h &&
-          (p.age_minutes ?? 0) >= 60) {
+          (p.age_minutes ?? 0) >= config.management.minAgeBeforeYieldCheck) {
         actionMap.set(p.position, { action: "CLOSE", rule: 5, reason: "low yield" });
+        continue;
+      }
+      // Rule 6: fee velocity collapse — fees are no longer accumulating at meaningful rate
+      // More sensitive than the 24h yield metric — catches dying pools 1-2 hours earlier
+      if (p.fee_velocity_pct != null &&
+          config.management.minFeeVelocityPct > 0 &&
+          p.fee_velocity_pct < config.management.minFeeVelocityPct &&
+          (p.age_minutes ?? 0) >= config.management.feeVelocityMinAgeMin) {
+        actionMap.set(p.position, { action: "CLOSE", rule: 6, reason: `fee velocity ${p.fee_velocity_pct}% of peak — volume dying` });
         continue;
       }
       // Claim rule
@@ -303,10 +318,12 @@ export async function runManagementCycle({ silent = false } = {}) {
       const val = config.management.solMode ? `◎${p.total_value_usd ?? "?"}` : `$${p.total_value_usd ?? "?"}`;
       const unclaimed = config.management.solMode ? `◎${p.unclaimed_fees_usd ?? "?"}` : `$${p.unclaimed_fees_usd ?? "?"}`;
       const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
-      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
+      const feeVel = p.fee_velocity_pct != null ? ` | FeeVel: ${p.fee_velocity_pct}%` : "";
+      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}%${feeVel} | ${inRange} | ${statusLabel}`;
       if (p.instruction) line += `\nNote: "${p.instruction}"`;
       if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
+      if (act.action === "REBALANCE") line += `\n↺ Rebalance: ${act.reason}`;
       if (act.action === "CLAIM") line += `\n→ Claiming fees`;
       return line;
     });
@@ -315,6 +332,7 @@ export async function runManagementCycle({ silent = false } = {}) {
     const actionSummary = needsAction.length > 0
       ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL instruction" : `${a.action}${a.reason ? ` (${a.reason})` : ""}`).join(", ")
       : "no action";
+
 
     const cur = config.management.solMode ? "◎" : "$";
     mgmtReport = reportLines.join("\n\n") +
@@ -351,8 +369,16 @@ RULES:
 - CLAIM: call claim_fees with position address
 - INSTRUCTION: evaluate the instruction condition. If met → close_position. If not → HOLD, do nothing.
 - ⚡ exit alerts: close immediately, no exceptions
+- REBALANCE: Execute in 2 steps:
+    1. call close_position on the position
+    2. IMMEDIATELY call deploy_position on the SAME pool (same pool_address as listed)
+       - Use same strategy as original (bid_ask default), same deploy amount from wallet balance
+       - bins_below will be auto-calculated from volatility — do NOT pass bins_below
+       - bins_above = 0 (single-sided below new active bin)
+       - Do NOT call get_top_candidates or get_active_bin — deploy_position fetches active bin internally
+    If the redeploy fails (safety check, etc.), report the error and stop — do not retry.
 
-Execute the required actions. Do NOT re-evaluate CLOSE/CLAIM — rules already applied. Just execute.
+Execute the required actions. Do NOT re-evaluate CLOSE/CLAIM/REBALANCE — rules already applied. Just execute.
 After executing, write a brief one-line result per position.
       `, config.llm.maxSteps, [], "MANAGER", config.llm.managementModel, 2048, {
         onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },

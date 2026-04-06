@@ -270,6 +270,56 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       if (eligible.length < before) log("screening", `ATH filter removed ${before - eligible.length} pool(s)`);
     }
 
+    // ── Composite quality scoring ────────────────────────────────────
+    // Score each pool on a 0-100 scale before the LLM sees them.
+    // Higher score = better risk-adjusted yield expectation.
+    // The LLM still makes the final decision, but ranked order means
+    // the best pool always appears first when limit is applied.
+    for (const p of eligible) {
+      let score = 0;
+
+      // ── Yield signals (highest weight) ───────────────────────────
+      // daily_yield_pct_est: projected % return per day at current rate
+      if (p.daily_yield_pct_est != null) {
+        // 15%/day = excellent (20pts), 5%/day = decent (7pts), <1% = marginal
+        score += Math.min(20, p.daily_yield_pct_est * 1.35);
+      }
+      // fee_per_position_est: your share of fees vs. other LPs
+      // High = few LPs sharing → your slice is big
+      if (p.fee_per_position_est != null) {
+        // $10+ per position = great (15pts), $1 = 1.5pts
+        score += Math.min(15, p.fee_per_position_est * 1.5);
+      }
+      // fee_active_tvl_ratio: fundamental fee/TVL efficiency
+      if (p.fee_active_tvl_ratio != null) {
+        score += Math.min(15, p.fee_active_tvl_ratio * 10);
+      }
+
+      // ── Token quality signals ─────────────────────────────────────
+      // organic_score: 60–100 range, rescale to 0–20
+      if (p.organic_score != null) {
+        score += Math.max(0, (p.organic_score - 60) / 2); // 60→0, 100→20
+      }
+
+      // ── Smart money signals (bonuses) ─────────────────────────────
+      if (p.smart_money_buy)   score += 12;
+      if (p.kol_in_clusters)   score += 8;
+      if (p.dev_sold_all)      score += 5;
+      if (p.dex_boost)         score += 3;
+
+      // ── Risk penalties ────────────────────────────────────────────
+      if (p.is_rugpull)        score -= 40;
+      if (p.bundle_pct  != null) score -= p.bundle_pct * 0.4;
+      if (p.suspicious_pct != null) score -= p.suspicious_pct * 0.3;
+      if (p.sniper_pct  != null) score -= p.sniper_pct * 0.2;
+
+      p.quality_score = Math.round(Math.max(0, Math.min(100, score)));
+    }
+
+    // Sort descending by quality score before returning to LLM
+    eligible.sort((a, b) => (b.quality_score ?? 0) - (a.quality_score ?? 0));
+    log("screening", `Pool scores: ${eligible.slice(0, 5).map(p => `${p.name}=${p.quality_score}`).join(", ")}`);
+
     // Drop any pools whose creator is on the dev blocklist (caught via advanced-info)
     const before = eligible.length;
     const filtered = eligible.filter((p) => {
@@ -288,6 +338,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     candidates: eligible,
     total_screened: pools.length,
     filtered_examples: filteredOut.slice(0, 3),
+    top_score: eligible[0]?.quality_score ?? null,
   };
 }
 

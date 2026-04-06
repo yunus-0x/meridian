@@ -70,6 +70,15 @@ export const config = {
     takeProfitFeePct:      u.takeProfitFeePct      ?? 5,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
+    // Fee velocity: how fast fees accumulate vs. the position's peak rate.
+    // If fees slow to minFeeVelocityPct% of their peak rate, the pool is dying.
+    // 0 = disabled, 20 = exit when fees drop to 20% of peak rate
+    minFeeVelocityPct:     u.minFeeVelocityPct     ?? 20,
+    feeVelocityMinAgeMin:  u.feeVelocityMinAgeMin  ?? 120, // wait 2h before checking fee velocity
+    // Rebalance instead of plain-close when position goes OOR:
+    // close the position and immediately redeploy at the new active bin in the same pool.
+    // Skips screening cycle and keeps capital working with zero dead time.
+    rebalanceOnOOR:        u.rebalanceOnOOR        ?? true,
     minSolToOpen:          u.minSolToOpen          ?? 0.55,
     deployAmountSol:       u.deployAmountSol       ?? 0.5,
     gasReserve:            u.gasReserve            ?? 0.2,
@@ -174,8 +183,11 @@ export function reloadScreeningThresholds() {
     if (fresh.maxVolatility         !== undefined) s.maxVolatility         = fresh.maxVolatility;
     if (fresh.maxEntry5mPricePct    !== undefined) s.maxEntry5mPricePct    = fresh.maxEntry5mPricePct;
     if (fresh.minEntry5mPricePct    !== undefined) s.minEntry5mPricePct    = fresh.minEntry5mPricePct;
-    if (fresh.belowOORWaitMinutes   != null) config.management.belowOORWaitMinutes = fresh.belowOORWaitMinutes;
-    if (fresh.binsAbove             != null) config.strategy.binsAbove             = fresh.binsAbove;
-    if (fresh.marketMode            != null) config.marketMode                     = fresh.marketMode;
+    if (fresh.belowOORWaitMinutes   != null) config.management.belowOORWaitMinutes   = fresh.belowOORWaitMinutes;
+    if (fresh.binsAbove             != null) config.strategy.binsAbove               = fresh.binsAbove;
+    if (fresh.marketMode            != null) config.marketMode                       = fresh.marketMode;
+    if (fresh.minFeeVelocityPct     != null) config.management.minFeeVelocityPct     = fresh.minFeeVelocityPct;
+    if (fresh.feeVelocityMinAgeMin  != null) config.management.feeVelocityMinAgeMin  = fresh.feeVelocityMinAgeMin;
+    if (fresh.rebalanceOnOOR        != null) config.management.rebalanceOnOOR        = fresh.rebalanceOnOOR;
   } catch { /* ignore */ }
 }

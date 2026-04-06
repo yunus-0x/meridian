@@ -196,6 +196,10 @@ const toolMap = {
       maxVolatility:       ["screening", "maxVolatility"],
       maxEntry5mPricePct:  ["screening", "maxEntry5mPricePct"],
       minEntry5mPricePct:  ["screening", "minEntry5mPricePct"],
+      // management (extended)
+      minFeeVelocityPct:    ["management", "minFeeVelocityPct"],
+      feeVelocityMinAgeMin: ["management", "feeVelocityMinAgeMin"],
+      rebalanceOnOOR:       ["management", "rebalanceOnOOR"],
     };
 
     const applied = {};
