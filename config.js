@@ -51,6 +51,8 @@ export const config = {
     excludeHighSupplyConcentration: u.excludeHighSupplyConcentration ?? true,
     minQuoteOrganic:   u.minQuoteOrganic    ?? 60,
     allowedLaunchpads: u.allowedLaunchpads  ?? [],   // whitelist launchpads, [] = allow all
+    avoidPvpSymbols:   u.avoidPvpSymbols    ?? true,  // flag PVP rivals for LLM
+    blockPvpSymbols:   u.blockPvpSymbols    ?? false, // hard-filter PVP rivals before LLM
   },
 
   // ─── Position Management ────────────────
