@@ -241,18 +241,53 @@ a { color: var(--accent); text-decoration: none; }
 
 </div>
 
+<!-- ── TOKEN LOGIN OVERLAY ────────────────────────────────────── -->
+<div id="token-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:1000;align-items:center;justify-content:center;">
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:28px 32px;min-width:320px;text-align:center;">
+    <div style="font-size:18px;font-weight:bold;color:var(--accent);margin-bottom:8px;">🔒 Auth Required</div>
+    <div style="color:var(--muted);font-size:12px;margin-bottom:18px;">Set DASHBOARD_TOKEN in .env, then enter it here</div>
+    <input id="token-input" type="password" placeholder="Enter DASHBOARD_TOKEN"
+      style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:8px 10px;color:var(--text);font-family:var(--font);font-size:13px;margin-bottom:12px;outline:none;">
+    <button class="btn btn-primary" style="width:100%" onclick="submitToken()">Login</button>
+    <div style="margin-top:10px;font-size:11px;color:var(--muted);">Or access without token if DASHBOARD_TOKEN is not set</div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
 // ── State ─────────────────────────────────────────────────────
-const TOKEN  = new URLSearchParams(location.search).get("token") || localStorage.getItem("dashboard_token") || "";
+let TOKEN  = new URLSearchParams(location.search).get("token") || localStorage.getItem("dashboard_token") || "";
 if (TOKEN) localStorage.setItem("dashboard_token", TOKEN);
 
-const API    = (path) => path;
-const HDRS   = { "Content-Type": "application/json", "X-Dashboard-Token": TOKEN };
+const HDRS = () => ({ "Content-Type": "application/json", "X-Dashboard-Token": TOKEN });
 let ws       = null;
 let wsRetry  = 0;
 let statusData = {};
+
+// ── Token Login Overlay ────────────────────────────────────────
+function showTokenOverlay() {
+  document.getElementById("token-overlay").style.display = "flex";
+}
+function hideTokenOverlay() {
+  document.getElementById("token-overlay").style.display = "none";
+}
+async function submitToken() {
+  const t = document.getElementById("token-input").value.trim();
+  if (!t) return;
+  TOKEN = t;
+  localStorage.setItem("dashboard_token", t);
+  hideTokenOverlay();
+  // Reconnect WS with new token
+  if (ws) { ws.onclose = null; ws.close(); }
+  connectWS();
+  await refreshAll();
+}
+document.addEventListener("keydown", e => {
+  if (e.key === "Enter" && document.getElementById("token-overlay").style.display !== "none") {
+    submitToken();
+  }
+});
 
 // ── Toast ─────────────────────────────────────────────────────
 let toastTimer = null;
@@ -261,13 +296,13 @@ function toast(msg, ok = true) {
   el.textContent = msg;
   el.className = "toast show " + (ok ? "toast-ok" : "toast-err");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove("show"), 3000);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 3500);
 }
 
 // ── WebSocket ─────────────────────────────────────────────────
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const t     = TOKEN ? `?token=${TOKEN}` : "";
+  const t     = TOKEN ? `?token=${encodeURIComponent(TOKEN)}` : "";
   ws = new WebSocket(`${proto}://${location.host}/ws${t}`);
 
   ws.onopen = () => {
@@ -280,17 +315,20 @@ function connectWS() {
       const { type, data } = JSON.parse(e.data);
       if (type === "log")              appendLog(data);
       else if (type === "positions")   renderPositions(data);
+      else if (type === "connected")   {} // noop
       else if (type === "event")       handleEvent(data);
       else if (type === "config_updated") loadConfig();
     } catch {}
   };
 
-  ws.onclose = () => {
+  ws.onclose = (e) => {
     document.getElementById("ws-status").className = "";
-    const delay = Math.min(30000, 1000 * Math.pow(2, wsRetry++));
+    // Code 4001 = auth failure → show login
+    if (e.code === 4001) { showTokenOverlay(); return; }
+    const delay = Math.min(30000, 1000 * Math.pow(2, Math.min(wsRetry++, 5)));
     setTimeout(connectWS, delay);
   };
-  ws.onerror = () => ws.close();
+  ws.onerror = () => {};
 }
 
 function handleEvent(data) {
@@ -301,17 +339,34 @@ function handleEvent(data) {
 
 // ── API helpers ───────────────────────────────────────────────
 async function api(method, path, body) {
-  const opts = { method, headers: HDRS };
-  if (body) opts.body = JSON.stringify(body);
-  const r = await fetch(path, opts);
-  if (r.status === 401) { toast("Unauthorized — check token", false); return null; }
-  return r.json();
+  try {
+    const opts = { method, headers: HDRS() };
+    if (body) opts.body = JSON.stringify(body);
+    const r = await fetch(path, opts);
+    if (r.status === 401) {
+      showTokenOverlay();
+      return null;
+    }
+    const json = await r.json().catch(() => null);
+    if (!r.ok) {
+      console.warn(`API ${method} ${path} → ${r.status}:`, json?.error || "unknown error");
+      return null;
+    }
+    return json;
+  } catch (e) {
+    console.error(`Fetch ${path} failed:`, e.message);
+    return null;
+  }
 }
 
 // ── Status ────────────────────────────────────────────────────
 async function loadStatus() {
   const d = await api("GET", "/api/status");
-  if (!d || !d.ok) return;
+  if (!d) return;
+  if (!d.ok) {
+    document.getElementById("wallet-sol").textContent = "API error";
+    return;
+  }
   statusData = d;
 
   document.getElementById("wallet-sol").textContent =
@@ -365,6 +420,13 @@ async function loadPerformance() {
 async function loadPositions() {
   const d = await api("GET", "/api/positions");
   if (d) renderPositions(d);
+  else if (d === null) {
+    // null = api failed (already handled — just clear loading spinner)
+    const c = document.getElementById("positions-container");
+    if (c.querySelector(".empty")?.textContent.includes("Loading")) {
+      c.innerHTML = '<div class="empty">Could not load positions — check server logs</div>';
+    }
+  }
 }
 
 function renderPositions(d) {

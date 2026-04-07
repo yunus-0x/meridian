@@ -73,27 +73,26 @@ export function startDashboard({ runManagement, runScreening }) {
 
   // GET /api/status — wallet + summary
   app.get("/api/status", auth, async (req, res) => {
+    let balance = null, posResult = null, modeInfo = null;
     try {
-      const [balance, posResult] = await Promise.all([
+      [balance, posResult] = await Promise.all([
         getWalletBalances().catch(() => null),
         getMyPositions({ silent: true }).catch(() => null),
       ]);
-      const modeInfo = getMarketMode();
-      res.json({
-        ok: true,
-        dry_run: process.env.DRY_RUN === "true",
-        uptime_s: Math.floor(process.uptime()),
-        balance,
-        positions_count: posResult?.total_positions ?? 0,
-        market_mode: modeInfo?.active ?? "auto",
-        schedule: {
-          managementIntervalMin: config.schedule?.managementIntervalMin ?? 10,
-          screeningIntervalMin:  config.schedule?.screeningIntervalMin  ?? 30,
-        },
-      });
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
+    } catch {}
+    try { modeInfo = getMarketMode(); } catch {}
+    res.json({
+      ok: true,
+      dry_run: process.env.DRY_RUN === "true",
+      uptime_s: Math.floor(process.uptime()),
+      balance,
+      positions_count: posResult?.total_positions ?? 0,
+      market_mode: modeInfo?.current_mode ?? "auto",
+      schedule: {
+        managementIntervalMin: config.schedule?.managementIntervalMin ?? 10,
+        screeningIntervalMin:  config.schedule?.screeningIntervalMin  ?? 30,
+      },
+    });
   });
 
   // GET /api/positions — full position list
@@ -129,7 +128,7 @@ export function startDashboard({ runManagement, runScreening }) {
 
   // GET /api/config — live config snapshot
   app.get("/api/config", auth, (req, res) => {
-    res.json({
+    try { res.json({
       risk:       config.risk,
       schedule:   config.schedule,
       marketMode: config.marketMode ?? "auto",
@@ -162,7 +161,7 @@ export function startDashboard({ runManagement, runScreening }) {
         minPoolAgeHours:      config.screening.minPoolAgeHours,
         maxPoolAgeHours:      config.screening.maxPoolAgeHours,
       },
-    });
+    }); } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
   // POST /api/config — update a single config key
