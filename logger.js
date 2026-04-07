@@ -28,9 +28,6 @@ export function log(category, message) {
   // Console output
   console.log(line);
 
-  // Emit to dashboard (if running) — no-op if nobody listening
-  process.emit("dashboard:log", { ts: timestamp, cat: category, msg: message, level });
-
   // File output (daily rotation)
   const dateStr = timestamp.split("T")[0];
   const logFile = path.join(LOG_DIR, `agent-${dateStr}.log`);
