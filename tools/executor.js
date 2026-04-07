@@ -170,6 +170,8 @@ const toolMap = {
       oorCooldownHours: ["management", "oorCooldownHours"],
       minVolumeToRebalance: ["management", "minVolumeToRebalance"],
       stopLossPct: ["management", "stopLossPct"],
+      bidAskStopLossPct: ["management", "bidAskStopLossPct"],
+      spotStopLossPct: ["management", "spotStopLossPct"],
       takeProfitFeePct: ["management", "takeProfitFeePct"],
       trailingTakeProfit: ["management", "trailingTakeProfit"],
       trailingTriggerPct: ["management", "trailingTriggerPct"],

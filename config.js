@@ -45,13 +45,13 @@ export const config = {
     blockedLaunchpads:  u.blockedLaunchpads  ?? [],  // e.g. ["letsbonk.fun", "pump.fun"]
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
-    athFilterPct:       u.athFilterPct       ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
+    athFilterPct:       u.athFilterPct       ?? -15,  // skip if price > 85% of ATH (don't deploy at top)
     maxVolatility:      u.maxVolatility      ?? null, // null = no max; e.g. 5.0 = skip pools with volatility > 5
     // Price momentum guard — skip pools where price moved too fast in the timeframe window
     // maxEntry5mPricePct: e.g. 20 = skip if price already +20% (deploying at the top)
     // minEntry5mPricePct: e.g. -15 = skip if price already -15% (token in freefall)
-    maxEntry5mPricePct: u.maxEntry5mPricePct ?? null, // null = disabled
-    minEntry5mPricePct: u.minEntry5mPricePct ?? null, // null = disabled
+    maxEntry5mPricePct: u.maxEntry5mPricePct ?? 12,   // skip if price already +12% in window (deploying at top)
+    minEntry5mPricePct: u.minEntry5mPricePct ?? -20,  // skip if price dumped >-20% in window (freefall)
     // Pool age window: avoid very new pools (inflated metrics) and very old (saturated).
     // Uses token_age_hours as proxy. null = disabled.
     minPoolAgeHours:    u.minPoolAgeHours    ?? 4,    // skip pools where token < 4h old
@@ -81,13 +81,17 @@ export const config = {
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
     oorCooldownHours:       u.oorCooldownHours       ?? 12,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
-    stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
+    stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -35,
+    // Tighter SL for bid_ask (meme/volatile) positions — don't ride losers down.
+    // If null, falls back to stopLossPct for all strategies.
+    bidAskStopLossPct:     u.bidAskStopLossPct     ?? -20,
+    spotStopLossPct:       u.spotStopLossPct       ?? -35,
     // Adaptive (PnL-based) stop-loss: as position peaks, stop-loss floor rises automatically.
     // effectiveSL = max(stopLossPct, peak_pnl - maxDrawdownFromPeak)
-    // Example: peak=+8%, maxDrawdown=12 → floor=-4% (never lose more than 12% from peak)
+    // Example: peak=+8%, maxDrawdown=8 → floor=0% (never go below break-even after peaking)
     // Set to 0 to disable (use fixed stopLossPct only).
-    maxDrawdownFromPeak:   u.maxDrawdownFromPeak   ?? 12,
-    takeProfitFeePct:      u.takeProfitFeePct      ?? 5,
+    maxDrawdownFromPeak:   u.maxDrawdownFromPeak   ?? 8,
+    takeProfitFeePct:      u.takeProfitFeePct      ?? 20,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
     // Fee velocity: how fast fees accumulate vs. the position's peak rate.

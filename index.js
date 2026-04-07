@@ -390,8 +390,7 @@ RULES:
     2. IMMEDIATELY call deploy_position with pool_address = the pool_address listed above
        - strategy: use "strategy" from the position block if present, otherwise "bid_ask"
        - amount_y: use get_wallet_balance to check SOL, then deploy same amount minus gas reserve
-       - bins_below will be auto-calculated from volatility — do NOT pass bins_below
-       - bins_above = 0 (single-sided below new active bin)
+       - do NOT pass bins_below or bins_above — both are auto-calculated from volatility and strategy
        - deploy_position fetches active bin internally — do NOT call get_active_bin separately
     If the redeploy fails, report the error and stop — do not retry.
 

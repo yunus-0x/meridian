@@ -353,17 +353,17 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     for (const p of eligible) {
       let score = 0;
 
-      // ── Yield signals (highest weight) ───────────────────────────
+      // ── Yield signals ────────────────────────────────────────────
       // daily_yield_pct_est: projected % return per day at current rate
       if (p.daily_yield_pct_est != null) {
-        // 15%/day = excellent (20pts), 5%/day = decent (7pts), <1% = marginal
-        score += Math.min(20, p.daily_yield_pct_est * 1.35);
+        // 15%/day = 15pts, 5%/day = 5pts
+        score += Math.min(15, p.daily_yield_pct_est * 1.0);
       }
-      // fee_per_position_est: your share of fees vs. other LPs
-      // High = few LPs sharing → your slice is big
+      // fee_per_position_est: your actual slice vs. competing LPs (primary signal)
+      // High = few LPs → you capture large fraction. Low = overcrowded → tiny slice.
       if (p.fee_per_position_est != null) {
-        // $10+ per position = great (15pts), $1 = 1.5pts
-        score += Math.min(15, p.fee_per_position_est * 1.5);
+        // $10/position = 25pts, $5 = 12.5pts, $1 = 2.5pts
+        score += Math.min(25, p.fee_per_position_est * 2.5);
       }
       // fee_active_tvl_ratio: fundamental fee/TVL efficiency
       if (p.fee_active_tvl_ratio != null) {

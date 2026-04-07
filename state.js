@@ -487,7 +487,11 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   // As position peaks, the floor rises automatically — never lose more
   // than maxDrawdownFromPeak% from the best PnL ever seen.
   if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null) {
-    const baseSL = mgmtConfig.stopLossPct;
+    // Strategy-aware base SL: bid_ask (meme/volatile) cuts losses faster
+    const strategy = pos.strategy || "bid_ask";
+    const baseSL = (strategy === "spot" || strategy === "curve")
+      ? (mgmtConfig.spotStopLossPct ?? mgmtConfig.stopLossPct)
+      : (mgmtConfig.bidAskStopLossPct ?? mgmtConfig.stopLossPct);
     const maxDrawdown = mgmtConfig.maxDrawdownFromPeak ?? 0;
     const peakPnl = pos.peak_pnl_pct ?? 0;
     // Only tighten floor if peak was meaningful (>1%) to avoid noise tightening SL prematurely
@@ -500,8 +504,8 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
       return {
         action: "STOP_LOSS",
         reason: adaptive
-          ? `Adaptive SL: PnL ${currentPnlPct.toFixed(2)}% ≤ floor ${effectiveSL.toFixed(2)}% (peak was ${peakPnl.toFixed(2)}%, max drawdown ${maxDrawdown}%)`
-          : `Stop loss: PnL ${currentPnlPct.toFixed(2)}% ≤ ${baseSL}%`,
+          ? `Adaptive SL: PnL ${currentPnlPct.toFixed(2)}% ≤ floor ${effectiveSL.toFixed(2)}% (peak=${peakPnl.toFixed(2)}%, drawdown=${maxDrawdown}%)`
+          : `Stop loss [${strategy}]: PnL ${currentPnlPct.toFixed(2)}% ≤ ${baseSL}%`,
       };
     }
   }
