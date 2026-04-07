@@ -267,13 +267,17 @@ export async function runManagementCycle({ silent = false } = {}) {
         continue;
       }
       // Rule 4: stale above range — price pumped, position left behind
-      // If rebalanceOnOOR=true: close + redeploy at new active bin (same pool)
-      // This keeps capital working without a full screening cycle
+      // Smart rebalance: only rebalance if pool fees were still healthy when it went OOR.
+      // If fee_velocity was already collapsing (<30%) → pool is dying → just close.
       if (p.active_bin != null && p.upper_bin != null &&
           p.active_bin > p.upper_bin &&
           (p.minutes_out_of_range ?? 0) >= config.management.outOfRangeWaitMinutes) {
-        const action = config.management.rebalanceOnOOR ? "REBALANCE" : "CLOSE";
-        actionMap.set(p.position, { action, rule: 4, reason: "OOR — price pumped above range", pool: p.pool, pair: p.pair });
+        const poolStillHealthy = (p.fee_velocity_pct == null) || (p.fee_velocity_pct >= (config.management.rebalanceMinFeeVelocity ?? 30));
+        const action = config.management.rebalanceOnOOR && poolStillHealthy ? "REBALANCE" : "CLOSE";
+        const reason = action === "CLOSE" && !poolStillHealthy
+          ? `OOR + pool dying (fee velocity ${p.fee_velocity_pct}% < ${config.management.rebalanceMinFeeVelocity ?? 30}%)`
+          : "OOR — price pumped above range";
+        actionMap.set(p.position, { action, rule: 4, reason, pool: p.pool, pair: p.pair });
         continue;
       }
       // Rule 4b: below range — token dumped below lower bin
@@ -501,8 +505,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // Load active strategy
     const activeStrategy = getActiveStrategy();
     const strategyBlock = activeStrategy
-      ? `ACTIVE STRATEGY: ${activeStrategy.name} — LP: ${activeStrategy.lp_strategy} | bins_above: ${activeStrategy.range?.bins_above ?? 0} (FIXED — never change) | deposit: ${activeStrategy.entry?.single_side === "sol" ? "SOL only (amount_y, amount_x=0)" : "dual-sided"} | best for: ${activeStrategy.best_for}`
-      : `No active strategy — use recommended_strategy from each pool (bid_ask or spot), bins_above: 0, SOL only.`;
+      ? `ACTIVE STRATEGY: ${activeStrategy.name} — LP: ${activeStrategy.lp_strategy} | deposit: ${activeStrategy.entry?.single_side === "sol" ? "SOL only (amount_y, amount_x=0)" : "dual-sided"} | best for: ${activeStrategy.best_for}`
+      : `No active strategy — use recommended_strategy from each pool (bid_ask or spot). bins_above is auto-calculated — do NOT pass it.`;
+
+    // Check wallet token holdings for dual-sided deploy opportunity
+    const walletTokens = currentBalance.tokens || [];
 
     // topCandidates already fetched above for position sizing — reuse result
     const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);
@@ -579,6 +586,12 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const netBuyers = ti?.stats_1h?.net_buyers;
       const activeBin = activeBinResults[i]?.status === "fulfilled" ? activeBinResults[i].value?.binId : null;
 
+      // B2: Check if we already hold the base token → dual-sided deploy opportunity
+      const baseMint = pool.base?.mint;
+      const heldToken = baseMint ? walletTokens.find(t => t.mint === baseMint) : null;
+      const heldTokenUsd = heldToken?.usd ?? 0;
+      const canDualSide = heldTokenUsd >= 0.5 && (pool.recommended_strategy === "spot");
+
       // OKX signals
       const okxParts = [
         pool.risk_level     != null ? `risk=${pool.risk_level}`               : null,
@@ -611,6 +624,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         priceChange != null ? `  1h: price${priceChange >= 0 ? "+" : ""}${priceChange}%, net_buyers=${netBuyers ?? "?"}` : null,
         pool.volume_change_pct != null ? `  volume_change: ${pool.volume_change_pct >= 0 ? "+" : ""}${pool.volume_change_pct}% (${pool.volume_change_pct > 20 ? "accelerating" : pool.volume_change_pct < -30 ? "declining" : "stable"})` : null,
         `  quality_score: ${pool.quality_score ?? "?"}/100 | recommended_strategy: ${pool.recommended_strategy ?? "bid_ask"}`,
+        canDualSide ? `  DUAL_SIDE_AVAILABLE: yes — wallet holds $${heldTokenUsd.toFixed(2)} of base token (mint: ${baseMint}) — include amount_x=${heldToken.balance} in deploy for dual-sided LP` : null,
         n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
         mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
       ].filter(Boolean).join("\n");
@@ -631,8 +645,9 @@ STEPS:
    quality_score is pre-computed — use it as primary ranking signal.
 2. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    - strategy: use recommended_strategy from the pool (bid_ask or spot). Override only if user specified.
-   - bins_below: do NOT pass — auto-calculated from volatility server-side.
+   - bins_below and bins_above: do NOT pass — both are auto-calculated server-side.
    - amount_y: use exactly ${deployAmount} SOL.
+   - DUAL_SIDE: if pool shows DUAL_SIDE_AVAILABLE=yes, also pass amount_x and base_mint as shown — this earns fees on BOTH price directions. Only do this when DUAL_SIDE_AVAILABLE=yes.
 3. Report in this exact format (no tables, no extra sections):
    🚀 DEPLOYED
 

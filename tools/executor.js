@@ -208,7 +208,8 @@ const toolMap = {
       // management (extended)
       minFeeVelocityPct:    ["management", "minFeeVelocityPct"],
       feeVelocityMinAgeMin: ["management", "feeVelocityMinAgeMin"],
-      rebalanceOnOOR:       ["management", "rebalanceOnOOR"],
+      rebalanceOnOOR:           ["management", "rebalanceOnOOR"],
+      rebalanceMinFeeVelocity:  ["management", "rebalanceMinFeeVelocity"],
       maxDrawdownFromPeak:  ["management", "maxDrawdownFromPeak"],
       smartClaimHotMult:    ["management", "smartClaimHotMult"],
       smartClaimColdMult:   ["management", "smartClaimColdMult"],

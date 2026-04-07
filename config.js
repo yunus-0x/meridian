@@ -54,11 +54,11 @@ export const config = {
     minEntry5mPricePct: u.minEntry5mPricePct ?? -20,  // skip if price dumped >-20% in window (freefall)
     // Pool age window: avoid very new pools (inflated metrics) and very old (saturated).
     // Uses token_age_hours as proxy. null = disabled.
-    minPoolAgeHours:    u.minPoolAgeHours    ?? 4,    // skip pools where token < 4h old
-    maxPoolAgeHours:    u.maxPoolAgeHours    ?? 168,  // skip pools where token > 7 days old
+    minPoolAgeHours:    u.minPoolAgeHours    ?? 6,    // skip pools where token < 6h old (metrics unreliable)
+    maxPoolAgeHours:    u.maxPoolAgeHours    ?? 72,   // skip pools where token > 3 days old (LP competition saturated)
     // Volume acceleration: bonus/penalty based on whether volume is growing or shrinking.
     // minVolumeAccelPct: skip pools where volume_change_pct < this value (e.g. -50 = volume collapsing)
-    minVolumeAccelPct:  u.minVolumeAccelPct  ?? -60,  // skip if volume fell >60% in window
+    minVolumeAccelPct:  u.minVolumeAccelPct  ?? -40,  // skip if volume fell >40% (stricter than before)
     // Time-of-day bias: during off-peak hours (low global volume), apply stricter thresholds.
     // off-peak = outside US hours (14:00-22:00 UTC) and Asian hours (01:00-08:00 UTC)
     timeOfDayBias:      u.timeOfDayBias      ?? true,
@@ -103,6 +103,9 @@ export const config = {
     // close the position and immediately redeploy at the new active bin in the same pool.
     // Skips screening cycle and keeps capital working with zero dead time.
     rebalanceOnOOR:        u.rebalanceOnOOR        ?? true,
+    // Smart rebalance: only rebalance if pool fee velocity is still healthy.
+    // If fee_velocity_pct < this value at OOR time → pool is dying → CLOSE instead.
+    rebalanceMinFeeVelocity: u.rebalanceMinFeeVelocity ?? 30,
     // Smart claim: dynamic threshold based on fee velocity.
     // When fees are hot (velocity >150%), claim at minClaimAmount × smartClaimHotMult (lower threshold = capture more).
     // When fees are slow (velocity <50%), claim at minClaimAmount × smartClaimColdMult (save gas).

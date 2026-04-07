@@ -392,6 +392,36 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         else if (p.volume_change_pct < -50) score -= 15; // volume collapsing
       }
 
+      // ── Time-in-range estimate ─────────────────────────────────────
+      // Lower volatility → position stays active longer → more cumulative fee capture.
+      // High volatility → frequent OOR → wasted gas + missed fees while redeploying.
+      // Bonus: vol≤1 → +8pts, vol=2 → +5pts, vol=3 → +3pts, vol≥5 → 0pts
+      if (p.volatility != null) {
+        score += Math.max(0, 8 - p.volatility * 2.0);
+      }
+
+      // ── Pool age sweet spot ────────────────────────────────────────
+      // Very new pools (< 6h): inflated metrics, unsustainable early spike — risky
+      // Sweet spot (6–48h): discovered but not yet saturated with LPs — highest fee/position
+      // Old pools (> 72h): LP competition high, fee dilution — declining opportunity
+      if (p.token_age_hours != null) {
+        const age = p.token_age_hours;
+        if (age >= 6 && age <= 48)       score += 8;  // sweet spot
+        else if (age > 48 && age <= 72)  score += 4;  // still decent
+        else if (age < 6)                score -= 5;  // too new, metrics unreliable
+        // > 72h: no bonus, no penalty (already filtered by maxPoolAgeHours)
+      }
+
+      // ── LP concentration (active LPs) ─────────────────────────────
+      // active_pct: % of open LP positions that are actively in range.
+      // Low active_pct = many LPs pulled liquidity → pool health declining.
+      // High active_pct with few positions = you get a large share.
+      if (p.active_pct != null && p.active_positions != null) {
+        if (p.active_pct < 30)                score -= 8;  // most LPs abandoned pool
+        else if (p.active_positions <= 3)      score += 6;  // almost no competition
+        else if (p.active_positions <= 8)      score += 3;  // low competition
+      }
+
       // ── Risk penalties ────────────────────────────────────────────
       if (p.is_rugpull)        score -= 40;
       if (p.bundle_pct  != null) score -= p.bundle_pct * 0.4;
