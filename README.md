@@ -79,6 +79,8 @@ HELIUS_API_KEY=your_helius_key          # for wallet balance lookups
 TELEGRAM_BOT_TOKEN=123456:ABC...        # optional — for notifications + chat
 TELEGRAM_CHAT_ID=                       # auto-filled on first message
 DRY_RUN=true                            # set false for live trading
+DASHBOARD_PORT=3000                     # optional — web dashboard port (default 3000)
+DASHBOARD_TOKEN=your_secret_token       # optional — auth token for dashboard access
 ```
 
 > Never put your private key or API keys in `user-config.json` — use `.env` only. Both files are gitignored.
@@ -418,6 +420,44 @@ node -e "import('./hive-mind.js').then(m => m.register('https://meridian-hive-ap
 ```json
 { "hiveMindUrl": "", "hiveMindApiKey": "" }
 ```
+
+---
+
+## Web Dashboard
+
+The bot includes a built-in web dashboard accessible from any browser — no SSH required.
+
+**Setup:**
+
+Add to `.env`:
+```env
+DASHBOARD_PORT=3000          # port to listen on (default: 3000)
+DASHBOARD_TOKEN=yourtoken    # secret token for authentication
+```
+
+If `DASHBOARD_TOKEN` is not set, the dashboard runs **without authentication** (only do this on a private network).
+
+**Access:**
+
+Open in browser: `http://your-vps-ip:3000`
+
+If you set a token, append it: `http://your-vps-ip:3000?token=yourtoken`
+
+**Dashboard features:**
+- Live positions with PnL, fee velocity bar, in-range status
+- Top pool candidates with quality score and volume change
+- Run Management / Run Screening buttons manually
+- Live config editor — change thresholds without restarting
+- Real-time log stream via WebSocket
+- Close / Claim buttons with confirmation dialog
+
+**Firewall (VPS):**
+```bash
+# Open dashboard port (UFW)
+sudo ufw allow 3000/tcp
+```
+
+> For security on a public VPS, always set `DASHBOARD_TOKEN` and consider using an SSH tunnel or nginx reverse proxy with HTTPS instead of exposing port 3000 directly.
 
 ---
 
