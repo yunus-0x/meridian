@@ -67,6 +67,9 @@ export const config = {
     // Final deploy = computeDeployAmount(wallet) × sizeMultiplier, capped at maxDeployAmount
     highScoreSizeMult:  u.highScoreSizeMult  ?? 1.3,  // score ≥ 70 → deploy 30% more
     lowScoreSizeMult:   u.lowScoreSizeMult   ?? 0.75, // score < 50 → deploy 25% less
+    // Min expected fee per LP position — filters out overcrowded pools where your slice is dust.
+    // e.g. 1.5 = skip pools where your expected fee < $1.50 per timeframe window
+    minFeePerPosition:  u.minFeePerPosition  ?? 1.5,
   },
 
   // ─── Position Management ────────────────

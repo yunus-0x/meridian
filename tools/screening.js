@@ -345,6 +345,25 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       if (eligible.length < before) log("screening", `ATH filter removed ${before - eligible.length} pool(s)`);
     }
 
+    // Min fee-per-position filter — skip pools where your expected fee slice is dust.
+    // Very crowded pools (many LPs, tiny slice each) rarely worth the gas cost.
+    {
+      const minFeePerPos = config.screening.minFeePerPosition;
+      if (minFeePerPos != null) {
+        const before = eligible.length;
+        eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+          if (p.fee_per_position_est == null) return true; // no data → don't filter
+          if (p.fee_per_position_est < minFeePerPos) {
+            log("screening", `Fee/LP filter: dropped ${p.name} — fee/position $${p.fee_per_position_est} < min $${minFeePerPos}`);
+            pushFilteredReason(filteredOut, p, `fee per LP $${p.fee_per_position_est} < min $${minFeePerPos}`);
+            return false;
+          }
+          return true;
+        }));
+        if (eligible.length < before) log("screening", `Fee/LP filter removed ${before - eligible.length} pool(s)`);
+      }
+    }
+
     // ── Composite quality scoring ────────────────────────────────────
     // Score each pool on a 0-100 scale before the LLM sees them.
     // Higher score = better risk-adjusted yield expectation.
@@ -420,6 +439,27 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         if (p.active_pct < 30)                score -= 8;  // most LPs abandoned pool
         else if (p.active_positions <= 3)      score += 6;  // almost no competition
         else if (p.active_positions <= 8)      score += 3;  // low competition
+      }
+
+      // ── Bin step preference ───────────────────────────────────────
+      // Lower bin step = finer price granularity = more fee earned per crossing.
+      // But too low = position covers tiny range, high OOR risk.
+      // Sweet spot: 80-100 for meme pools (more fee per tick).
+      // Penalty for high bin step (100-125): fewer fee events per unit of price move.
+      if (p.bin_step != null) {
+        if (p.bin_step <= 80)       score += 5;  // finest granularity → most fee per crossing
+        else if (p.bin_step <= 100) score += 3;  // good fee rate
+        else if (p.bin_step >= 120) score -= 3;  // coarse — fewer fee events
+      }
+
+      // ── Volume consistency (active vs. open positions) ────────────
+      // active_pct high + volume high = real, sustained activity.
+      // active_pct low + volume high = whale pump, no real market.
+      // Also: open_positions many but only a few active = pool is very choppy (hard to stay in range).
+      if (p.active_pct != null && p.open_positions != null && p.open_positions > 0) {
+        const churn = (p.active_positions ?? 0) / p.open_positions;
+        if (churn >= 0.7)      score += 4;  // most LPs in range = price stable = consistent volume
+        else if (churn < 0.3)  score -= 6;  // most LPs OOR = very choppy price
       }
 
       // ── Risk penalties ────────────────────────────────────────────

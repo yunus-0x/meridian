@@ -205,6 +205,7 @@ const toolMap = {
       offPeakMultiplier:   ["screening", "offPeakMultiplier"],
       highScoreSizeMult:   ["screening", "highScoreSizeMult"],
       lowScoreSizeMult:    ["screening", "lowScoreSizeMult"],
+      minFeePerPosition:   ["screening", "minFeePerPosition"],
       // management (extended)
       minFeeVelocityPct:    ["management", "minFeeVelocityPct"],
       feeVelocityMinAgeMin: ["management", "feeVelocityMinAgeMin"],

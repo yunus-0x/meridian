@@ -7,7 +7,7 @@ import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
-import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
+import { evolveThresholds, getPerformanceSummary, getPerformanceHistory } from "./lessons.js";
 import { registerCronRestarter } from "./tools/executor.js";
 import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isEnabled as telegramEnabled, createLiveMessage } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
@@ -177,7 +177,8 @@ export async function runManagementCycle({ silent = false } = {}) {
   let mgmtReport = null;
   let positions = [];
   let liveMessage = null;
-  const screeningCooldownMs = 5 * 60 * 1000;
+  const screeningCooldownMs = 5 * 60 * 1000;        // normal cooldown: 5 min
+  const screeningFastCooldownMs = 60 * 1000;         // post-close fast trigger: 1 min
 
   try {
     if (!silent && telegramEnabled()) {
@@ -185,6 +186,7 @@ export async function runManagementCycle({ silent = false } = {}) {
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
+    const beforeCount = positions.length;
 
     if (positions.length === 0) {
       log("cron", "No open positions — triggering screening cycle");
@@ -412,10 +414,14 @@ After executing, write a brief one-line result per position.
     }
 
     // Trigger screening after management
+    // Use fast cooldown (1 min) if a position was just closed — capital freed, redeploy ASAP.
+    // Use normal cooldown (5 min) if no change (just claims or STAY).
     const afterPositions = await getMyPositions({ force: true }).catch(() => null);
     const afterCount = afterPositions?.positions?.length ?? 0;
-    if (afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs) {
-      log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions — triggering screening`);
+    const positionClosed = afterCount < beforeCount;
+    const effectiveCooldown = positionClosed ? screeningFastCooldownMs : screeningCooldownMs;
+    if (afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > effectiveCooldown) {
+      log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions${positionClosed ? " (position closed — fast redeploy)" : ""} — triggering screening`);
       runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
     }
   } catch (error) {
@@ -496,12 +502,41 @@ export async function runScreeningCycle({ silent = false } = {}) {
       : topScore < 50
         ? (config.screening.lowScoreSizeMult ?? 0.75)
         : 1.0;
+    // Losing streak protection: check last 5 closed positions.
+    // If 3+ consecutive losses → reduce size to 50% (stop bleeding capital on bad market conditions).
+    // If 4+ consecutive losses → reduce to 30% (very defensive).
+    // Resets automatically as soon as a winning position is recorded.
+    let streakMult = 1.0;
+    let streakNote = "";
+    try {
+      const recent = getPerformanceHistory({ hours: 72, limit: 5 });
+      const last5 = (recent.positions || []).slice(-5);
+      if (last5.length >= 3) {
+        // Count consecutive losses from the most recent position backwards
+        let consecutiveLosses = 0;
+        for (let i = last5.length - 1; i >= 0; i--) {
+          if ((last5[i].pnl_usd ?? 0) < 0) consecutiveLosses++;
+          else break;
+        }
+        if (consecutiveLosses >= 4) {
+          streakMult = 0.30;
+          streakNote = ` [STREAK PROTECT: ${consecutiveLosses} losses → 30% size]`;
+        } else if (consecutiveLosses >= 3) {
+          streakMult = 0.50;
+          streakNote = ` [STREAK PROTECT: ${consecutiveLosses} losses → 50% size]`;
+        } else if (consecutiveLosses >= 2) {
+          streakMult = 0.75;
+          streakNote = ` [caution: ${consecutiveLosses} losses → 75% size]`;
+        }
+      }
+    } catch {}
+
     const deployAmount = parseFloat(
       Math.min(config.risk.maxDeployAmount,
-        Math.max(config.management.deployAmountSol, baseDeployAmount * sizeMult)
+        Math.max(config.management.deployAmountSol, baseDeployAmount * sizeMult * streakMult)
       ).toFixed(2)
     );
-    log("cron", `Deploy sizing: base=${baseDeployAmount} SOL × ${sizeMult} (score=${topScore}) = ${deployAmount} SOL`);
+    log("cron", `Deploy sizing: base=${baseDeployAmount} SOL × ${sizeMult} (score=${topScore}) × ${streakMult} (streak) = ${deployAmount} SOL${streakNote}`);
     // Load active strategy
     const activeStrategy = getActiveStrategy();
     const strategyBlock = activeStrategy
