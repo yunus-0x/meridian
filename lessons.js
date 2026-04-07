@@ -183,9 +183,13 @@ export async function recordPerformance(perf) {
  */
 function derivLesson(perf) {
   const tags = [];
+  const feeYieldPct = perf.initial_value_usd > 0
+    ? ((perf.fees_earned_usd || 0) / perf.initial_value_usd) * 100
+    : 0;
 
   // Categorize outcome
   const outcome = perf.pnl_pct >= 5 ? "good"
+    : (perf.pnl_pct >= 0 && feeYieldPct >= 2) ? "good"
     : perf.pnl_pct >= 0 ? "neutral"
     : perf.pnl_pct >= -5 ? "poor"
     : "bad";
@@ -226,9 +230,6 @@ function derivLesson(perf) {
 
   if (!rule) return null;
 
-  const feeYieldPct = perf.initial_value_usd > 0
-    ? ((perf.fees_earned_usd || 0) / perf.initial_value_usd) * 100
-    : 0;
   const closeReasonText = String(perf.close_reason || "").toLowerCase();
   const positiveEvidence =
     feeYieldPct >= 1 ||
