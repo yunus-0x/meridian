@@ -1040,7 +1040,7 @@ if (isTTY) {
   maybeRunMissedBriefing().catch(() => { });
 
   startPolling(telegramHandler);
-  startDashboard({ runManagement: runManagementCycle, runScreening: runScreeningCycle }).catch(e => log("dashboard", `Dashboard failed to start: ${e.message}`));
+  try { startDashboard({ runManagement: runManagementCycle, runScreening: runScreeningCycle }); } catch (e) { log("dashboard", `Dashboard failed to start: ${e.message}`); }
 
   console.log(`
 Commands:
@@ -1256,7 +1256,7 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
   startCronJobs();
   maybeRunMissedBriefing().catch(() => { });
   startPolling(telegramHandler);
-  startDashboard({ runManagement: runManagementCycle, runScreening: runScreeningCycle }).catch(e => log("dashboard", `Dashboard failed to start: ${e.message}`));
+  try { startDashboard({ runManagement: runManagementCycle, runScreening: runScreeningCycle }); } catch (e) { log("dashboard", `Dashboard failed to start: ${e.message}`); }
   (async () => {
     try {
       const startupStep3 = process.env.DRY_RUN === "true"
