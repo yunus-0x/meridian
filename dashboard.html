@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Meridian Dashboard</title>
+<style>
+:root {
+  --bg:       #0a0e1a;
+  --card:     #0d1117;
+  --border:   #1c2333;
+  --text:     #c9d1d9;
+  --muted:    #6e7681;
+  --accent:   #00c896;
+  --accentd:  #009e77;
+  --danger:   #f85149;
+  --warn:     #e3b341;
+  --info:     #58a6ff;
+  --font:     'Courier New', monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; min-height: 100vh; }
+a { color: var(--accent); text-decoration: none; }
+
+/* ── Layout ───────────────────────── */
+.header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--card); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.logo { font-size: 16px; font-weight: bold; color: var(--accent); letter-spacing: 2px; }
+.badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
+.badge-live { background: #1a3a2a; color: var(--accent); }
+.badge-dry  { background: #3a2a1a; color: var(--warn); }
+.badge-err  { background: #3a1a1a; color: var(--danger); }
+.header-spacer { flex: 1; }
+.mode-select { background: var(--border); color: var(--text); border: 1px solid #2d3748; border-radius: 4px; padding: 3px 8px; font-family: var(--font); font-size: 12px; cursor: pointer; }
+.btn { padding: 4px 12px; border-radius: 4px; border: none; font-family: var(--font); font-size: 12px; cursor: pointer; transition: opacity .15s; }
+.btn:hover { opacity: 0.8; }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary  { background: var(--accent); color: #000; font-weight: bold; }
+.btn-danger   { background: var(--danger); color: #fff; }
+.btn-warn     { background: var(--warn); color: #000; }
+.btn-ghost    { background: var(--border); color: var(--text); }
+.btn-sm { padding: 2px 8px; font-size: 11px; }
+
+.grid { display: grid; grid-template-columns: 260px 1fr; gap: 12px; padding: 12px; }
+@media(max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 12px; }
+.card-title { font-size: 11px; font-weight: bold; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+.card-title .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+
+/* ── Left column ──────────────────── */
+.left { display: flex; flex-direction: column; gap: 12px; }
+.sol-val { font-size: 28px; font-weight: bold; color: var(--accent); }
+.usd-val { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.stat-row { display: flex; justify-content: space-between; margin-top: 8px; font-size: 12px; color: var(--muted); }
+.stat-row span { color: var(--text); }
+.action-btns { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.action-btns .btn { text-align: center; }
+
+.perf-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 2px; }
+.perf-item { background: var(--border); border-radius: 4px; padding: 6px 8px; }
+.perf-label { font-size: 10px; color: var(--muted); }
+.perf-val { font-size: 14px; font-weight: bold; margin-top: 2px; }
+
+/* ── Positions ────────────────────── */
+.pos-card { margin-bottom: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; }
+.pos-card:last-child { margin-bottom: 0; }
+.pos-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.pos-pair { font-weight: bold; font-size: 14px; color: var(--text); }
+.pos-range { font-size: 11px; padding: 1px 6px; border-radius: 3px; font-weight: bold; }
+.in-range  { background: #1a3a2a; color: var(--accent); }
+.oor       { background: #3a1a1a; color: var(--danger); }
+.pnl { font-weight: bold; font-size: 13px; }
+.pnl-pos { color: var(--accent); }
+.pnl-neg { color: var(--danger); }
+.pos-meta { display: flex; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 11px; margin-bottom: 8px; }
+.pos-meta span { color: var(--text); }
+.pos-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.vel-bar { height: 3px; border-radius: 2px; background: var(--border); margin: 4px 0; position: relative; overflow: hidden; }
+.vel-fill { height: 100%; border-radius: 2px; transition: width .5s; }
+
+/* ── Candidates ───────────────────── */
+.cand-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.cand-row:last-child { border-bottom: none; }
+.cand-name { font-weight: bold; min-width: 90px; }
+.score-badge { padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: bold; }
+.score-hi  { background: #1a3a2a; color: var(--accent); }
+.score-mid { background: #2a2a1a; color: var(--warn); }
+.score-lo  { background: #2a1a1a; color: var(--danger); }
+.cand-meta { color: var(--muted); font-size: 11px; flex: 1; min-width: 120px; }
+.cand-meta span { color: var(--text); }
+.tag { padding: 1px 5px; border-radius: 3px; font-size: 10px; background: var(--border); color: var(--info); margin-right: 3px; }
+
+/* ── Bottom row ───────────────────── */
+.bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 0 12px 12px; }
+@media(max-width: 900px) { .bottom-grid { grid-template-columns: 1fr; } }
+
+/* ── Config editor ────────────────── */
+.cfg-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.cfg-key { color: var(--muted); font-size: 11px; min-width: 140px; }
+.cfg-val { background: var(--border); border: 1px solid #2d3748; color: var(--text); font-family: var(--font); font-size: 12px; padding: 2px 6px; border-radius: 3px; width: 90px; }
+.cfg-val:focus { outline: 1px solid var(--accent); }
+.cfg-save { background: none; border: 1px solid var(--accent); color: var(--accent); font-size: 10px; padding: 1px 6px; border-radius: 3px; cursor: pointer; font-family: var(--font); }
+.cfg-save:hover { background: var(--accentd); color: #000; }
+.cfg-group-title { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin: 8px 0 4px; border-bottom: 1px solid var(--border); padding-bottom: 3px; }
+
+/* ── Logs ─────────────────────────── */
+#log-box { height: 280px; overflow-y: auto; font-size: 11px; line-height: 1.6; }
+#log-box::-webkit-scrollbar { width: 4px; }
+#log-box::-webkit-scrollbar-track { background: var(--bg); }
+#log-box::-webkit-scrollbar-thumb { background: var(--border); }
+.log-line { padding: 1px 0; border-bottom: 1px solid rgba(255,255,255,0.03); }
+.log-ts   { color: var(--muted); margin-right: 4px; }
+.log-cat  { margin-right: 4px; font-weight: bold; }
+.cat-error, .cat-deploy_error, .cat-cron_error { color: var(--danger); }
+.cat-warn, .cat-state_warn, .cat-lessons_warn { color: var(--warn); }
+.cat-deploy, .cat-close  { color: var(--accent); }
+.cat-cron, .cat-screening { color: var(--info); }
+.cat-evolve, .cat-lessons { color: #c792ea; }
+.cat-dashboard { color: var(--muted); }
+.log-msg  { color: var(--text); word-break: break-all; }
+.log-auto { color: var(--muted); font-style: italic; }
+
+/* ── Misc ─────────────────────────── */
+.empty { color: var(--muted); font-size: 12px; padding: 12px 0; text-align: center; }
+.uptime { font-size: 11px; color: var(--muted); }
+.refresh-indicator { font-size: 10px; color: var(--muted); margin-left: auto; }
+#ws-status { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); display: inline-block; margin-right: 4px; }
+#ws-status.connected { background: var(--accent); }
+.section-full { padding: 0 12px 12px; }
+.toast { position: fixed; bottom: 20px; right: 20px; background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 10px 16px; font-size: 12px; z-index: 999; transform: translateY(60px); opacity: 0; transition: all .3s; }
+.toast.show { transform: translateY(0); opacity: 1; }
+.toast-ok  { border-left: 3px solid var(--accent); }
+.toast-err { border-left: 3px solid var(--danger); }
+.spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<!-- ── HEADER ─────────────────────────────────────────────────── -->
+<div class="header">
+  <span class="logo">⬡ MERIDIAN</span>
+  <span id="ws-status"></span>
+  <span id="dry-badge"></span>
+  <span class="uptime" id="uptime-label">uptime: —</span>
+  <div class="header-spacer"></div>
+  <label style="font-size:11px;color:var(--muted);margin-right:4px;">Mode:</label>
+  <select class="mode-select" id="mode-select" onchange="setMode(this.value)">
+    <option value="auto">auto</option>
+    <option value="bullish">bullish</option>
+    <option value="bearish">bearish</option>
+    <option value="sideways">sideways</option>
+    <option value="volatile">volatile</option>
+    <option value="conservative">conservative</option>
+  </select>
+  <button class="btn btn-ghost" onclick="refreshAll()" title="Refresh all data">↻ Refresh</button>
+</div>
+
+<!-- ── MAIN GRID ──────────────────────────────────────────────── -->
+<div class="grid">
+
+  <!-- Left column -->
+  <div class="left">
+
+    <!-- Wallet -->
+    <div class="card">
+      <div class="card-title"><div class="dot"></div>WALLET</div>
+      <div class="sol-val" id="wallet-sol">— SOL</div>
+      <div class="usd-val" id="wallet-usd">≈ $—</div>
+      <div class="stat-row">Positions <span id="pos-count">—</span></div>
+      <div class="stat-row">Next manage <span id="next-manage">—</span></div>
+      <div class="stat-row">Next screen <span id="next-screen">—</span></div>
+      <div class="action-btns">
+        <button class="btn btn-primary" onclick="triggerAction('manage')" id="btn-manage">▶ Run Management</button>
+        <button class="btn btn-ghost" onclick="triggerAction('screen')" id="btn-screen">🔍 Run Screening</button>
+      </div>
+    </div>
+
+    <!-- Performance -->
+    <div class="card">
+      <div class="card-title"><div class="dot"></div>PERFORMANCE</div>
+      <div class="perf-grid" id="perf-grid">
+        <div class="perf-item"><div class="perf-label">Total PnL</div><div class="perf-val" id="perf-pnl">—</div></div>
+        <div class="perf-item"><div class="perf-label">Win Rate</div><div class="perf-val" id="perf-wr">—</div></div>
+        <div class="perf-item"><div class="perf-label">Positions</div><div class="perf-val" id="perf-cnt">—</div></div>
+        <div class="perf-item"><div class="perf-label">Avg PnL%</div><div class="perf-val" id="perf-avg">—</div></div>
+      </div>
+    </div>
+
+  </div><!-- /left -->
+
+  <!-- Right column: positions -->
+  <div class="card">
+    <div class="card-title">
+      <div class="dot"></div>OPEN POSITIONS
+      <span class="refresh-indicator" id="pos-refresh-ts"></span>
+    </div>
+    <div id="positions-container">
+      <div class="empty">Loading positions…</div>
+    </div>
+  </div>
+
+</div><!-- /grid -->
+
+<!-- ── CANDIDATES ─────────────────────────────────────────────── -->
+<div class="section-full">
+  <div class="card">
+    <div class="card-title">
+      <div class="dot"></div>TOP CANDIDATES
+      <button class="btn btn-ghost btn-sm" onclick="loadCandidates()" style="margin-left:8px;" id="btn-cand">↻ Fetch</button>
+      <span class="refresh-indicator" id="cand-ts"></span>
+    </div>
+    <div id="candidates-container">
+      <div class="empty">Click "Fetch" to load candidates</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── BOTTOM: CONFIG + LOGS ──────────────────────────────────── -->
+<div class="bottom-grid">
+
+  <!-- Config editor -->
+  <div class="card">
+    <div class="card-title"><div class="dot"></div>CONFIG EDITOR</div>
+    <div id="config-container">
+      <div class="empty">Loading…</div>
+    </div>
+  </div>
+
+  <!-- Live logs -->
+  <div class="card">
+    <div class="card-title">
+      <div class="dot"></div>LIVE LOGS
+      <label style="margin-left:auto;font-size:11px;color:var(--muted);">
+        <input type="checkbox" id="autoscroll" checked style="margin-right:4px;">auto-scroll
+      </label>
+      <button class="btn btn-ghost btn-sm" onclick="clearLogs()" style="margin-left:8px;">✕ Clear</button>
+    </div>
+    <div id="log-box"></div>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────
+const TOKEN  = new URLSearchParams(location.search).get("token") || localStorage.getItem("dashboard_token") || "";
+if (TOKEN) localStorage.setItem("dashboard_token", TOKEN);
+
+const API    = (path) => path;
+const HDRS   = { "Content-Type": "application/json", "X-Dashboard-Token": TOKEN };
+let ws       = null;
+let wsRetry  = 0;
+let statusData = {};
+
+// ── Toast ─────────────────────────────────────────────────────
+let toastTimer = null;
+function toast(msg, ok = true) {
+  const el = document.getElementById("toast");
+  el.textContent = msg;
+  el.className = "toast show " + (ok ? "toast-ok" : "toast-err");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 3000);
+}
+
+// ── WebSocket ─────────────────────────────────────────────────
+function connectWS() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const t     = TOKEN ? `?token=${TOKEN}` : "";
+  ws = new WebSocket(`${proto}://${location.host}/ws${t}`);
+
+  ws.onopen = () => {
+    wsRetry = 0;
+    document.getElementById("ws-status").className = "connected";
+  };
+
+  ws.onmessage = (e) => {
+    try {
+      const { type, data } = JSON.parse(e.data);
+      if (type === "log")              appendLog(data);
+      else if (type === "positions")   renderPositions(data);
+      else if (type === "event")       handleEvent(data);
+      else if (type === "config_updated") loadConfig();
+    } catch {}
+  };
+
+  ws.onclose = () => {
+    document.getElementById("ws-status").className = "";
+    const delay = Math.min(30000, 1000 * Math.pow(2, wsRetry++));
+    setTimeout(connectWS, delay);
+  };
+  ws.onerror = () => ws.close();
+}
+
+function handleEvent(data) {
+  if (data.type === "deploy")  { toast(`Deployed: ${data.pair || ""}`, true);  loadPositions(); }
+  if (data.type === "close")   { toast(`Closed: ${data.pair || ""}`, true);    loadPositions(); }
+  if (data.type === "oor")     { toast(`⚠ OOR: ${data.pair || ""}`, false); }
+}
+
+// ── API helpers ───────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = { method, headers: HDRS };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  if (r.status === 401) { toast("Unauthorized — check token", false); return null; }
+  return r.json();
+}
+
+// ── Status ────────────────────────────────────────────────────
+async function loadStatus() {
+  const d = await api("GET", "/api/status");
+  if (!d || !d.ok) return;
+  statusData = d;
+
+  document.getElementById("wallet-sol").textContent =
+    d.balance ? `${(d.balance.sol ?? 0).toFixed(3)} SOL` : "— SOL";
+  document.getElementById("wallet-usd").textContent =
+    d.balance?.usd_total ? `≈ $${d.balance.usd_total.toFixed(2)}` : "≈ $—";
+  document.getElementById("pos-count").textContent =
+    `${d.positions_count} / ${statusData?.config?.maxPositions || "?"}`;
+
+  document.getElementById("dry-badge").innerHTML = d.dry_run
+    ? '<span class="badge badge-dry">DRY RUN</span>'
+    : '<span class="badge badge-live">● LIVE</span>';
+
+  // Uptime
+  const s = d.uptime_s || 0;
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60);
+  document.getElementById("uptime-label").textContent =
+    `uptime: ${h}h ${m}m`;
+
+  // Market mode selector
+  const sel = document.getElementById("mode-select");
+  sel.value = d.market_mode || "auto";
+
+  // Schedule counters
+  document.getElementById("next-manage").textContent =
+    d.schedule ? `~${d.schedule.managementIntervalMin}m cycle` : "—";
+  document.getElementById("next-screen").textContent =
+    d.schedule ? `~${d.schedule.screeningIntervalMin}m cycle` : "—";
+}
+
+// ── Performance ───────────────────────────────────────────────
+async function loadPerformance() {
+  const d = await api("GET", "/api/performance");
+  if (!d || !d.summary) {
+    ["perf-pnl","perf-wr","perf-cnt","perf-avg"].forEach(id =>
+      document.getElementById(id).textContent = "—");
+    return;
+  }
+  const s = d.summary;
+  const pnl = s.total_pnl_usd ?? 0;
+  document.getElementById("perf-pnl").textContent  = `$${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`;
+  document.getElementById("perf-pnl").style.color   = pnl >= 0 ? "var(--accent)" : "var(--danger)";
+  document.getElementById("perf-wr").textContent   = `${s.win_rate_pct ?? 0}%`;
+  document.getElementById("perf-cnt").textContent  = s.total_positions_closed ?? 0;
+  const avg = s.avg_pnl_pct ?? 0;
+  document.getElementById("perf-avg").textContent  = `${avg >= 0 ? "+" : ""}${avg.toFixed(1)}%`;
+  document.getElementById("perf-avg").style.color   = avg >= 0 ? "var(--accent)" : "var(--danger)";
+}
+
+// ── Positions ─────────────────────────────────────────────────
+async function loadPositions() {
+  const d = await api("GET", "/api/positions");
+  if (d) renderPositions(d);
+}
+
+function renderPositions(d) {
+  const container = document.getElementById("positions-container");
+  const positions = d?.positions || [];
+  document.getElementById("pos-refresh-ts").textContent =
+    `updated ${new Date().toLocaleTimeString()}`;
+
+  if (positions.length === 0) {
+    container.innerHTML = '<div class="empty">No open positions</div>';
+    return;
+  }
+
+  container.innerHTML = positions.map(p => {
+    const inRange  = p.in_range;
+    const pnl      = p.pnl_pct ?? 0;
+    const pnlSign  = pnl >= 0 ? "+" : "";
+    const vel      = p.fee_velocity_pct;
+    const velColor = vel == null ? "#666"
+                   : vel > 100 ? "var(--accent)"
+                   : vel > 50  ? "var(--warn)"
+                   : "var(--danger)";
+    const velWidth = vel == null ? 0 : Math.min(100, vel);
+
+    return `
+<div class="pos-card">
+  <div class="pos-header">
+    <span class="pos-pair">${p.pair || "—"}</span>
+    <span class="pos-range ${inRange ? "in-range" : "oor"}">
+      ${inRange ? "🟢 IN RANGE" : `🔴 OOR ${p.minutes_out_of_range ?? 0}m`}
+    </span>
+    <span class="pnl ${pnl >= 0 ? "pnl-pos" : "pnl-neg"}">${pnlSign}${pnl.toFixed(2)}%</span>
+  </div>
+  <div class="vel-bar"><div class="vel-fill" style="width:${velWidth}%;background:${velColor}"></div></div>
+  <div class="pos-meta">
+    Age <span>${p.age_minutes ?? "?"}m</span> ·
+    Val <span>$${p.total_value_usd ?? "?"}</span> ·
+    Fees <span>$${p.unclaimed_fees_usd ?? "?"}</span> ·
+    Yield/24h <span>${p.fee_per_tvl_24h ?? "?"}%</span>
+    ${vel != null ? `· FeeVel <span style="color:${velColor}">${vel}%</span>` : ""}
+    ${p.pool ? `· <a href="https://app.meteora.ag/dlmm/${p.pool}" target="_blank" style="font-size:10px">↗ meteora</a>` : ""}
+  </div>
+  <div class="pos-actions">
+    <button class="btn btn-warn btn-sm" onclick="claimFees('${p.position}')">💰 Claim</button>
+    <button class="btn btn-danger btn-sm" onclick="closePos('${p.position}', '${(p.pair||"").replace(/'/g,"")}')" >✕ Close</button>
+  </div>
+</div>`;
+  }).join("");
+}
+
+// ── Candidates ────────────────────────────────────────────────
+async function loadCandidates() {
+  const btn = document.getElementById("btn-cand");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>';
+  document.getElementById("candidates-container").innerHTML =
+    '<div class="empty">Fetching candidates… (may take 15-30s)</div>';
+
+  const d = await api("GET", "/api/candidates");
+  btn.disabled = false;
+  btn.textContent = "↻ Fetch";
+  document.getElementById("cand-ts").textContent = `updated ${new Date().toLocaleTimeString()}`;
+
+  const cands = d?.candidates || [];
+  if (cands.length === 0) {
+    document.getElementById("candidates-container").innerHTML =
+      '<div class="empty">No candidates passed filters</div>';
+    return;
+  }
+
+  document.getElementById("candidates-container").innerHTML =
+    cands.slice(0, 8).map(p => {
+      const sc = p.quality_score ?? 0;
+      const scClass = sc >= 70 ? "score-hi" : sc >= 50 ? "score-mid" : "score-lo";
+      const tags = [
+        p.smart_money_buy  ? "smart_money" : null,
+        p.kol_in_clusters  ? "kol"          : null,
+        p.dev_sold_all     ? "dev_sold"      : null,
+        p.recommended_strategy ? p.recommended_strategy : null,
+      ].filter(Boolean);
+
+      return `<div class="cand-row">
+  <span class="cand-name">${p.name || "—"}</span>
+  <span class="score-badge ${scClass}">⭐${sc}</span>
+  <span class="cand-meta">
+    yield <span>${p.daily_yield_pct_est ?? "?"}%/d</span> ·
+    vol <span>$${(p.volume_window ?? 0).toLocaleString()}</span> ·
+    tvl <span>$${(p.active_tvl ?? 0).toLocaleString()}</span> ·
+    org <span>${p.organic_score ?? "?"}</span>
+    ${p.volume_change_pct != null ? `· vol_Δ <span style="color:${p.volume_change_pct > 0 ? "var(--accent)" : "var(--danger)}">${p.volume_change_pct > 0 ? "+" : ""}${p.volume_change_pct}%</span>` : ""}
+  </span>
+  <span>${tags.map(t => `<span class="tag">${t}</span>`).join("")}</span>
+</div>`;
+    }).join("");
+}
+
+// ── Config editor ─────────────────────────────────────────────
+const CFG_FIELDS = [
+  { group: "Management" },
+  { key: "deployAmountSol",      label: "Deploy Amount (SOL)",    section: "management" },
+  { key: "stopLossPct",          label: "Stop Loss %",            section: "management" },
+  { key: "maxDrawdownFromPeak",  label: "Max Drawdown from Peak", section: "management" },
+  { key: "takeProfitFeePct",     label: "Take Profit %",          section: "management" },
+  { key: "trailingTriggerPct",   label: "Trailing Trigger %",     section: "management" },
+  { key: "trailingDropPct",      label: "Trailing Drop %",        section: "management" },
+  { key: "outOfRangeWaitMinutes",label: "OOR Wait (min)",         section: "management" },
+  { key: "belowOORWaitMinutes",  label: "Below OOR Wait (min)",   section: "management" },
+  { key: "minFeeVelocityPct",    label: "Min Fee Velocity %",     section: "management" },
+  { group: "Screening" },
+  { key: "minFeeActiveTvlRatio", label: "Min Fee/TVL Ratio",      section: "screening" },
+  { key: "minVolume",            label: "Min Volume ($)",         section: "screening" },
+  { key: "minOrganic",           label: "Min Organic Score",      section: "screening" },
+  { key: "maxVolatility",        label: "Max Volatility",         section: "screening" },
+  { key: "minPoolAgeHours",      label: "Min Pool Age (h)",       section: "screening" },
+  { group: "Risk" },
+  { key: "maxPositions",         label: "Max Positions",          section: "risk" },
+  { key: "maxDeployAmount",      label: "Max Deploy (SOL)",       section: "risk" },
+];
+
+async function loadConfig() {
+  const d = await api("GET", "/api/config");
+  if (!d) return;
+
+  const container = document.getElementById("config-container");
+  container.innerHTML = CFG_FIELDS.map(f => {
+    if (f.group) return `<div class="cfg-group-title">${f.group}</div>`;
+    const val = d[f.section]?.[f.key] ?? "";
+    return `<div class="cfg-row">
+  <span class="cfg-key">${f.label}</span>
+  <input class="cfg-val" id="cfg-${f.key}" value="${val}" type="text">
+  <button class="cfg-save" onclick="saveConfig('${f.key}','${f.section}')">save</button>
+</div>`;
+  }).join("");
+}
+
+async function saveConfig(key, section) {
+  const input = document.getElementById(`cfg-${key}`);
+  if (!input) return;
+  const raw   = input.value.trim();
+  const value = raw === "null" ? null
+              : raw === "true"  ? true
+              : raw === "false" ? false
+              : isNaN(raw) ? raw : parseFloat(raw);
+
+  const r = await api("POST", "/api/config", { key, value });
+  if (r?.applied?.[key] !== undefined || r?.success) {
+    toast(`✓ ${key} = ${value}`);
+    input.style.borderColor = "var(--accent)";
+    setTimeout(() => input.style.borderColor = "", 1500);
+  } else {
+    toast(r?.error || "Failed", false);
+  }
+}
+
+// ── Actions ───────────────────────────────────────────────────
+async function triggerAction(action) {
+  const btn = document.getElementById(`btn-${action}`);
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Running…';
+
+  const r = await api("POST", "/api/action", { action });
+  btn.disabled = false;
+  btn.textContent = orig;
+
+  if (r?.started || r?.success) toast(`✓ ${action} cycle triggered`);
+  else toast(r?.error || "Failed", false);
+}
+
+async function setMode(mode) {
+  const r = await api("POST", "/api/action", { action: "set_market_mode", params: { mode } });
+  if (r?.success) toast(`Mode → ${mode}`);
+  else toast(r?.error || "Failed", false);
+}
+
+async function closePos(addr, pair) {
+  if (!confirm(`Close position ${pair}?\nThis will execute a real on-chain transaction.`)) return;
+  const r = await api("POST", "/api/action", { action: "close_position", params: { position_address: addr } });
+  if (r?.success) { toast(`✓ Closed ${pair}`); loadPositions(); }
+  else toast(r?.error || "Close failed", false);
+}
+
+async function claimFees(addr) {
+  const r = await api("POST", "/api/action", { action: "claim_fees", params: { position_address: addr } });
+  if (r?.success) toast("✓ Fees claimed");
+  else toast(r?.error || "Claim failed", false);
+}
+
+// ── Logs ──────────────────────────────────────────────────────
+const LOG_BOX = () => document.getElementById("log-box");
+
+function appendLog(entry) {
+  const box   = LOG_BOX();
+  const ts    = (entry.ts || "").slice(11, 19);
+  const cat   = (entry.cat || "").toLowerCase().replace(/\s+/g, "_");
+  const msg   = entry.msg || "";
+  const div   = document.createElement("div");
+  div.className = "log-line";
+  div.innerHTML = `<span class="log-ts">${ts}</span><span class="log-cat cat-${cat}">[${cat}]</span><span class="log-msg"> ${escHtml(msg)}</span>`;
+  box.appendChild(div);
+  if (document.getElementById("autoscroll").checked) {
+    box.scrollTop = box.scrollHeight;
+  }
+  // Keep max 500 lines in DOM
+  while (box.children.length > 500) box.removeChild(box.firstChild);
+}
+
+function clearLogs() { LOG_BOX().innerHTML = ""; }
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+// ── Full refresh ──────────────────────────────────────────────
+async function refreshAll() {
+  await Promise.all([loadStatus(), loadPositions(), loadPerformance(), loadConfig()]);
+}
+
+// ── Init ──────────────────────────────────────────────────────
+connectWS();
+refreshAll();
+
+// Auto-refresh status + positions every 60s
+setInterval(() => { loadStatus(); loadPositions(); }, 60_000);
+// Auto-refresh performance every 5min
+setInterval(loadPerformance, 300_000);
+</script>
+</body>
+</html>
