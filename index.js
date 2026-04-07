@@ -364,10 +364,11 @@ export async function runManagementCycle({ silent = false } = {}) {
         const act = actionMap.get(p.position);
         return [
           `POSITION: ${p.pair} (${p.position})`,
-          `  pool: ${p.pool}`,
+          `  pool_address: ${p.pool}`,
           `  action: ${act.action}${act.rule && act.rule !== "exit" ? ` — Rule ${act.rule}: ${act.reason}` : ""}${act.rule === "exit" ? ` — ⚡ Trailing TP: ${act.reason}` : ""}`,
           `  pnl_pct: ${p.pnl_pct}% | unclaimed_fees: ${cur}${p.unclaimed_fees_usd} | value: ${cur}${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
           `  bins: lower=${p.lower_bin} upper=${p.upper_bin} active=${p.active_bin} | oor_minutes: ${p.minutes_out_of_range ?? 0}`,
+          p.strategy ? `  strategy: ${p.strategy}` : null,
           p.instruction ? `  instruction: "${p.instruction}"` : null,
         ].filter(Boolean).join("\n");
       }).join("\n\n");
@@ -383,13 +384,15 @@ RULES:
 - INSTRUCTION: evaluate the instruction condition. If met → close_position. If not → HOLD, do nothing.
 - ⚡ exit alerts: close immediately, no exceptions
 - REBALANCE: Execute in 2 steps:
-    1. call close_position on the position
-    2. IMMEDIATELY call deploy_position on the SAME pool (same pool_address as listed)
-       - Use same strategy as original (bid_ask default), same deploy amount from wallet balance
+    1. call close_position with { position_address: <position>, skip_swap: true }
+       (skip_swap=true because price is above range — position is 100% SOL, no base token to swap)
+    2. IMMEDIATELY call deploy_position with pool_address = the pool_address listed above
+       - strategy: use "strategy" from the position block if present, otherwise "bid_ask"
+       - amount_y: use get_wallet_balance to check SOL, then deploy same amount minus gas reserve
        - bins_below will be auto-calculated from volatility — do NOT pass bins_below
        - bins_above = 0 (single-sided below new active bin)
-       - Do NOT call get_top_candidates or get_active_bin — deploy_position fetches active bin internally
-    If the redeploy fails (safety check, etc.), report the error and stop — do not retry.
+       - deploy_position fetches active bin internally — do NOT call get_active_bin separately
+    If the redeploy fails, report the error and stop — do not retry.
 
 Execute the required actions. Do NOT re-evaluate CLOSE/CLAIM/REBALANCE — rules already applied. Just execute.
 After executing, write a brief one-line result per position.
