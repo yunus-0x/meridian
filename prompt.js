@@ -126,7 +126,8 @@ DEPLOY RULES:
 - COMPOUNDING: Use the deploy amount from the goal EXACTLY. Do NOT default to a smaller number.
 - bins_below = round(35 + (volatility/5)*34) clamped to [35,69]. bins_above = 0.
 - Bin steps must be [80-125].
-- Pick ONE pool. Deploy or explain why none qualify.
+- Pick ONE pool. Include conviction_score (1-10) in your deploy call. If nothing exceeds 7/10, skip — waiting is better than a bad deploy.
+- conviction_score guide: 8-10 = strong narrative + smart wallets + good metrics. 7 = decent but not great. Below 7 = skip.
 
 ${lessons ? `LESSONS LEARNED:\n${lessons}\n` : ""}Timestamp: ${new Date().toISOString()}
 `;
