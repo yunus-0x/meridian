@@ -12,7 +12,7 @@ import {
 import { getWalletBalances, swapToken } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
-import { setPositionInstruction } from "../state.js";
+import { setPositionInstruction, getTrackedPosition } from "../state.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
 import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
@@ -20,6 +20,7 @@ import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-bla
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
+import { getAdvancedInfo } from "./okx.js";
 import { config, reloadScreeningThresholds } from "../config.js";
 import fs from "fs";
 import path from "path";
@@ -34,6 +35,9 @@ import { notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
 // Registered by index.js so update_config can restart cron jobs when intervals change
 let _cronRestarter = null;
 export function registerCronRestarter(fn) { _cronRestarter = fn; }
+
+// Deploy atomicity lock — prevents two deploys from firing simultaneously
+let _deployInFlight = false;
 
 // Map tool names to implementations
 const toolMap = {
@@ -126,6 +130,14 @@ const toolMap = {
     return { error: "invalid mode" };
   },
   update_config: ({ changes, reason = "" }) => {
+    // Protected keys — LLM cannot modify circuit breaker / drawdown settings
+    const FORBIDDEN = ['maxDrawdownPct', 'max_drawdown_pct', 'circuitBreaker', 'circuit_breaker', 'startingValue']
+    for (const key of Object.keys(changes)) {
+      if (FORBIDDEN.some(f => key.toLowerCase().includes(f.toLowerCase()))) {
+        return { success: false, error: `Cannot modify protected key: ${ key }` }
+      }
+    }
+
     // Flat key → config section mapping (covers everything in config.js)
     const CONFIG_MAP = {
       // screening
@@ -281,11 +293,16 @@ export async function executeTool(name, args) {
     }
   }
 
+  // ─── Deploy lock ──────────────────────────
+  if (name === 'deploy_position') _deployInFlight = true
+
   // ─── Execute ──────────────────────────────
   try {
     const result = await fn(args);
     const duration = Date.now() - startTime;
-    const success = result?.success !== false && !result?.error;
+    const success = WRITE_TOOLS.has(name)
+      ? result?.success === true
+      : result?.success !== false && !result?.error;
 
     logAction({
       tool: name,
@@ -355,6 +372,8 @@ export async function executeTool(name, args) {
       error: error.message,
       tool: name,
     };
+  } finally {
+    if (name === 'deploy_position') _deployInFlight = false
   }
 }
 
@@ -364,6 +383,16 @@ export async function executeTool(name, args) {
 async function runSafetyChecks(name, args) {
   switch (name) {
     case "deploy_position": {
+      // Deploy atomicity — prevent two simultaneous deploys
+      if (_deployInFlight) {
+        return { pass: false, reason: 'Another deploy already in progress.' }
+      }
+
+      // SOL-only pool enforcement
+      if (args.quote_mint && args.quote_mint !== config.tokens.SOL) {
+        return { pass: false, reason: 'Only SOL-paired pools supported.' }
+      }
+
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;
       const maxStep = config.screening.maxBinStep;
@@ -405,6 +434,19 @@ async function runSafetyChecks(name, args) {
         }
       }
 
+      // OKX dev rug check — block tokens from serial ruggers
+      if (args.base_mint) {
+        try {
+          const okx = await getAdvancedInfo(args.base_mint)
+          if (okx && okx.dev_rug_count >= 2) {
+            return { pass: false, reason: `Token deployer has ${ okx.dev_rug_count } rug pulls — blocked.` }
+          }
+          if (okx && okx.is_honeypot) {
+            return { pass: false, reason: 'Token flagged as honeypot — blocked.' }
+          }
+        } catch {}
+      }
+
       // Check amount limits
       const amountY = args.amount_y ?? args.amount_sol ?? 0;
       if (amountY <= 0) {
@@ -428,19 +470,41 @@ async function runSafetyChecks(name, args) {
         };
       }
 
-      // Check SOL balance
+      // Check SOL balance (with rent buffer)
       if (process.env.DRY_RUN !== "true") {
         const balance = await getWalletBalances();
         const gasReserve = config.management.gasReserve;
-        const minRequired = amountY + gasReserve;
+        const rentBuffer = 0.08;
+        const minRequired = amountY + gasReserve + rentBuffer;
         if (balance.sol < minRequired) {
           return {
             pass: false,
-            reason: `Insufficient SOL: have ${balance.sol} SOL, need ${minRequired} SOL (${amountY} deploy + ${gasReserve} gas reserve).`,
+            reason: `Insufficient SOL: have ${balance.sol} SOL, need ${minRequired.toFixed(2)} SOL (${amountY} deploy + ${gasReserve} gas + ${rentBuffer} rent).`,
           };
         }
       }
 
+      return { pass: true };
+    }
+
+    case "close_position": {
+      // Hold time enforcement — Meteora API returns garbage PnL for positions < 2 min old
+      if (!args._userOverride) {
+        const tracked = getTrackedPosition(args.position_address)
+        if (tracked && !tracked.closed) {
+          const deployedAt = new Date(tracked.deployed_at).getTime()
+          const minutesHeld = (Date.now() - deployedAt) / 60000
+          const ABSOLUTE_MIN = 2
+          const MIN_HOLD = 30
+
+          if (minutesHeld < ABSOLUTE_MIN) {
+            return { pass: false, reason: `Position only ${ minutesHeld.toFixed(1) }m old — must hold at least ${ ABSOLUTE_MIN }m (PnL data unreliable).` }
+          }
+          if (minutesHeld < MIN_HOLD && !(args.pnl_pct != null && args.pnl_pct <= -25)) {
+            return { pass: false, reason: `Position only ${ minutesHeld.toFixed(1) }m old — must hold at least ${ MIN_HOLD }m (unless emergency PnL <= -25%).` }
+          }
+        }
+      }
       return { pass: true };
     }
 

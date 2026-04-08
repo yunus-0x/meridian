@@ -14,6 +14,7 @@ import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
+import { recordStartingValue, checkDrawdown } from "./circuit-breaker.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 
@@ -180,6 +181,38 @@ export async function runManagementCycle({ silent = false } = {}) {
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
+
+    // ── Circuit Breaker Check ────────────────────────────────────
+    try {
+      const walletBal = await getWalletBalances().catch(() => null)
+      const walletSol = walletBal?.sol ?? 0
+      const positionValueSol = positions.reduce((sum, p) => sum + (p.total_value_sol ?? 0), 0)
+      const totalSol = walletSol + positionValueSol
+      recordStartingValue(totalSol)
+      const cb = checkDrawdown(totalSol)
+      if (cb.tier === 'RED') {
+        log('circuit_breaker', `RED — drawdown ${ cb.drawdownPct }% — closing ALL positions and exiting`)
+        for (const p of positions) {
+          try { await closePosition({ position_address: p.position, reason: 'circuit_breaker_RED' }) } catch {}
+        }
+        if (telegramEnabled()) await sendMessage(`CIRCUIT BREAKER RED — ${ cb.drawdownPct.toFixed(1) }% drawdown — closed all positions, exiting.`).catch(() => {})
+        process.exit(1)
+      }
+      if (cb.tier === 'ORANGE') {
+        log('circuit_breaker', `ORANGE — drawdown ${ cb.drawdownPct }% — closing worst performer, halting screening 30m`)
+        const worst = positions.reduce((w, p) => (p.pnl_pct ?? 0) < (w.pnl_pct ?? 0) ? p : w, positions[0])
+        if (worst) {
+          try { await closePosition({ position_address: worst.position, reason: 'circuit_breaker_ORANGE' }) } catch {}
+        }
+        _screeningLastTriggered = Date.now() + 25 * 60 * 1000
+      }
+      if (cb.tier === 'YELLOW') {
+        log('circuit_breaker', `YELLOW — drawdown ${ cb.drawdownPct }% — reducing new deploys`)
+        _screeningLastTriggered = Date.now() + 5 * 60 * 1000
+      }
+    } catch (e) {
+      log('circuit_breaker_error', `Circuit breaker check failed: ${ e.message }`)
+    }
 
     if (positions.length === 0) {
       log("cron", "No open positions — triggering screening cycle");
