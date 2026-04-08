@@ -70,6 +70,13 @@ export const config = {
     trailingTriggerPct:    u.trailingTriggerPct    ?? 3,    // activate trailing at X% PnL
     trailingDropPct:       u.trailingDropPct       ?? 1.5,  // close when drops X% from peak
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
+    // Position age exit — close stale positions
+    maxPositionAgeMinutes: u.maxPositionAgeMinutes ?? 1440, // 24h default, null = disabled
+    maxPositionAgePnlPct:  u.maxPositionAgePnlPct  ?? 2,    // only close aged positions below this PnL %
+    // OOR frequency exit — close positions that keep bouncing OOR
+    oorFrequencyLimit:     u.oorFrequencyLimit     ?? 4,     // close after N OOR events, null = disabled
+    // Volatility spike exit — close if volatility jumped significantly
+    volatilitySpikeRatio:  u.volatilitySpikeRatio  ?? 3,     // close if current vol > N× deploy vol, null = disabled
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
   },
