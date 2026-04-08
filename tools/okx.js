@@ -13,7 +13,10 @@ const OKX_SECRET_KEY = process.env.OKX_SECRET_KEY || process.env.OK_ACCESS_SECRE
 const OKX_PASSPHRASE = process.env.OKX_PASSPHRASE || process.env.OK_ACCESS_PASSPHRASE || "";
 const OKX_PROJECT_ID = process.env.OKX_PROJECT_ID || process.env.OK_ACCESS_PROJECT || "";
 
+let _authDisabled = false; // set true if auth fails at startup
+
 function hasAuth() {
+  if (_authDisabled) return false;
   return !!(OKX_API_KEY && OKX_SECRET_KEY && OKX_PASSPHRASE && !/enter your passphrase here/i.test(OKX_PASSPHRASE));
 }
 
@@ -189,6 +192,56 @@ export async function getPriceInfo(tokenAddress, chainIndex = CHAIN_SOLANA) {
     market_cap:       pct(d.marketCap),
     liquidity:        pct(d.liquidity),
   };
+}
+
+/**
+ * Fetch all three in parallel — use this during screening enrichment.
+ */
+/**
+ * Startup health check — verifies OKX API connectivity and auth status.
+ * Returns { ok, auth, latencyMs, error? }
+ */
+export async function healthCheck() {
+  const start = Date.now();
+  const testToken = "So11111111111111111111111111111111111111112"; // wSOL
+  const path = `/api/v6/dex/market/token/advanced-info?chainIndex=${CHAIN_SOLANA}&tokenContractAddress=${testToken}`;
+  const authConfigured = hasAuth();
+
+  try {
+    const data = await okxGet(path);
+    return {
+      ok: true,
+      auth: hasAuth(),
+      latencyMs: Date.now() - start,
+    };
+  } catch (e) {
+    // Auth keys are bad — disable auth and retry with public headers
+    if (authConfigured && /401|Invalid Sign|50113/.test(e.message)) {
+      _authDisabled = true;
+      try {
+        const data = await okxGet(path);
+        return {
+          ok: true,
+          auth: false,
+          authError: "bad credentials — fell back to public",
+          latencyMs: Date.now() - start,
+        };
+      } catch (e2) {
+        return {
+          ok: false,
+          auth: false,
+          latencyMs: Date.now() - start,
+          error: e2.message,
+        };
+      }
+    }
+    return {
+      ok: false,
+      auth: authConfigured,
+      latencyMs: Date.now() - start,
+      error: e.message,
+    };
+  }
 }
 
 /**
