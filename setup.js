@@ -262,6 +262,11 @@ const FIELD_SECTIONS = [
       { key: "maxBinStep", label: "Max bin step", type: "number", min: 1 },
       { key: "minFeeActiveTvlRatio", label: "Min fee/active TVL ratio", type: "number", min: 0 },
       { key: "minTokenFeesSol", label: "Min token fees paid (SOL)", type: "number", min: 0 },
+      { key: "useDiscordSignals", label: "Use Discord listener signals in screening? (true/false)", type: "boolean" },
+      { key: "discordSignalMode", label: "Discord signal mode", type: "choice", choices: [
+        { key: "merge", label: "merge — add Discord-signaled pools as another screening source" },
+        { key: "only", label: "only — screen only from signaled pools" },
+      ]},
       { key: "avoidPvpSymbols", label: "Avoid PvP symbols? (true/false)", type: "boolean" },
       { key: "blockPvpSymbols", label: "Hard block PvP symbols? (true/false)", type: "boolean" },
       { key: "maxBundlePct", label: "Max bundle %", type: "number", min: 0, max: 100 },

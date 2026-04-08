@@ -28,14 +28,23 @@ import { normalizeMint } from "./wallet.js";
 // an actual on-chain call is needed (never triggered in dry-run).
 let _DLMM = null;
 let _StrategyType = null;
+let _getBinIdFromPrice = null;
+let _getPriceOfBinByBinId = null;
 
 async function getDLMM() {
   if (!_DLMM) {
     const mod = await import("@meteora-ag/dlmm");
     _DLMM = mod.default;
     _StrategyType = mod.StrategyType;
+    _getBinIdFromPrice = mod.default?.getBinIdFromPrice;
+    _getPriceOfBinByBinId = mod.getPriceOfBinByBinId;
   }
-  return { DLMM: _DLMM, StrategyType: _StrategyType };
+  return {
+    DLMM: _DLMM,
+    StrategyType: _StrategyType,
+    getBinIdFromPrice: _getBinIdFromPrice,
+    getPriceOfBinByBinId: _getPriceOfBinByBinId,
+  };
 }
 
 // ─── Lazy wallet/connection init ──────────────────────────────
@@ -133,6 +142,8 @@ export async function deployPosition({
   strategy,
   bins_below,
   bins_above,
+  downside_pct,
+  upside_pct,
   // optional pool metadata for learning (passed by agent when available)
   pool_name,
   bin_step,
@@ -144,13 +155,43 @@ export async function deployPosition({
 }) {
   pool_address = normalizeMint(pool_address);
   const activeStrategy = strategy || config.strategy.strategy;
-
-  const activeBinsBelow = bins_below ?? config.strategy.binsBelow;
-  const activeBinsAbove = bins_above ?? 0;
+  let activeBinsBelow = bins_below ?? config.strategy.binsBelow;
+  let activeBinsAbove = bins_above ?? 0;
 
   if (isPoolOnCooldown(pool_address)) {
     log("deploy", `Pool ${pool_address.slice(0, 8)} is on cooldown — skipping`);
     return { success: false, error: "Pool on cooldown — was recently closed with a cooldown reason. Try a different pool." };
+  }
+
+  const { StrategyType, getBinIdFromPrice, getPriceOfBinByBinId } = await getDLMM();
+  const pool = await getPool(pool_address);
+  const baseMint = pool.lbPair.tokenXMint.toString();
+  if (isBaseMintOnCooldown(baseMint)) {
+    log("deploy", `Base mint ${baseMint.slice(0, 8)} is on cooldown — skipping deploy for pool ${pool_address.slice(0, 8)}`);
+    return { success: false, error: "Token on cooldown — recently closed out-of-range too many times. Try a different token." };
+  }
+  const activeBin = await pool.getActiveBin();
+  const actualBinStep = pool.lbPair.binStep;
+  const activePrice = Number(getPriceOfBinByBinId(activeBin.binId, actualBinStep).toString());
+
+  if (downside_pct != null || upside_pct != null) {
+    const downsidePct = Math.max(0, Number(downside_pct ?? 0));
+    const upsidePct = Math.max(0, Number(upside_pct ?? 0));
+
+    if (!Number.isFinite(downsidePct) || !Number.isFinite(upsidePct)) {
+      throw new Error("downside_pct and upside_pct must be valid numbers.");
+    }
+    if (downsidePct >= 100) {
+      throw new Error("downside_pct must be less than 100.");
+    }
+
+    const lowerTargetPrice = activePrice * (1 - downsidePct / 100);
+    const upperTargetPrice = activePrice * (1 + upsidePct / 100);
+    const lowerBinId = getBinIdFromPrice(lowerTargetPrice, actualBinStep, true);
+    const upperBinId = getBinIdFromPrice(upperTargetPrice, actualBinStep, false);
+
+    activeBinsBelow = Math.max(0, activeBin.binId - lowerBinId);
+    activeBinsAbove = Math.max(0, upperBinId - activeBin.binId);
   }
 
   if (process.env.DRY_RUN === "true") {
@@ -162,6 +203,8 @@ export async function deployPosition({
         strategy: activeStrategy,
         bins_below: activeBinsBelow,
         bins_above: activeBinsAbove,
+        downside_pct: downside_pct ?? null,
+        upside_pct: upside_pct ?? null,
         amount_x: amount_x || 0,
         amount_y: amount_y || amount_sol || 0,
         wide_range: totalBins > 69,
@@ -170,15 +213,7 @@ export async function deployPosition({
     };
   }
 
-  const { StrategyType } = await getDLMM();
   const wallet = getWallet();
-  const pool = await getPool(pool_address);
-  const baseMint = pool.lbPair.tokenXMint.toString();
-  if (isBaseMintOnCooldown(baseMint)) {
-    log("deploy", `Base mint ${baseMint.slice(0, 8)} is on cooldown — skipping deploy for pool ${pool_address.slice(0, 8)}`);
-    return { success: false, error: "Token on cooldown — recently closed out-of-range too many times. Try a different token." };
-  }
-  const activeBin = await pool.getActiveBin();
 
   // Range calculation
   const minBinId = activeBin.binId - activeBinsBelow;
@@ -292,10 +327,11 @@ export async function deployPosition({
       initial_value_usd,
     });
 
-    const actualBinStep = pool.lbPair.binStep;
-    const activePrice = parseFloat(activeBin.price);
-    const minPrice = activePrice * Math.pow(1 + actualBinStep / 10000, minBinId - activeBin.binId);
-    const maxPrice = activePrice * Math.pow(1 + actualBinStep / 10000, maxBinId - activeBin.binId);
+  const minPrice = Number(getPriceOfBinByBinId(minBinId, actualBinStep).toString());
+  const maxPrice = Number(getPriceOfBinByBinId(maxBinId, actualBinStep).toString());
+  const downsideCoveragePct = activePrice > 0 ? ((activePrice - minPrice) / activePrice) * 100 : null;
+  const upsideCoveragePct = activePrice > 0 ? ((maxPrice - activePrice) / activePrice) * 100 : null;
+  const totalWidthPct = minPrice > 0 ? ((maxPrice - minPrice) / minPrice) * 100 : null;
 
     // Read base fee directly from pool — baseFactor * binStep / 10^6 gives fee in %
     const baseFactor = pool.lbPair.parameters?.baseFactor ?? 0;
@@ -308,6 +344,12 @@ export async function deployPosition({
       pool_name,
       bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
       price_range: { min: minPrice, max: maxPrice },
+      range_coverage: {
+        downside_pct: downsideCoveragePct,
+        upside_pct: upsideCoveragePct,
+        width_pct: totalWidthPct,
+        active_price: activePrice,
+      },
       bin_step: actualBinStep,
       base_fee: actualBaseFee,
       strategy: activeStrategy,
@@ -888,6 +930,15 @@ export async function closePosition({ position_address, reason }) {
         minutesOOR = Math.floor((Date.now() - new Date(tracked.out_of_range_since).getTime()) / 60000);
       }
 
+      const shouldRejectClosedPnl = (pct, closeReasonText) => {
+        if (!Number.isFinite(pct)) return false;
+        const reasonText = String(closeReasonText || "").toLowerCase();
+        const stopLossTriggered = reasonText.includes("stop loss");
+        // Meteora sometimes briefly reports absurd closed pnl while the record is settling.
+        // Trust legitimate stop-loss disasters, but reject obviously unsettled outliers otherwise.
+        return !stopLossTriggered && pct <= -90;
+      };
+
       // Fetch closed PnL from API — authoritative source after withdrawal settles
       let pnlUsd = 0;
       let pnlPct = 0;
@@ -896,20 +947,34 @@ export async function closePosition({ position_address, reason }) {
       let feesUsd = tracked.total_fees_claimed_usd || 0;
       try {
         const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
-        const res = await fetch(closedUrl);
-        if (res.ok) {
-          const data = await res.json();
-          const posEntry = (data.positions || []).find(p => p.positionAddress === position_address);
-          if (posEntry) {
-            pnlUsd        = parseFloat(posEntry.pnlUsd || 0);
-            pnlPct        = parseFloat(posEntry.pnlPctChange || 0);
-            finalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
-            initialUsd    = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
-            feesUsd       = parseFloat(posEntry.allTimeFees?.total?.usd || 0) || feesUsd;
-            log("close", `Closed PnL from API: pnl=${pnlUsd.toFixed(2)} USD (${pnlPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(2)}, deposited=${initialUsd.toFixed(2)}`);
-          } else {
-            log("close_warn", `Position not found in status=closed response — may still be settling`);
+        for (let attempt = 0; attempt < 6; attempt++) {
+          const res = await fetch(closedUrl);
+          if (res.ok) {
+            const data = await res.json();
+            const posEntry = (data.positions || []).find(p => p.positionAddress === position_address);
+            if (posEntry) {
+              const nextPnlUsd = parseFloat(posEntry.pnlUsd || 0);
+              const nextPnlPct = parseFloat(posEntry.pnlPctChange || 0);
+              const nextFinalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
+              const nextInitialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
+              const nextFeesUsd = parseFloat(posEntry.allTimeFees?.total?.usd || 0) || feesUsd;
+
+              if (shouldRejectClosedPnl(nextPnlPct, reason || tracked?.close_reason)) {
+                log("close_warn", `Rejected unsettled closed PnL for ${position_address.slice(0, 8)} on attempt ${attempt + 1}/6: ${nextPnlPct.toFixed(2)}%`);
+              } else {
+                pnlUsd        = nextPnlUsd;
+                pnlPct        = nextPnlPct;
+                finalValueUsd = nextFinalValueUsd;
+                initialUsd    = nextInitialUsd;
+                feesUsd       = nextFeesUsd;
+                log("close", `Closed PnL from API: pnl=${pnlUsd.toFixed(2)} USD (${pnlPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(2)}, deposited=${initialUsd.toFixed(2)}`);
+                break;
+              }
+            } else {
+              log("close_warn", `Position not found in status=closed response (attempt ${attempt + 1}/6) — may still be settling`);
+            }
           }
+          if (attempt < 5) await new Promise((r) => setTimeout(r, 5000));
         }
       } catch (e) {
         log("close_warn", `Closed PnL fetch failed: ${e.message}`);

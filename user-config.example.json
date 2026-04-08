@@ -31,6 +31,8 @@
   "maxBinStep": 125,
   "minFeeActiveTvlRatio": 0.05,
   "minTokenFeesSol": 30,
+  "useDiscordSignals": false,
+  "discordSignalMode": "merge",
   "avoidPvpSymbols": true,
   "blockPvpSymbols": false,
   "maxBundlePct": 30,

@@ -166,11 +166,19 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           },
           bins_below: {
             type: "number",
-            description: "Number of bins below active bin. If the user specifies a value, use it exactly. If they specify a % range (e.g. '-60% range'), convert using: bins = ceil(log(1 - pct) / log(1 + bin_step/10000)). Example: -60% range at bin_step 100 → ceil(log(0.40)/log(1.01)) = 92 bins. Otherwise choose based on volatility: 35–69 standard, 100–350 for wide-range strategies. Max 1400 total."
+            description: "Number of bins below active bin. Use this for explicit bin-based deploys. If downside_pct is provided, that percentage-based range takes priority and bins are derived automatically via the SDK."
           },
           bins_above: {
             type: "number",
-            description: "Number of bins above active bin. MUST be 0 for bid_ask strategy — placing bins above active bin defeats the purpose of bid-ask. Only set > 0 for spot/dual-sided strategies."
+            description: "Number of bins above active bin. MUST be 0 for bid_ask strategy unless the user explicitly wants upside exposure. If upside_pct is provided, that percentage-based range takes priority and bins are derived automatically via the SDK."
+          },
+          downside_pct: {
+            type: "number",
+            description: "Optional human-friendly downside range in percent below the current active price. Example: 50 means target roughly -50% downside coverage. Converted to bins internally via the Meteora SDK."
+          },
+          upside_pct: {
+            type: "number",
+            description: "Optional human-friendly upside range in percent above the current active price. Example: 10 means target roughly +10% upside coverage. Converted to bins internally via the Meteora SDK."
           },
           pool_name: { type: "string", description: "Human-readable pool name for record-keeping" },
           base_mint: { type: "string", description: "Base token mint address — used to prevent duplicate token exposure across pools" },
@@ -578,12 +586,12 @@ Returns pool address, name, bin_step, fee %, TVL, volume, and token mints.`,
     type: "function",
     function: {
       name: "get_top_lpers",
-      description: `Get the top LPers for a pool by address — quick read-only lookup.
+      description: `Get the top open LPers for a pool by address — quick read-only lookup.
 Use this when the user asks "who are the top LPers in this pool?" or wants to
 know how others are performing in a specific pool without saving lessons.
 
-Returns: aggregate patterns (avg hold time, win rate, ROI) and per-LPer summaries.
-Requires LPAGENT_API_KEY to be set.`,
+Returns: aggregate open-position patterns (avg hold time, open PnL, range width,
+distance to active, fee/TVL) and per-LPer summaries from Agent Meridian pool data.`,
       parameters: {
         type: "object",
         properties: {
@@ -605,13 +613,13 @@ Requires LPAGENT_API_KEY to be set.`,
     type: "function",
     function: {
       name: "study_top_lpers",
-      description: `Fetch and analyze top LPers for a pool to learn from their behaviour.
-Returns aggregate patterns (avg hold time, win rate, ROI) and historical samples.
+      description: `Fetch and analyze top open LPers for a pool to learn from their behaviour.
+Returns aggregate open-position patterns and per-owner open-position samples.
 
 Use this before deploying into a new pool to:
 - See if top performers are scalpers (< 1h holds) or long-term holders.
-- Match your strategy and range to what is actually working for others.
-- Avoid pools where even the best performers have low win rates.`,
+- Match your strategy and range to what is actually working for others right now.
+- Avoid pools where even the best open LPs are poorly placed or losing.`,
       parameters: {
         type: "object",
         properties: {

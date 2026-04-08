@@ -335,10 +335,13 @@ export function stopPolling() {
 }
 
 // ─── Notification helpers ────────────────────────────────────────
-export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, binStep, baseFee }) {
+export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee }) {
   if (hasActiveLiveMessage()) return;
   const priceStr = priceRange
     ? `Price range: ${priceRange.min < 0.0001 ? priceRange.min.toExponential(3) : priceRange.min.toFixed(6)} – ${priceRange.max < 0.0001 ? priceRange.max.toExponential(3) : priceRange.max.toFixed(6)}\n`
+    : "";
+  const coverageStr = rangeCoverage
+    ? `Range cover: ${fmtPct(rangeCoverage.downside_pct)} downside | ${fmtPct(rangeCoverage.upside_pct)} upside | ${fmtPct(rangeCoverage.width_pct)} total\n`
     : "";
   const poolStr = (binStep || baseFee)
     ? `Bin step: ${binStep ?? "?"}  |  Base fee: ${baseFee != null ? baseFee + "%" : "?"}\n`
@@ -347,6 +350,7 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
     `✅ <b>Deployed</b> ${pair}\n` +
     `Amount: ${amountSol} SOL\n` +
     priceStr +
+    coverageStr +
     poolStr +
     `Position: <code>${position?.slice(0, 8)}...</code>\n` +
     `Tx: <code>${tx?.slice(0, 16)}...</code>`
@@ -381,4 +385,9 @@ export async function notifyOutOfRange({ pair, minutesOOR }) {
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function fmtPct(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? `${n.toFixed(2)}%` : "?";
 }

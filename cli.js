@@ -71,7 +71,7 @@ Output: { done: true, report: "..." }
 ### meridian deploy --pool <addr> --amount <sol> [--bins-below 69] [--bins-above 0] [--strategy bid_ask|spot] [--dry-run]
 Deploys a new LP position. All safety checks apply.
 \`\`\`
-Output: { success, position, pool_name, txs, price_range, bin_step }
+Output: { success, position, pool_name, txs, price_range, range_coverage, bin_step }
 \`\`\`
 
 ### meridian claim --position <addr>

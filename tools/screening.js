@@ -7,6 +7,7 @@ import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
+const DISCORD_SIGNAL_CANDIDATES_URL = "https://api.agentmeridian.xyz/api/signals/discord/candidates";
 const PVP_SHORTLIST_LIMIT = 2;
 const PVP_RIVAL_LIMIT = 2;
 const PVP_MIN_ACTIVE_TVL = 5_000;
@@ -23,6 +24,13 @@ function scoreCandidate(pool) {
   const volume = Number(pool.volume_window || 0);
   const holders = Number(pool.holders || 0);
   return feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100;
+}
+
+async function fetchDiscordSignalCandidates() {
+  const res = await fetch(DISCORD_SIGNAL_CANDIDATES_URL);
+  if (!res.ok) throw new Error(`discord signal candidates ${res.status}`);
+  const data = await res.json();
+  return Array.isArray(data?.candidates) ? data.candidates : [];
 }
 
 async function searchAssetsBySymbol(symbol) {
@@ -137,7 +145,51 @@ export async function discoverPools({
 
   const data = await res.json();
 
-  const condensed = (data.data || []).map(condensePool);
+  let rawPools = Array.isArray(data.data) ? data.data : [];
+
+  if (config.screening.useDiscordSignals) {
+    const signalCandidates = await fetchDiscordSignalCandidates().catch((error) => {
+      log("screening", `Discord signal fetch failed: ${error.message}`);
+      return [];
+    });
+    const signalPools = signalCandidates
+      .map((candidate) => {
+        const discoveryPool = candidate.discovery_pool;
+        if (!discoveryPool?.pool_address) return null;
+        return {
+          ...discoveryPool,
+          discord_signal: true,
+          discord_signal_count: candidate.source_count || 1,
+          discord_signal_seen_count: candidate.seen_count || 1,
+          discord_signal_first_seen_at: candidate.first_seen_at || null,
+          discord_signal_last_seen_at: candidate.last_seen_at || null,
+        };
+      })
+      .filter(Boolean);
+
+    if (config.screening.discordSignalMode === "only") {
+      rawPools = signalPools;
+    } else if (signalPools.length > 0) {
+      const byPool = new Map(rawPools.map((pool) => [pool.pool_address, pool]));
+      for (const signalPool of signalPools) {
+        if (byPool.has(signalPool.pool_address)) {
+          byPool.set(signalPool.pool_address, {
+            ...byPool.get(signalPool.pool_address),
+            discord_signal: true,
+            discord_signal_count: signalPool.discord_signal_count,
+            discord_signal_seen_count: signalPool.discord_signal_seen_count,
+            discord_signal_first_seen_at: signalPool.discord_signal_first_seen_at,
+            discord_signal_last_seen_at: signalPool.discord_signal_last_seen_at,
+          });
+        } else {
+          byPool.set(signalPool.pool_address, signalPool);
+        }
+      }
+      rawPools = Array.from(byPool.values());
+    }
+  }
+
+  const condensed = rawPools.map(condensePool);
 
   // Hard-filter blacklisted tokens and blocked deployers (what pool discovery already gave us)
   let pools = condensed.filter((p) => {
@@ -231,6 +283,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       }
       return true;
     })
+    .sort((a, b) => scoreCandidate(b) - scoreCandidate(a))
     .slice(0, limit);
 
   if (config.screening.avoidPvpSymbols && eligible.length > 0) {
@@ -424,6 +477,10 @@ function condensePool(p) {
     active_positions: p.active_positions,
     active_pct: fix(p.active_positions_pct, 1),
     open_positions: p.open_positions,
+    discord_signal: Boolean(p.discord_signal),
+    discord_signal_count: p.discord_signal_count || 0,
+    discord_signal_seen_count: p.discord_signal_seen_count || 0,
+    discord_signal_last_seen_at: p.discord_signal_last_seen_at || null,
 
     // Price action
     price: p.pool_price,

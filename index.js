@@ -589,7 +589,14 @@ STEPS:
 
    ◎ <deploy amount> SOL | <strategy> | bin <active_bin>
    Range: <minPrice> → <maxPrice>
-   Downside buffer: <negative %>
+   Range cover: <downside %> downside | <upside %> upside | <total width %> total
+
+   IMPORTANT:
+   - Do NOT calculate the range percentages yourself.
+   - Use the actual deploy_position tool result:
+     range_coverage.downside_pct
+     range_coverage.upside_pct
+     range_coverage.width_pct
 
    MARKET
    Fee/TVL: <x>%
@@ -1121,11 +1128,14 @@ async function telegramHandler(msg) {
     try {
       const idx = parseInt(deployMatch[1]) - 1;
       const { candidate, result, deployAmount, binsBelow } = await deployLatestCandidate(idx);
+      const coverage = result.range_coverage
+        ? `Range: ${fmtPct(result.range_coverage.downside_pct)} downside | ${fmtPct(result.range_coverage.upside_pct)} upside`
+        : `Strategy: ${config.strategy.strategy} | binsBelow: ${binsBelow}`;
       await sendMessage([
         `✅ Deployed ${candidate.name}`,
         `Pool: ${candidate.pool}`,
         `Amount: ${deployAmount} SOL`,
-        `Strategy: ${config.strategy.strategy} | binsBelow: ${binsBelow}`,
+        coverage,
         `Position: ${result.position || "n/a"}`,
         result.txs?.length ? `Tx: ${result.txs[0]}` : null,
       ].filter(Boolean).join("\n")).catch(() => {});
@@ -1211,6 +1221,11 @@ async function telegramHandler(msg) {
     refreshPrompt();
     drainTelegramQueue().catch(() => {});
   }
+}
+
+function fmtPct(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? `${n.toFixed(2)}%` : "?";
 }
 
 // Register restarter — when update_config changes intervals, running cron jobs get replaced
