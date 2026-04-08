@@ -409,6 +409,53 @@ Responds with what changed before restarting in 3 seconds.`,
   },
 
   // ═══════════════════════════════════════════
+  //  MARKET MODE TOOLS
+  // ═══════════════════════════════════════════
+  {
+    type: "function",
+    function: {
+      name: "set_market_mode",
+      description: `Set the market mode to apply a parameter preset for current market conditions.
+
+Modes and their effects:
+- auto        → Reset to base config (no preset). Use when you want full manual control.
+- bullish     → Token trending up. Deploys bins above & below price. Tighter stop loss (-25%). Higher trailing trigger (5%).
+- bearish     → Market falling. Single-sided below only. Very tight stop loss (-20%). Quick exit (trailing drop 1%).
+- sideways    → Range-bound market. Balanced bins (10 above). Standard stop loss (-30%). Patient OOR wait (30m).
+- volatile    → High volatility. Wide range (30 bins above). Loose stop loss (-40%). High trailing trigger (8%).
+- conservative→ Safe mode. No bins above. Very tight stop loss (-15%). Higher organic/holder requirements.
+
+Screening thresholds (volume, maxVolatility, minOrganic, minHolders) take effect immediately.
+Management rules (stopLoss, trailing, OOR wait) take effect on the next management cycle.
+
+Use this when the user says "set market mode", "switch to bullish/bearish/volatile/conservative mode",
+"markets are pumping/dumping", or "be more conservative/aggressive".`,
+      parameters: {
+        type: "object",
+        properties: {
+          mode: {
+            type: "string",
+            enum: ["auto", "bullish", "bearish", "sideways", "volatile", "conservative"],
+            description: "Market mode to activate"
+          }
+        },
+        required: ["mode"]
+      }
+    }
+  },
+
+  {
+    type: "function",
+    function: {
+      name: "get_market_mode",
+      description: `Get the current market mode and active preset parameters.
+Use when the user asks "what mode are we in?", "what's the current market mode?", or "show me the market settings".
+Returns current mode, its description, all active preset values, and a list of all available modes.`,
+      parameters: { type: "object", properties: {} }
+    }
+  },
+
+  // ═══════════════════════════════════════════
   //  SMART WALLET TOOLS
   // ═══════════════════════════════════════════
   {

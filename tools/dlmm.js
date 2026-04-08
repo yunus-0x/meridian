@@ -90,6 +90,43 @@ export async function getActiveBin({ pool_address }) {
   };
 }
 
+// ─── Optimal bins_below calculation ───────────────────────────
+/**
+ * Compute the optimal number of bins below the active bin based on pool volatility.
+ * More volatile pools need a wider downside buffer to avoid going OOR prematurely.
+ *
+ * Scale: vol=0 → 35 bins (tight, stable pool)
+ *        vol=5 → 90 bins (wide buffer, high volatility)
+ *        vol≥10 → capped at 120 (extreme volatility)
+ *
+ * Formula mirrors the screener prompt guideline but enforced server-side,
+ * so the LLM's bins_below estimate is always validated against pool reality.
+ */
+function computeOptimalBinsBelow(volatility, fallback = 69) {
+  if (volatility == null || !isFinite(volatility)) return fallback;
+  // Linear scale: 35 at vol=0, 90 at vol=5, 120 at vol≥10
+  const raw = volatility <= 5
+    ? Math.round(35 + (volatility / 5) * 55)
+    : Math.round(90 + ((volatility - 5) / 5) * 30);
+  return Math.max(35, Math.min(120, raw));
+}
+
+/**
+ * Compute optimal bins_above so active price sits roughly in the middle of the
+ * position instead of at the very top (which causes immediate OOR on any upward move).
+ *
+ * bid_ask: 20% upside buffer — small buffer captures fee on minor uptick before redeploy
+ * spot/curve: 35% upside buffer — symmetric, earns both up and down moves
+ *
+ * User override: if config.strategy.binsAbove > 0, that value wins.
+ */
+function computeOptimalBinsAbove(strategy, binsBelow, userOverride = 0) {
+  if (userOverride > 0) return userOverride;
+  if (strategy === "spot" || strategy === "curve") return Math.round(binsBelow * 0.35);
+  if (strategy === "bid_ask") return Math.round(binsBelow * 0.20);
+  return Math.round(binsBelow * 0.20); // safe default
+}
+
 // ─── Deploy Position ───────────────────────────────────────────
 export async function deployPosition({
   pool_address,
@@ -111,8 +148,14 @@ export async function deployPosition({
   pool_address = normalizeMint(pool_address);
   const activeStrategy = strategy || config.strategy.strategy;
 
-  const activeBinsBelow = bins_below ?? config.strategy.binsBelow;
-  const activeBinsAbove = bins_above ?? 0;
+  // Use LLM-provided bins_below if given; otherwise compute from pool volatility.
+  // computeOptimalBinsBelow scales the buffer to match the token's actual movement risk.
+  const activeBinsBelow = bins_below ?? computeOptimalBinsBelow(volatility, config.strategy.binsBelow);
+  const activeBinsAbove = bins_above != null
+    ? bins_above
+    : computeOptimalBinsAbove(activeStrategy, activeBinsBelow, config.strategy.binsAbove ?? 0);
+  const binsAboveSource = bins_above != null ? "LLM" : config.strategy.binsAbove > 0 ? "user-config" : `auto (${activeStrategy})`;
+  log("deploy", `bins_below=${activeBinsBelow} (${bins_below != null ? "LLM" : `auto vol=${volatility}`}) | bins_above=${activeBinsAbove} (${binsAboveSource})`);
 
   if (isPoolOnCooldown(pool_address)) {
     log("deploy", `Pool ${pool_address.slice(0, 8)} is on cooldown — skipping`);

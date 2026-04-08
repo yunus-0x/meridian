@@ -36,6 +36,7 @@ export async function discoverPools({
     "quote_token_organic_score>=60",
     s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
     s.maxTokenAgeHours != null ? `base_token_created_at>=${Date.now() - s.maxTokenAgeHours * 3_600_000}` : null,
+    s.maxVolatility    != null ? `volatility<=${s.maxVolatility}` : null,
   ].filter(Boolean).join("&&");
 
   const url = `${POOL_DISCOVERY_BASE}/pools?` +
@@ -227,6 +228,106 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       return true;
     }));
 
+    // ── Pool age window filter ────────────────────────────────────────
+    // Very new tokens (<4h): metrics inflated — first LPs capture all fees, volume unsustained.
+    // Very old tokens (>7d): established but possibly saturated with LPs.
+    {
+      const minAge = config.screening.minPoolAgeHours;
+      const maxAge = config.screening.maxPoolAgeHours;
+      if (minAge != null || maxAge != null) {
+        const before = eligible.length;
+        eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+          const age = p.token_age_hours;
+          if (age == null) return true; // no data → don't filter
+          if (minAge != null && age < minAge) {
+            log("screening", `Age filter: dropped ${p.name} — token only ${age.toFixed(1)}h old (min ${minAge}h)`);
+            pushFilteredReason(filteredOut, p, `token age ${age.toFixed(1)}h < min ${minAge}h`);
+            return false;
+          }
+          if (maxAge != null && age > maxAge) {
+            log("screening", `Age filter: dropped ${p.name} — token ${age.toFixed(1)}h old (max ${maxAge}h)`);
+            pushFilteredReason(filteredOut, p, `token age ${age.toFixed(1)}h > max ${maxAge}h`);
+            return false;
+          }
+          return true;
+        }));
+        if (eligible.length < before) log("screening", `Age filter removed ${before - eligible.length} pool(s)`);
+      }
+    }
+
+    // ── Volume acceleration filter ────────────────────────────────────
+    // Skip pools where volume is already collapsing — fees will dry up fast.
+    {
+      const minAccel = config.screening.minVolumeAccelPct;
+      if (minAccel != null) {
+        const before = eligible.length;
+        eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+          const accel = p.volume_change_pct;
+          if (accel == null) return true;
+          if (accel < minAccel) {
+            log("screening", `Volume accel filter: dropped ${p.name} — volume ${accel}% (min ${minAccel}%)`);
+            pushFilteredReason(filteredOut, p, `volume change ${accel}% < min ${minAccel}%`);
+            return false;
+          }
+          return true;
+        }));
+        if (eligible.length < before) log("screening", `Volume accel filter removed ${before - eligible.length} pool(s)`);
+      }
+    }
+
+    // ── Time-of-day bias ─────────────────────────────────────────────
+    // During off-peak hours (low global volume), require higher minimum thresholds.
+    // Peak: US hours 14:00-22:00 UTC + Asian partial 01:00-08:00 UTC
+    if (config.screening.timeOfDayBias) {
+      const hour = new Date().getUTCHours();
+      const isPeak = (hour >= 14 && hour < 22) || (hour >= 1 && hour < 8);
+      if (!isPeak) {
+        const mult = config.screening.offPeakMultiplier ?? 1.3;
+        const effectiveMinVolume = (config.screening.minVolume ?? 500) * mult;
+        const effectiveMinFeeRatio = (config.screening.minFeeActiveTvlRatio ?? 0.05) * mult;
+        const before = eligible.length;
+        eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+          if (p.volume_window != null && p.volume_window < effectiveMinVolume) {
+            log("screening", `Off-peak filter: dropped ${p.name} — vol $${p.volume_window} < $${effectiveMinVolume.toFixed(0)} (off-peak)`);
+            pushFilteredReason(filteredOut, p, `off-peak volume $${p.volume_window} < $${effectiveMinVolume.toFixed(0)}`);
+            return false;
+          }
+          if (p.fee_active_tvl_ratio != null && p.fee_active_tvl_ratio < effectiveMinFeeRatio) {
+            log("screening", `Off-peak filter: dropped ${p.name} — fee/tvl ${p.fee_active_tvl_ratio} < ${effectiveMinFeeRatio.toFixed(3)} (off-peak)`);
+            pushFilteredReason(filteredOut, p, `off-peak fee/tvl ${p.fee_active_tvl_ratio} < ${effectiveMinFeeRatio.toFixed(3)}`);
+            return false;
+          }
+          return true;
+        }));
+        if (eligible.length < before) log("screening", `Off-peak filter removed ${before - eligible.length} pool(s) [UTC hour: ${hour}]`);
+      }
+    }
+
+    // Price momentum guard — skip pools where price just pumped hard in the timeframe window.
+    // Deploying into a post-pump pool = you LP at/near the top, then price dumps below your range.
+    // Token with strong downtrend (price_change_pct very negative) is also risky — already in freefall.
+    const maxPump = config.screening.maxEntry5mPricePct;
+    const maxDump = config.screening.minEntry5mPricePct;
+    if (maxPump != null || maxDump != null) {
+      const before = eligible.length;
+      eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+        const chg = p.price_change_pct;
+        if (chg == null) return true; // no data → don't filter
+        if (maxPump != null && chg > maxPump) {
+          log("screening", `Momentum filter: dropped ${p.name} — price +${chg}% (limit +${maxPump}%)`);
+          pushFilteredReason(filteredOut, p, `price +${chg}% exceeds pump limit +${maxPump}%`);
+          return false;
+        }
+        if (maxDump != null && chg < maxDump) {
+          log("screening", `Momentum filter: dropped ${p.name} — price ${chg}% (limit ${maxDump}%)`);
+          pushFilteredReason(filteredOut, p, `price ${chg}% below dump limit ${maxDump}%`);
+          return false;
+        }
+        return true;
+      }));
+      if (eligible.length < before) log("screening", `Momentum filter removed ${before - eligible.length} pool(s)`);
+    }
+
     // ATH filter — drop pools where price is too close to ATH
     const athFilter = config.screening.athFilterPct;
     if (athFilter != null) {
@@ -243,6 +344,151 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       }));
       if (eligible.length < before) log("screening", `ATH filter removed ${before - eligible.length} pool(s)`);
     }
+
+    // Min fee-per-position filter — skip pools where your expected fee slice is dust.
+    // Very crowded pools (many LPs, tiny slice each) rarely worth the gas cost.
+    {
+      const minFeePerPos = config.screening.minFeePerPosition;
+      if (minFeePerPos != null) {
+        const before = eligible.length;
+        eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+          if (p.fee_per_position_est == null) return true; // no data → don't filter
+          if (p.fee_per_position_est < minFeePerPos) {
+            log("screening", `Fee/LP filter: dropped ${p.name} — fee/position $${p.fee_per_position_est} < min $${minFeePerPos}`);
+            pushFilteredReason(filteredOut, p, `fee per LP $${p.fee_per_position_est} < min $${minFeePerPos}`);
+            return false;
+          }
+          return true;
+        }));
+        if (eligible.length < before) log("screening", `Fee/LP filter removed ${before - eligible.length} pool(s)`);
+      }
+    }
+
+    // ── Composite quality scoring ────────────────────────────────────
+    // Score each pool on a 0-100 scale before the LLM sees them.
+    // Higher score = better risk-adjusted yield expectation.
+    // The LLM still makes the final decision, but ranked order means
+    // the best pool always appears first when limit is applied.
+    for (const p of eligible) {
+      let score = 0;
+
+      // ── Yield signals ────────────────────────────────────────────
+      // daily_yield_pct_est: projected % return per day at current rate
+      if (p.daily_yield_pct_est != null) {
+        // 15%/day = 15pts, 5%/day = 5pts
+        score += Math.min(15, p.daily_yield_pct_est * 1.0);
+      }
+      // fee_per_position_est: your actual slice vs. competing LPs (primary signal)
+      // High = few LPs → you capture large fraction. Low = overcrowded → tiny slice.
+      if (p.fee_per_position_est != null) {
+        // $10/position = 25pts, $5 = 12.5pts, $1 = 2.5pts
+        score += Math.min(25, p.fee_per_position_est * 2.5);
+      }
+      // fee_active_tvl_ratio: fundamental fee/TVL efficiency
+      if (p.fee_active_tvl_ratio != null) {
+        score += Math.min(15, p.fee_active_tvl_ratio * 10);
+      }
+
+      // ── Token quality signals ─────────────────────────────────────
+      // organic_score: 60–100 range, rescale to 0–20
+      if (p.organic_score != null) {
+        score += Math.max(0, (p.organic_score - 60) / 2); // 60→0, 100→20
+      }
+
+      // ── Smart money signals (bonuses) ─────────────────────────────
+      if (p.smart_money_buy)   score += 12;
+      if (p.kol_in_clusters)   score += 8;
+      if (p.dev_sold_all)      score += 5;
+      if (p.dex_boost)         score += 3;
+
+      // ── Volume acceleration bonus/penalty ─────────────────────────
+      // volume_change_pct: how much volume changed in the timeframe window
+      // Accelerating volume = more fees incoming; collapsing volume = fees dying
+      if (p.volume_change_pct != null) {
+        if (p.volume_change_pct > 50)       score += 10; // volume surging
+        else if (p.volume_change_pct > 20)  score += 5;  // volume growing
+        else if (p.volume_change_pct < -30) score -= 8;  // volume declining
+        else if (p.volume_change_pct < -50) score -= 15; // volume collapsing
+      }
+
+      // ── Time-in-range estimate ─────────────────────────────────────
+      // Lower volatility → position stays active longer → more cumulative fee capture.
+      // High volatility → frequent OOR → wasted gas + missed fees while redeploying.
+      // Bonus: vol≤1 → +8pts, vol=2 → +5pts, vol=3 → +3pts, vol≥5 → 0pts
+      if (p.volatility != null) {
+        score += Math.max(0, 8 - p.volatility * 2.0);
+      }
+
+      // ── Pool age sweet spot ────────────────────────────────────────
+      // Very new pools (< 6h): inflated metrics, unsustainable early spike — risky
+      // Sweet spot (6–48h): discovered but not yet saturated with LPs — highest fee/position
+      // Old pools (> 72h): LP competition high, fee dilution — declining opportunity
+      if (p.token_age_hours != null) {
+        const age = p.token_age_hours;
+        if (age >= 6 && age <= 48)       score += 8;  // sweet spot
+        else if (age > 48 && age <= 72)  score += 4;  // still decent
+        else if (age < 6)                score -= 5;  // too new, metrics unreliable
+        // > 72h: no bonus, no penalty (already filtered by maxPoolAgeHours)
+      }
+
+      // ── LP concentration (active LPs) ─────────────────────────────
+      // active_pct: % of open LP positions that are actively in range.
+      // Low active_pct = many LPs pulled liquidity → pool health declining.
+      // High active_pct with few positions = you get a large share.
+      if (p.active_pct != null && p.active_positions != null) {
+        if (p.active_pct < 30)                score -= 8;  // most LPs abandoned pool
+        else if (p.active_positions <= 3)      score += 6;  // almost no competition
+        else if (p.active_positions <= 8)      score += 3;  // low competition
+      }
+
+      // ── Bin step preference ───────────────────────────────────────
+      // Lower bin step = finer price granularity = more fee earned per crossing.
+      // But too low = position covers tiny range, high OOR risk.
+      // Sweet spot: 80-100 for meme pools (more fee per tick).
+      // Penalty for high bin step (100-125): fewer fee events per unit of price move.
+      if (p.bin_step != null) {
+        if (p.bin_step <= 80)       score += 5;  // finest granularity → most fee per crossing
+        else if (p.bin_step <= 100) score += 3;  // good fee rate
+        else if (p.bin_step >= 120) score -= 3;  // coarse — fewer fee events
+      }
+
+      // ── Volume consistency (active vs. open positions) ────────────
+      // active_pct high + volume high = real, sustained activity.
+      // active_pct low + volume high = whale pump, no real market.
+      // Also: open_positions many but only a few active = pool is very choppy (hard to stay in range).
+      if (p.active_pct != null && p.open_positions != null && p.open_positions > 0) {
+        const churn = (p.active_positions ?? 0) / p.open_positions;
+        if (churn >= 0.7)      score += 4;  // most LPs in range = price stable = consistent volume
+        else if (churn < 0.3)  score -= 6;  // most LPs OOR = very choppy price
+      }
+
+      // ── Risk penalties ────────────────────────────────────────────
+      if (p.is_rugpull)        score -= 40;
+      if (p.bundle_pct  != null) score -= p.bundle_pct * 0.4;
+      if (p.suspicious_pct != null) score -= p.suspicious_pct * 0.3;
+      if (p.sniper_pct  != null) score -= p.sniper_pct * 0.2;
+
+      p.quality_score = Math.round(Math.max(0, Math.min(100, score)));
+
+      // ── Strategy recommendation ───────────────────────────────────
+      // bid_ask: optimal for volatile/meme tokens — single-sided SOL, earn from price swings
+      // spot: better for established/stable tokens — both-sided, lower IL risk
+      const age   = p.token_age_hours;
+      const mcap  = p.mcap;
+      const vol   = p.volatility;
+      const org   = p.organic_score;
+      if (vol >= 2.5 && (mcap == null || mcap < 3_000_000) && (age == null || age < 72)) {
+        p.recommended_strategy = "bid_ask";
+      } else if (org >= 75 && mcap != null && mcap >= 2_000_000) {
+        p.recommended_strategy = "spot";
+      } else {
+        p.recommended_strategy = "bid_ask"; // safe default
+      }
+    }
+
+    // Sort descending by quality score before returning to LLM
+    eligible.sort((a, b) => (b.quality_score ?? 0) - (a.quality_score ?? 0));
+    log("screening", `Pool scores: ${eligible.slice(0, 5).map(p => `${p.name}=${p.quality_score}`).join(", ")}`);
 
     // Drop any pools whose creator is on the dev blocklist (caught via advanced-info)
     const before = eligible.length;
@@ -262,6 +508,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     candidates: eligible,
     total_screened: pools.length,
     filtered_examples: filteredOut.slice(0, 3),
+    top_score: eligible[0]?.quality_score ?? null,
   };
 }
 
@@ -338,6 +585,29 @@ function condensePool(p) {
     active_positions: p.active_positions,
     active_pct: fix(p.active_positions_pct, 1),
     open_positions: p.open_positions,
+
+    // ── Fee dilution signal ──────────────────────────────────────────
+    // fee_per_position_est: estimated fee earned per LP position in this timeframe window.
+    // Low = pool is overcrowded → your share is tiny even if total fees look high.
+    // High = few LPs sharing fees → you capture a large slice.
+    // Formula: fee_window / active_positions (raw $, not normalised by position size)
+    fee_per_position_est: (p.active_positions > 0 && p.fee != null)
+      ? fix(p.fee / p.active_positions, 2)
+      : null,
+
+    // ── Daily yield projection ────────────────────────────────────────
+    // Annualised fee yield based on the active timeframe window.
+    // daily_yield_pct = fee_active_tvl_ratio * (minutes_in_24h / timeframe_minutes)
+    // Tells the screener: "if this rate holds, 1 SOL deployed earns X% today."
+    // Use 5m=288 periods, 15m=96, 1h=24, 4h=6, 24h=1 multiplier.
+    daily_yield_pct_est: (() => {
+      const tfMinutes = { "5m": 5, "15m": 15, "1h": 60, "2h": 120, "4h": 240, "24h": 1440 };
+      const tf = tfMinutes[p.timeframe] || 5;
+      const ratio = p.fee_active_tvl_ratio > 0
+        ? p.fee_active_tvl_ratio
+        : (p.active_tvl > 0 ? (p.fee / p.active_tvl) * 100 : 0);
+      return ratio > 0 ? fix(ratio * (1440 / tf), 2) : null;
+    })(),
 
     // Price action
     price: p.pool_price,

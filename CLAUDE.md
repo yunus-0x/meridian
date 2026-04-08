@@ -41,7 +41,7 @@ Three agent roles filter which tools the LLM can call:
 | Role | Purpose | Key Tools |
 |------|---------|-----------|
 | `SCREENER` | Find and deploy new positions | deploy_position, get_top_candidates, get_token_holders, check_smart_wallets_on_pool |
-| `MANAGER` | Manage open positions | close_position, claim_fees, swap_token, get_position_pnl, set_position_note |
+| `MANAGER` | Manage open positions | close_position, claim_fees, swap_token, get_position_pnl, set_position_note, deploy_position, get_active_bin, get_pool_memory |
 | `GENERAL` | Chat / manual commands | All tools |
 
 Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant set(s).
@@ -81,6 +81,12 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 | maxBundlersPct | screening | 30 |
 | maxTop10Pct | screening | 60 |
 | blockedLaunchpads | screening | [] |
+| minPoolAgeHours | screening | 6 |
+| maxPoolAgeHours | screening | null (no limit) |
+| minFeePerPosition | screening | 1.5 |
+| maxEntry5mPricePct | screening | 12 |
+| minEntry5mPricePct | screening | -20 |
+| athFilterPct | screening | -15 |
 | deployAmountSol | management | 0.5 |
 | maxDeployAmount | risk | 50 |
 | maxPositions | risk | 3 |
@@ -88,6 +94,13 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 | positionSizePct | management | 0.35 |
 | minSolToOpen | management | 0.55 |
 | outOfRangeWaitMinutes | management | 30 |
+| stopLossPct | management | -35 (fallback) |
+| bidAskStopLossPct | management | -20 |
+| spotStopLossPct | management | -35 |
+| takeProfitFeePct | management | 20 |
+| maxDrawdownFromPeak | management | 8 |
+| rebalanceOnOOR | management | true |
+| rebalanceMinFeeVelocity | management | 30 |
 | managementIntervalMin | schedule | 10 |
 | screeningIntervalMin | schedule | 30 |
 | managementModel / screeningModel / generalModel | llm | openrouter/healer-alpha |
@@ -118,9 +131,11 @@ Before `deploy_position` executes:
 
 ---
 
-## bins_below Calculation (SCREENER)
+## bins_below / bins_above Calculation (SCREENER)
 
-Linear formula based on pool volatility (set in screener prompt, `index.js`):
+Both values are auto-calculated server-side. The LLM must NOT pass either — passing any value overrides the optimization.
+
+**bins_below** — Linear formula based on pool volatility:
 
 ```
 bins_below = round(35 + (volatility / 5) * 34), clamped to [35, 69]
@@ -129,6 +144,15 @@ bins_below = round(35 + (volatility / 5) * 34), clamped to [35, 69]
 - Low volatility (0) → 35 bins
 - High volatility (5+) → 69 bins
 - Any value in between is valid (continuous, not tiered)
+
+**bins_above** — Calculated in `computeOptimalBinsAbove()` in `tools/dlmm.js`:
+
+```
+bid_ask → round(bins_below × 0.20)
+spot / curve → round(bins_below × 0.35)
+```
+
+This places price below the top of range so the position captures upward movement before going OOR.
 
 ---
 
@@ -223,5 +247,4 @@ Not required for normal operation.
 
 ## Known Issues / Tech Debt
 
-- `lessons.js evolveThresholds()` evolves `maxVolatility` + `minFeeTvlRatio` (wrong key names — should be `minFeeActiveTvlRatio`; `maxVolatility` doesn't exist in config at all). The evolution is a no-op for those keys.
 - `get_wallet_positions` tool (dlmm.js) is in definitions.js but not in MANAGER_TOOLS or SCREENER_TOOLS — only available in GENERAL role.

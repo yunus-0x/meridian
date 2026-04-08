@@ -21,6 +21,7 @@ import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
 import { config, reloadScreeningThresholds } from "../config.js";
+import { setMarketMode, getMarketMode, MARKET_PRESETS } from "../market-mode.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -64,6 +65,16 @@ const toolMap = {
     if (!ok) return { error: `Position ${position_address} not found in state` };
     return { saved: true, position: position_address, instruction: instruction || null };
   },
+  set_market_mode: ({ mode }) => {
+    const result = setMarketMode(mode, { applyToConfig: config });
+    if (result.success) {
+      // Immediately apply screening changes so next cycle uses new thresholds
+      reloadScreeningThresholds();
+    }
+    return result;
+  },
+  get_market_mode: () => getMarketMode(),
+
   self_update: async () => {
     try {
       const result = execSync("git pull", { cwd: process.cwd(), encoding: "utf8" }).trim();
@@ -154,10 +165,13 @@ const toolMap = {
       autoSwapAfterClaim: ["management", "autoSwapAfterClaim"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
+      belowOORWaitMinutes: ["management", "belowOORWaitMinutes"],
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
       oorCooldownHours: ["management", "oorCooldownHours"],
       minVolumeToRebalance: ["management", "minVolumeToRebalance"],
       stopLossPct: ["management", "stopLossPct"],
+      bidAskStopLossPct: ["management", "bidAskStopLossPct"],
+      spotStopLossPct: ["management", "spotStopLossPct"],
       takeProfitFeePct: ["management", "takeProfitFeePct"],
       trailingTakeProfit: ["management", "trailingTakeProfit"],
       trailingTriggerPct: ["management", "trailingTriggerPct"],
@@ -179,6 +193,27 @@ const toolMap = {
       generalModel: ["llm", "generalModel"],
       // strategy
       binsBelow: ["strategy", "binsBelow"],
+      binsAbove: ["strategy", "binsAbove"],
+      // screening (extended)
+      maxVolatility:       ["screening", "maxVolatility"],
+      maxEntry5mPricePct:  ["screening", "maxEntry5mPricePct"],
+      minEntry5mPricePct:  ["screening", "minEntry5mPricePct"],
+      minPoolAgeHours:     ["screening", "minPoolAgeHours"],
+      maxPoolAgeHours:     ["screening", "maxPoolAgeHours"],
+      minVolumeAccelPct:   ["screening", "minVolumeAccelPct"],
+      timeOfDayBias:       ["screening", "timeOfDayBias"],
+      offPeakMultiplier:   ["screening", "offPeakMultiplier"],
+      highScoreSizeMult:   ["screening", "highScoreSizeMult"],
+      lowScoreSizeMult:    ["screening", "lowScoreSizeMult"],
+      minFeePerPosition:   ["screening", "minFeePerPosition"],
+      // management (extended)
+      minFeeVelocityPct:    ["management", "minFeeVelocityPct"],
+      feeVelocityMinAgeMin: ["management", "feeVelocityMinAgeMin"],
+      rebalanceOnOOR:           ["management", "rebalanceOnOOR"],
+      rebalanceMinFeeVelocity:  ["management", "rebalanceMinFeeVelocity"],
+      maxDrawdownFromPeak:  ["management", "maxDrawdownFromPeak"],
+      smartClaimHotMult:    ["management", "smartClaimHotMult"],
+      smartClaimColdMult:   ["management", "smartClaimColdMult"],
     };
 
     const applied = {};

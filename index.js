@@ -7,19 +7,23 @@ import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
-import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
+import { evolveThresholds, getPerformanceSummary, getPerformanceHistory } from "./lessons.js";
 import { registerCronRestarter } from "./tools/executor.js";
 import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isEnabled as telegramEnabled, createLiveMessage } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, recordFeeSnapshot, getFeeVelocityPct } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
+import { applyMarketModeOnStartup } from "./market-mode.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
 log("startup", `Model: ${process.env.LLM_MODEL || "hermes-3-405b"}`);
+
+// Apply persisted market mode preset to live config before anything else runs
+applyMarketModeOnStartup(config);
 
 const TP_PCT = config.management.takeProfitFeePct;
 const DEPLOY = config.management.deployAmountSol;
@@ -172,7 +176,8 @@ export async function runManagementCycle({ silent = false } = {}) {
   let mgmtReport = null;
   let positions = [];
   let liveMessage = null;
-  const screeningCooldownMs = 5 * 60 * 1000;
+  const screeningCooldownMs = 5 * 60 * 1000;        // normal cooldown: 5 min
+  const screeningFastCooldownMs = 60 * 1000;         // post-close fast trigger: 1 min
 
   try {
     if (!silent && telegramEnabled()) {
@@ -180,6 +185,7 @@ export async function runManagementCycle({ silent = false } = {}) {
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
+    const beforeCount = positions.length;
 
     if (positions.length === 0) {
       log("cron", "No open positions — triggering screening cycle");
@@ -188,10 +194,13 @@ export async function runManagementCycle({ silent = false } = {}) {
       return mgmtReport;
     }
 
-    // Snapshot + load pool memory
+    // Snapshot + load pool memory + fee velocity recording
     const positionData = positions.map((p) => {
       recordPositionSnapshot(p.pool, p);
-      return { ...p, recall: recallForPool(p.pool) };
+      // Record fee snapshot for velocity tracking (unclaimed + collected over time)
+      recordFeeSnapshot(p.position, p.unclaimed_fees_usd ?? 0, p.collected_fees_usd ?? 0);
+      const feeVelocityPct = getFeeVelocityPct(p.position);
+      return { ...p, recall: recallForPool(p.pool), fee_velocity_pct: feeVelocityPct };
     });
 
     // JS trailing TP check
@@ -258,24 +267,62 @@ export async function runManagementCycle({ silent = false } = {}) {
         actionMap.set(p.position, { action: "CLOSE", rule: 3, reason: "pumped far above range" });
         continue;
       }
-      // Rule 4: stale above range
+      // Rule 4: stale above range — price pumped, position left behind
+      // Smart rebalance: only rebalance if pool fees were still healthy when it went OOR.
+      // If fee_velocity was already collapsing (<30%) → pool is dying → just close.
       if (p.active_bin != null && p.upper_bin != null &&
           p.active_bin > p.upper_bin &&
           (p.minutes_out_of_range ?? 0) >= config.management.outOfRangeWaitMinutes) {
-        actionMap.set(p.position, { action: "CLOSE", rule: 4, reason: "OOR" });
+        const poolStillHealthy = (p.fee_velocity_pct == null) || (p.fee_velocity_pct >= (config.management.rebalanceMinFeeVelocity ?? 30));
+        const action = config.management.rebalanceOnOOR && poolStillHealthy ? "REBALANCE" : "CLOSE";
+        const reason = action === "CLOSE" && !poolStillHealthy
+          ? `OOR + pool dying (fee velocity ${p.fee_velocity_pct}% < ${config.management.rebalanceMinFeeVelocity ?? 30}%)`
+          : "OOR — price pumped above range";
+        actionMap.set(p.position, { action, rule: 4, reason, pool: p.pool, pair: p.pair });
         continue;
       }
-      // Rule 5: fee yield too low
+      // Rule 4b: below range — token dumped below lower bin
+      // Position is 100% base token at max IL. Do NOT rebalance — token is in freefall.
+      // Always close immediately (faster than above-range OOR).
+      if (p.active_bin != null && p.lower_bin != null &&
+          p.active_bin < p.lower_bin &&
+          (p.minutes_out_of_range ?? 0) >= config.management.belowOORWaitMinutes) {
+        actionMap.set(p.position, { action: "CLOSE", rule: "4b", reason: "below range OOR — token dump" });
+        continue;
+      }
+      // Rule 5: fee yield too low (24h metric)
       if (p.fee_per_tvl_24h != null &&
           p.fee_per_tvl_24h < config.management.minFeePerTvl24h &&
-          (p.age_minutes ?? 0) >= 60) {
+          (p.age_minutes ?? 0) >= config.management.minAgeBeforeYieldCheck) {
         actionMap.set(p.position, { action: "CLOSE", rule: 5, reason: "low yield" });
         continue;
       }
-      // Claim rule
-      if ((p.unclaimed_fees_usd ?? 0) >= config.management.minClaimAmount) {
-        actionMap.set(p.position, { action: "CLAIM" });
+      // Rule 6: fee velocity collapse — fees are no longer accumulating at meaningful rate
+      // More sensitive than the 24h yield metric — catches dying pools 1-2 hours earlier
+      if (p.fee_velocity_pct != null &&
+          config.management.minFeeVelocityPct > 0 &&
+          p.fee_velocity_pct < config.management.minFeeVelocityPct &&
+          (p.age_minutes ?? 0) >= config.management.feeVelocityMinAgeMin) {
+        actionMap.set(p.position, { action: "CLOSE", rule: 6, reason: `fee velocity ${p.fee_velocity_pct}% of peak — volume dying` });
         continue;
+      }
+      // Claim rule — dynamic threshold based on fee velocity
+      // Hot pool (fees accelerating): claim early to lock in gains before unexpected close
+      // Cold pool (fees slowing): wait for larger accumulation to justify gas cost
+      {
+        const baseThreshold = config.management.minClaimAmount ?? 5;
+        const vel = p.fee_velocity_pct;
+        const hotMult  = config.management.smartClaimHotMult  ?? 0.4;
+        const coldMult = config.management.smartClaimColdMult ?? 2.0;
+        const effectiveThreshold = vel != null
+          ? vel > 150 ? baseThreshold * hotMult   // fees surging → claim soon
+          : vel < 50  ? baseThreshold * coldMult  // fees slow → save gas
+          : baseThreshold
+          : baseThreshold;
+        if ((p.unclaimed_fees_usd ?? 0) >= effectiveThreshold) {
+          actionMap.set(p.position, { action: "CLAIM" });
+          continue;
+        }
       }
       actionMap.set(p.position, { action: "STAY" });
     }
@@ -290,10 +337,12 @@ export async function runManagementCycle({ silent = false } = {}) {
       const val = config.management.solMode ? `◎${p.total_value_usd ?? "?"}` : `$${p.total_value_usd ?? "?"}`;
       const unclaimed = config.management.solMode ? `◎${p.unclaimed_fees_usd ?? "?"}` : `$${p.unclaimed_fees_usd ?? "?"}`;
       const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
-      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
+      const feeVel = p.fee_velocity_pct != null ? ` | FeeVel: ${p.fee_velocity_pct}%` : "";
+      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}%${feeVel} | ${inRange} | ${statusLabel}`;
       if (p.instruction) line += `\nNote: "${p.instruction}"`;
       if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
+      if (act.action === "REBALANCE") line += `\n↺ Rebalance: ${act.reason}`;
       if (act.action === "CLAIM") line += `\n→ Claiming fees`;
       return line;
     });
@@ -302,6 +351,7 @@ export async function runManagementCycle({ silent = false } = {}) {
     const actionSummary = needsAction.length > 0
       ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL instruction" : `${a.action}${a.reason ? ` (${a.reason})` : ""}`).join(", ")
       : "no action";
+
 
     const cur = config.management.solMode ? "◎" : "$";
     mgmtReport = reportLines.join("\n\n") +
@@ -320,10 +370,11 @@ export async function runManagementCycle({ silent = false } = {}) {
         const act = actionMap.get(p.position);
         return [
           `POSITION: ${p.pair} (${p.position})`,
-          `  pool: ${p.pool}`,
+          `  pool_address: ${p.pool}`,
           `  action: ${act.action}${act.rule && act.rule !== "exit" ? ` — Rule ${act.rule}: ${act.reason}` : ""}${act.rule === "exit" ? ` — ⚡ Trailing TP: ${act.reason}` : ""}`,
           `  pnl_pct: ${p.pnl_pct}% | unclaimed_fees: ${cur}${p.unclaimed_fees_usd} | value: ${cur}${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
           `  bins: lower=${p.lower_bin} upper=${p.upper_bin} active=${p.active_bin} | oor_minutes: ${p.minutes_out_of_range ?? 0}`,
+          p.strategy ? `  strategy: ${p.strategy}` : null,
           p.instruction ? `  instruction: "${p.instruction}"` : null,
         ].filter(Boolean).join("\n");
       }).join("\n\n");
@@ -338,8 +389,17 @@ RULES:
 - CLAIM: call claim_fees with position address
 - INSTRUCTION: evaluate the instruction condition. If met → close_position. If not → HOLD, do nothing.
 - ⚡ exit alerts: close immediately, no exceptions
+- REBALANCE: Execute in 2 steps:
+    1. call close_position with { position_address: <position>, skip_swap: true }
+       (skip_swap=true because price is above range — position is 100% SOL, no base token to swap)
+    2. IMMEDIATELY call deploy_position with pool_address = the pool_address listed above
+       - strategy: use "strategy" from the position block if present, otherwise "bid_ask"
+       - amount_y: use get_wallet_balance to check SOL, then deploy same amount minus gas reserve
+       - do NOT pass bins_below or bins_above — both are auto-calculated from volatility and strategy
+       - deploy_position fetches active bin internally — do NOT call get_active_bin separately
+    If the redeploy fails, report the error and stop — do not retry.
 
-Execute the required actions. Do NOT re-evaluate CLOSE/CLAIM — rules already applied. Just execute.
+Execute the required actions. Do NOT re-evaluate CLOSE/CLAIM/REBALANCE — rules already applied. Just execute.
 After executing, write a brief one-line result per position.
       `, config.llm.maxSteps, [], "MANAGER", config.llm.managementModel, 2048, {
         onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
@@ -353,10 +413,14 @@ After executing, write a brief one-line result per position.
     }
 
     // Trigger screening after management
+    // Use fast cooldown (1 min) if a position was just closed — capital freed, redeploy ASAP.
+    // Use normal cooldown (5 min) if no change (just claims or STAY).
     const afterPositions = await getMyPositions({ force: true }).catch(() => null);
     const afterCount = afterPositions?.positions?.length ?? 0;
-    if (afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs) {
-      log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions — triggering screening`);
+    const positionClosed = afterCount < beforeCount;
+    const effectiveCooldown = positionClosed ? screeningFastCooldownMs : screeningCooldownMs;
+    if (afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > effectiveCooldown) {
+      log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions${positionClosed ? " (position closed — fast redeploy)" : ""} — triggering screening`);
       runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
     }
   } catch (error) {
@@ -370,7 +434,10 @@ After executing, write a brief one-line result per position.
         else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
       }
       for (const p of positions) {
-        if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
+        const oorThreshold = (p.active_bin != null && p.lower_bin != null && p.active_bin < p.lower_bin)
+          ? config.management.belowOORWaitMinutes
+          : config.management.outOfRangeWaitMinutes;
+        if (!p.in_range && p.minutes_out_of_range >= oorThreshold) {
           notifyOutOfRange({ pair: p.pair, minutesOOR: p.minutes_out_of_range }).catch(() => { });
         }
       }
@@ -421,17 +488,64 @@ export async function runScreeningCycle({ silent = false } = {}) {
   try {
     // Reuse pre-fetched balance — no extra RPC call needed
     const currentBalance = preBalance;
-    const deployAmount = computeDeployAmount(currentBalance.sol);
-    log("cron", `Computed deploy amount: ${deployAmount} SOL (wallet: ${currentBalance.sol} SOL)`);
+    const baseDeployAmount = computeDeployAmount(currentBalance.sol);
 
+    // Graduated position sizing: scale deploy amount by pool quality score.
+    // top_score is available after getTopCandidates() — fetched below, then applied.
+    // We pass adjustedDeployAmount to the LLM prompt so it deploys the right size.
+    // Multipliers: score≥70 → +30%, score<50 → −25%, else flat.
+    const topCandidates = await getTopCandidates({ limit: 10 }).catch(() => null);
+    const topScore = topCandidates?.top_score ?? 50;
+    const sizeMult = topScore >= 70
+      ? (config.screening.highScoreSizeMult ?? 1.3)
+      : topScore < 50
+        ? (config.screening.lowScoreSizeMult ?? 0.75)
+        : 1.0;
+    // Losing streak protection: check last 5 closed positions.
+    // If 3+ consecutive losses → reduce size to 50% (stop bleeding capital on bad market conditions).
+    // If 4+ consecutive losses → reduce to 30% (very defensive).
+    // Resets automatically as soon as a winning position is recorded.
+    let streakMult = 1.0;
+    let streakNote = "";
+    try {
+      const recent = getPerformanceHistory({ hours: 72, limit: 5 });
+      const last5 = (recent.positions || []).slice(-5);
+      if (last5.length >= 3) {
+        // Count consecutive losses from the most recent position backwards
+        let consecutiveLosses = 0;
+        for (let i = last5.length - 1; i >= 0; i--) {
+          if ((last5[i].pnl_usd ?? 0) < 0) consecutiveLosses++;
+          else break;
+        }
+        if (consecutiveLosses >= 4) {
+          streakMult = 0.30;
+          streakNote = ` [STREAK PROTECT: ${consecutiveLosses} losses → 30% size]`;
+        } else if (consecutiveLosses >= 3) {
+          streakMult = 0.50;
+          streakNote = ` [STREAK PROTECT: ${consecutiveLosses} losses → 50% size]`;
+        } else if (consecutiveLosses >= 2) {
+          streakMult = 0.75;
+          streakNote = ` [caution: ${consecutiveLosses} losses → 75% size]`;
+        }
+      }
+    } catch {}
+
+    const deployAmount = parseFloat(
+      Math.min(config.risk.maxDeployAmount,
+        Math.max(config.management.deployAmountSol, baseDeployAmount * sizeMult * streakMult)
+      ).toFixed(2)
+    );
+    log("cron", `Deploy sizing: base=${baseDeployAmount} SOL × ${sizeMult} (score=${topScore}) × ${streakMult} (streak) = ${deployAmount} SOL${streakNote}`);
     // Load active strategy
     const activeStrategy = getActiveStrategy();
     const strategyBlock = activeStrategy
-      ? `ACTIVE STRATEGY: ${activeStrategy.name} — LP: ${activeStrategy.lp_strategy} | bins_above: ${activeStrategy.range?.bins_above ?? 0} (FIXED — never change) | deposit: ${activeStrategy.entry?.single_side === "sol" ? "SOL only (amount_y, amount_x=0)" : "dual-sided"} | best for: ${activeStrategy.best_for}`
-      : `No active strategy — use default bid_ask, bins_above: 0, SOL only.`;
+      ? `ACTIVE STRATEGY: ${activeStrategy.name} — LP: ${activeStrategy.lp_strategy} | deposit: ${activeStrategy.entry?.single_side === "sol" ? "SOL only (amount_y, amount_x=0)" : "dual-sided"} | best for: ${activeStrategy.best_for}`
+      : `No active strategy — use recommended_strategy from each pool (bid_ask or spot). bins_above is auto-calculated — do NOT pass it.`;
 
-    // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
-    const topCandidates = await getTopCandidates({ limit: 10 }).catch(() => null);
+    // Check wallet token holdings for dual-sided deploy opportunity
+    const walletTokens = currentBalance.tokens || [];
+
+    // topCandidates already fetched above for position sizing — reuse result
     const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);
     const earlyFilteredExamples = topCandidates?.filtered_examples || [];
 
@@ -506,6 +620,12 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const netBuyers = ti?.stats_1h?.net_buyers;
       const activeBin = activeBinResults[i]?.status === "fulfilled" ? activeBinResults[i].value?.binId : null;
 
+      // B2: Check if we already hold the base token → dual-sided deploy opportunity
+      const baseMint = pool.base?.mint;
+      const heldToken = baseMint ? walletTokens.find(t => t.mint === baseMint) : null;
+      const heldTokenUsd = heldToken?.usd ?? 0;
+      const canDualSide = heldTokenUsd >= 0.5 && (pool.recommended_strategy === "spot");
+
       // OKX signals
       const okxParts = [
         pool.risk_level     != null ? `risk=${pool.risk_level}`               : null,
@@ -536,6 +656,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
         `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
         activeBin != null ? `  active_bin: ${activeBin}` : null,
         priceChange != null ? `  1h: price${priceChange >= 0 ? "+" : ""}${priceChange}%, net_buyers=${netBuyers ?? "?"}` : null,
+        pool.volume_change_pct != null ? `  volume_change: ${pool.volume_change_pct >= 0 ? "+" : ""}${pool.volume_change_pct}% (${pool.volume_change_pct > 20 ? "accelerating" : pool.volume_change_pct < -30 ? "declining" : "stable"})` : null,
+        `  quality_score: ${pool.quality_score ?? "?"}/100 | recommended_strategy: ${pool.recommended_strategy ?? "bid_ask"}`,
+        canDualSide ? `  DUAL_SIDE_AVAILABLE: yes — wallet holds $${heldTokenUsd.toFixed(2)} of base token (mint: ${baseMint}) — include amount_x=${heldToken.balance} in deploy for dual-sided LP` : null,
         n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
         mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
       ].filter(Boolean).join("\n");
@@ -552,9 +675,13 @@ PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
 
 STEPS:
-1. Pick the best candidate based on narrative quality, smart wallets, and pool metrics.
+1. Pick the HIGHEST quality_score candidate that passes your qualitative check (narrative, smart wallets).
+   quality_score is pre-computed — use it as primary ranking signal.
 2. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
-   bins_below = round(35 + (volatility/5)*55) clamped to [35,90].
+   - strategy: use recommended_strategy from the pool (bid_ask or spot). Override only if user specified.
+   - bins_below and bins_above: do NOT pass — both are auto-calculated server-side.
+   - amount_y: use exactly ${deployAmount} SOL.
+   - DUAL_SIDE: if pool shows DUAL_SIDE_AVAILABLE=yes, also pass amount_x and base_mint as shown — this earns fees on BOTH price directions. Only do this when DUAL_SIDE_AVAILABLE=yes.
 3. Report in this exact format (no tables, no extra sections):
    🚀 DEPLOYED
 
