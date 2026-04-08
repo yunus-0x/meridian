@@ -55,7 +55,7 @@ export const config = {
     // Pool age window: avoid very new pools (inflated metrics) and very old (saturated).
     // Uses token_age_hours as proxy. null = disabled.
     minPoolAgeHours:    u.minPoolAgeHours    ?? 6,    // skip pools where token < 6h old (metrics unreliable)
-    maxPoolAgeHours:    u.maxPoolAgeHours    ?? 72,   // skip pools where token > 3 days old (LP competition saturated)
+    maxPoolAgeHours:    u.maxPoolAgeHours    ?? 168,  // skip pools where token > 7 days old
     // Volume acceleration: bonus/penalty based on whether volume is growing or shrinking.
     // minVolumeAccelPct: skip pools where volume_change_pct < this value (e.g. -50 = volume collapsing)
     minVolumeAccelPct:  u.minVolumeAccelPct  ?? -40,  // skip if volume fell >40% (stricter than before)
