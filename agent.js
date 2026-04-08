@@ -246,7 +246,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       }
       messages.push(msg);
 
-      // If the model didn't call any tools, it's done
+      // If the model didn't call any tools, it's done — unless it wrote tool calls as text
       if (!msg.tool_calls || msg.tool_calls.length === 0) {
         // Hermes sometimes returns null content — pop the empty message and retry once
         if (!msg.content) {
@@ -254,6 +254,50 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           log("agent", "Empty response, retrying...");
           continue;
         }
+
+        // ─── Rescue text tool calls ──────────────────────────────
+        // Some models (DeepSeek, local models, free-tier providers) output tool calls as
+        // plain text (JSON blocks, <tool_call> tags, bare JSON) instead of using function
+        // calling. Parse and execute them directly instead of losing the action.
+        const rescued = rescueTextToolCalls(msg.content)
+        if (rescued.length > 0) {
+          log('agent', `RESCUED ${ rescued.length } tool call(s) from text output — executing directly`)
+          sawToolCall = true
+          const toolResults = []
+          for (const { name, args } of rescued) {
+            if (ONCE_PER_SESSION.has(name) && firedOnce.has(name)) {
+              log('agent', `  Blocked duplicate rescued ${ name } — forcing session end`)
+              return { content: `Session complete. ${ name } already executed this session.`, userMessage: goal }
+            }
+            if (name === 'close_position' && !args.position_address) continue
+            if (name === 'deploy_position' && (!args.pool_address || !args.amount_y)) continue
+            if (NO_RETRY_TOOLS.has(name)) firedOnce.add(name)
+            await onToolStart?.({ name, args, step })
+            log('agent', `  Executing rescued: ${ name }(${ JSON.stringify(args).slice(0, 100) })`)
+            const result = await executeTool(name, args)
+            await onToolFinish?.({ name, args, result, success: result?.success === true, step })
+            if (ONCE_PER_SESSION.has(name) && !NO_RETRY_TOOLS.has(name) && result.success === true) firedOnce.add(name)
+            toolResults.push({
+              role: 'tool',
+              tool_call_id: `rescued-${ name }-${ Date.now() }`,
+              content: JSON.stringify(result),
+            })
+          }
+          const executedSummary = toolResults.map(r => {
+            try {
+              const d = JSON.parse(r.content)
+              if (d.success) return `EXECUTED: ${ d.pool_name || d.position?.slice(0, 8) || 'action' } — success`
+              if (d.blocked) return `BLOCKED: ${ d.reason }`
+              return `RESULT: ${ r.content.slice(0, 100) }`
+            } catch { return r.content.slice(0, 100) }
+          }).join('\n')
+          messages.push({
+            role: providerMode === 'system' ? 'user' : 'user',
+            content: `These actions were ALREADY EXECUTED (do not re-analyze or contradict):\n${ executedSummary }`,
+          })
+          continue
+        }
+
         if (mustUseRealTool && !sawToolCall) {
           noToolRetryCount += 1;
           messages.pop();
@@ -356,4 +400,115 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Parse tool calls that the model wrote as text instead of using function calling.
+ * Handles multiple formats that various models produce:
+ *   1. <tool_call>{"name":"close_position","arguments":{"position_address":"..."}}</tool_call>
+ *   2. tool_call_begin + function + tool_sep + close_position + json block
+ *   3. ```json\n{"position_address":"..."}\n``` near a tool name mention
+ *   4. Bare JSON objects with known parameter names near tool name keywords
+ *   5. Bare {"pool_address":"..."} near "deploy_position" or "DEPLOY"
+ *   6. OpenAI schema text dumps with tool names
+ *   7. Last-resort base58 address near CLOSE keywords
+ *
+ * Returns array of { name, args } objects ready for executeTool().
+ */
+const KNOWN_TOOLS = new Set([
+  'close_position', 'deploy_position', 'claim_fees', 'swap_token',
+  'get_position_pnl', 'get_my_positions', 'get_top_candidates',
+  'get_pool_detail', 'get_active_bin', 'update_config', 'get_wallet_balance',
+])
+
+function rescueTextToolCalls(text) {
+  const results = []
+  let match
+
+  // Pattern 1: <tool_call>{"name":"...", "arguments":{...}}</tool_call>
+  const xmlPattern = /<tool_call>\s*(\{[\s\S]*?\})\s*<\/tool_call>/g
+  while ((match = xmlPattern.exec(text)) !== null) {
+    try {
+      const parsed = JSON.parse(match[1])
+      if (parsed.name && KNOWN_TOOLS.has(parsed.name)) {
+        results.push({ name: parsed.name, args: parsed.arguments || parsed.params || {} })
+      }
+    } catch { /* skip malformed */ }
+  }
+  if (results.length > 0) return results
+
+  // Pattern 2: tool_call_begin + function + tool_sep + tool_name + json
+  const meridianPattern = /tool_call_begin[^]*?function[^]*?tool_sep\s*(\w+)\s*```?j?s?o?n?\s*(\{[\s\S]*?\})\s*```?/g
+  while ((match = meridianPattern.exec(text)) !== null) {
+    const name = match[1].trim()
+    if (KNOWN_TOOLS.has(name)) {
+      try { results.push({ name, args: JSON.parse(match[2]) }) } catch { /* skip */ }
+    }
+  }
+  if (results.length > 0) return results
+
+  // Pattern 3: ```json blocks near tool name mentions
+  const jsonBlockPattern = /```(?:json)?\s*(\{[\s\S]*?\})\s*```/g
+  const toolMentionPattern = new RegExp(`\\b(${ [...KNOWN_TOOLS].join('|') })\\b`)
+  const blocks = []
+  while ((match = jsonBlockPattern.exec(text)) !== null) {
+    try { blocks.push({ json: JSON.parse(match[1]), pos: match.index }) }
+    catch { /* skip */ }
+  }
+  for (const block of blocks) {
+    const contextBefore = text.slice(Math.max(0, block.pos - 200), block.pos)
+    const toolMatch = contextBefore.match(toolMentionPattern)
+    if (toolMatch && KNOWN_TOOLS.has(toolMatch[1])) {
+      results.push({ name: toolMatch[1], args: block.json })
+    }
+  }
+  if (results.length > 0) return results
+
+  // Pattern 4: Bare {"position_address":"..."} near "close_position" or "CLOSE"
+  const bareJsonPattern = /\{[^{}]*"position_address"\s*:\s*"([A-Za-z0-9]{32,50})"[^{}]*\}/g
+  while ((match = bareJsonPattern.exec(text)) !== null) {
+    const context = text.slice(Math.max(0, match.index - 300), match.index + match[0].length + 100)
+    if (/close_position|CLOSE/i.test(context)) {
+      try { results.push({ name: 'close_position', args: JSON.parse(match[0]) }) } catch { /* skip */ }
+    }
+  }
+
+  // Pattern 5: Bare {"pool_address":"..."} near "deploy_position" or "DEPLOY"
+  const deployJsonPattern = /\{[^{}]*"pool_address"\s*:\s*"([A-Za-z0-9]{32,50})"[^{}]*\}/g
+  while ((match = deployJsonPattern.exec(text)) !== null) {
+    const context = text.slice(Math.max(0, match.index - 300), match.index + match[0].length + 100)
+    if (/deploy_position|DEPLOY/i.test(context)) {
+      try { results.push({ name: 'deploy_position', args: JSON.parse(match[0]) }) } catch { /* skip */ }
+    }
+  }
+
+  // Pattern 6: OpenAI tool schema dumped as text
+  const schemaPattern = /"name"\s*:\s*"(\w+)"[^]*?"parameters"/g
+  while ((match = schemaPattern.exec(text)) !== null) {
+    const toolName = match[1]
+    if (!KNOWN_TOOLS.has(toolName)) continue
+    if (toolName === 'close_position') {
+      const addrMatch = text.match(/\| CLOSE[\s\S]{0,500}?\b([A-Za-z1-9]{32,50})\b/)
+        || text.match(/\*\*CLOSE\*\*[\s\S]{0,500}?\b([A-Za-z1-9]{32,50})\b/)
+        || text.match(/close_position[\s\S]{0,200}?"position_address"\s*:\s*"([A-Za-z0-9]{32,50})"/)
+      if (addrMatch) results.push({ name: 'close_position', args: { position_address: addrMatch[1] } })
+    }
+  }
+
+  // Pattern 7: Last resort — any Solana address near "| CLOSE" or "→ CLOSE"
+  if (results.length === 0 && /\bCLOSE\b/.test(text)) {
+    const closeBlocks = text.split(/\bCLOSE\b/)
+    for (let i = 0; i < closeBlocks.length - 1; i++) {
+      const before = closeBlocks[i].slice(-300)
+      const addrMatch = before.match(/\b([A-HJ-NP-Za-km-z1-9]{32,50})\b/g)
+      if (addrMatch) {
+        const addr = addrMatch[addrMatch.length - 1]
+        if (addr.length >= 32 && !/^[0-9]+$/.test(addr) && !/SOL|USD|PnL/i.test(addr)) {
+          results.push({ name: 'close_position', args: { position_address: addr } })
+        }
+      }
+    }
+  }
+
+  return results
 }
