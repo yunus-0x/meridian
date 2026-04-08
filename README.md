@@ -79,8 +79,6 @@ HELIUS_API_KEY=your_helius_key          # for wallet balance lookups
 TELEGRAM_BOT_TOKEN=123456:ABC...        # optional — for notifications + chat
 TELEGRAM_CHAT_ID=                       # auto-filled on first message
 DRY_RUN=true                            # set false for live trading
-DASHBOARD_PORT=3000                     # optional — web dashboard port (default 3000)
-DASHBOARD_TOKEN=your_secret_token       # optional — auth token for dashboard access
 ```
 
 > Never put your private key or API keys in `user-config.json` — use `.env` only. Both files are gitignored.
@@ -172,10 +170,10 @@ Management cycles run deterministically in JavaScript — no LLM cost for positi
 | Rule | Trigger | Action |
 |---|---|---|
 | **Exit (Trailing TP)** | Peak PnL confirmed, then drops ≥ `trailingDropPct` from peak | CLOSE |
-| **1 — Stop loss** | `pnl_pct ≤ stopLossPct` | CLOSE |
-| **2 — Take profit** | `pnl_pct ≥ takeProfitFeePct` | CLOSE |
+| **1 — Stop loss** | `pnl_pct ≤ stopLossPct` (bid_ask: −20%, spot: −35%) | CLOSE |
+| **2 — Take profit** | `pnl_pct ≥ takeProfitFeePct` (default 20%) | CLOSE |
 | **3 — Far above range** | `active_bin > upper_bin + outOfRangeBinsToClose` | CLOSE |
-| **4 — OOR above range** | Price pumped above range, OOR for `outOfRangeWaitMinutes` | **REBALANCE** (or CLOSE if disabled) |
+| **4 — OOR above range** | Price pumped above range, OOR for `outOfRangeWaitMinutes`, pool still healthy | **REBALANCE** (or CLOSE if disabled/unhealthy) |
 | **4b — OOR below range** | Price dumped below range, OOR for `belowOORWaitMinutes` | CLOSE (never rebalance) |
 | **5 — Low yield** | `fee_per_tvl_24h < minFeePerTvl24h` after 60 min | CLOSE |
 | **6 — Fee velocity collapse** | Fee accumulation rate dropped to `< minFeeVelocityPct%` of peak | CLOSE |
@@ -185,7 +183,20 @@ Management cycles run deterministically in JavaScript — no LLM cost for positi
 
 When price pumps above your range, instead of closing and waiting for the next screening cycle, Meridian immediately redeploys in the same pool at the new active bin. This keeps capital working with zero dead time and no screening overhead.
 
+**Smart rebalance**: rebalance only fires if `fee_velocity_pct ≥ rebalanceMinFeeVelocity` (default 30%). If the pool's fee velocity has already collapsed, it closes instead of redeploying into a dead pool.
+
 Rule 4b (price dump below range) never rebalances — a token in freefall should not be LP'd again until it stabilizes.
+
+### Strategy-aware stop loss
+
+Stop loss is applied per strategy type rather than a single global value:
+
+| Strategy | Stop loss default |
+|---|---|
+| `bid_ask` | −20% (`bidAskStopLossPct`) |
+| `spot` / `curve` | −35% (`spotStopLossPct`) |
+
+bid_ask positions are more volatile by design, so they get a tighter stop. Spot positions have lower impermanent loss exposure and can hold wider drawdowns.
 
 ### Fee velocity (Rule 6)
 
@@ -208,37 +219,61 @@ Additional filters applied after API enrichment:
 - **Bundler/holder concentration** — skip if `maxBundlersPct` or `maxTop10Pct` exceeded
 - **Pool cooldown** — skip pools recently closed with OOR or stop-loss
 
+### Hard filter: minimum fee per position
+
+Before scoring, any pool where `fee_per_position_est < $1.50` is dropped. This removes overcrowded pools where your slice of fees is negligible regardless of how good the pool metrics look.
+
 ### Composite quality score (0–100)
 
 After hard filters, every eligible pool receives a quality score before the LLM sees it. Pools are sorted descending by score so the highest-quality pool is always presented first.
 
-| Signal | Weight |
+| Signal | Points |
 |---|---|
-| `daily_yield_pct_est` | ×1.35 (primary profit signal) |
-| `fee_per_position_est` | ×1.5 (your share vs. other LPs) |
-| `fee_active_tvl_ratio` | ×10 |
-| `organic_score` (60–100 rescaled to 0–20) | proportional |
-| Smart money buy | +12 |
-| KOL in clusters | +8 |
-| Dev sold all (bullish) | +5 |
-| DEX boost | +3 |
-| Rugpull flag | −40 |
+| `fee_per_position_est` | up to 25 pts (primary — your LP slice size) |
+| `fee_active_tvl_ratio` | up to 15 pts |
+| `daily_yield_pct_est` | up to 15 pts |
+| `organic_score` (60–100 → 0–20 pts) | proportional |
+| Time-in-range (low volatility bonus) | up to +8 pts |
+| Pool age sweet spot (6–48h old) | +8 pts |
+| LP competition (≤3 active positions) | +6 pts |
+| LP competition (active_pct < 30%) | −8 pts |
+| Bin step ≤ 80 | +5 pts |
+| Bin step ≥ 120 | −3 pts |
+| Volume consistency (churn ≥ 70%) | +4 pts |
+| Volume consistency (churn < 30%) | −6 pts |
+| Smart money buy | +12 pts |
+| KOL in clusters | +8 pts |
+| Dev sold all (bullish) | +5 pts |
+| DEX boost | +3 pts |
+| Rugpull flag | −40 pts |
 | Bundle % | −0.4× |
 | Suspicious wallet % | −0.3× |
 | Sniper % | −0.2× |
 
-### Dynamic bins_below
+### Dynamic bins_below and bins_above
 
-Instead of a fixed bin count, Meridian calculates the optimal downside buffer from pool volatility at deploy time:
+Instead of fixed bin counts, Meridian calculates the optimal range asymmetry from pool volatility and strategy at deploy time.
+
+**bins_below** (downside buffer):
+
+```
+bins_below = round(35 + (volatility / 5) × 34), clamped to [35, 69]
+```
 
 | Volatility | bins_below |
 |---|---|
 | 0 | 35 |
-| 2.5 | 62 |
-| 5 | 90 |
-| 10+ | 120 (capped) |
+| 2.5 | 52 |
+| 5 | 69 (max) |
 
-The LLM can still override this by explicitly providing `bins_below`. If not provided, the server-side calculation applies.
+**bins_above** (upside buffer, auto-calculated from strategy):
+
+| Strategy | bins_above |
+|---|---|
+| `bid_ask` | 20% of bins_below |
+| `spot` / `curve` | 35% of bins_below |
+
+Neither value should be passed explicitly — both are auto-calculated server-side. Passing either will override the optimization.
 
 ---
 
@@ -315,8 +350,12 @@ All fields are optional — defaults shown. Edit `user-config.json`.
 | `maxTop10Pct` | `60` | Maximum top-10 holder concentration |
 | `blockedLaunchpads` | `[]` | Launchpad names to never deploy into |
 | `maxVolatility` | `null` | Skip pools above this volatility (null = disabled) |
-| `maxEntry5mPricePct` | `null` | Skip pools where price pumped > X% in window |
-| `minEntry5mPricePct` | `null` | Skip pools where price dumped > X% in window |
+| `maxEntry5mPricePct` | `12` | Skip pools where price pumped > X% in window |
+| `minEntry5mPricePct` | `-20` | Skip pools where price dumped > X% in window |
+| `athFilterPct` | `-15` | Skip pools within X% of recent ATH |
+| `minPoolAgeHours` | `6` | Skip pools younger than X hours |
+| `maxPoolAgeHours` | `null` | Maximum pool age in hours (null = no limit; scoring already penalizes very old pools) |
+| `minFeePerPosition` | `1.50` | Hard filter: skip pools where estimated fee per LP position < $X |
 
 ### Management
 
@@ -330,8 +369,12 @@ All fields are optional — defaults shown. Edit `user-config.json`.
 | `outOfRangeWaitMinutes` | `30` | Minutes OOR (above range) before acting |
 | `belowOORWaitMinutes` | `15` | Minutes OOR (below range) before closing — faster exit since position is 100% base token at max IL |
 | `rebalanceOnOOR` | `true` | Close + redeploy in same pool when price pumps above range (Rule 4) |
-| `stopLossPct` | `-50` | Close if PnL drops below this % |
-| `takeProfitFeePct` | `5` | Close if PnL exceeds this % |
+| `rebalanceMinFeeVelocity` | `30` | Only rebalance if pool's fee velocity is ≥ X% of peak (otherwise CLOSE) |
+| `stopLossPct` | `-35` | Fallback stop loss if strategy-specific SL not set |
+| `bidAskStopLossPct` | `-20` | Stop loss for bid_ask positions |
+| `spotStopLossPct` | `-35` | Stop loss for spot/curve positions |
+| `takeProfitFeePct` | `20` | Close if total PnL (fees + price) exceeds this % |
+| `maxDrawdownFromPeak` | `8` | Trailing TP: exit if PnL drops X% from confirmed peak |
 | `minFeePerTvl24h` | `7` | Exit if fee/TVL 24h drops below this % |
 | `minFeeVelocityPct` | `20` | Exit if fee accumulation rate drops to < X% of position's peak rate |
 | `feeVelocityMinAgeMin` | `120` | Minimum position age (minutes) before fee velocity check activates |
@@ -343,8 +386,9 @@ All fields are optional — defaults shown. Edit `user-config.json`.
 
 | Field | Default | Description |
 |---|---|---|
-| `binsAbove` | `0` | Bins above active bin (0 = single-sided SOL below price) |
 | `strategy` | `bid_ask` | Default LP strategy (`bid_ask` or `spot`) |
+
+> `bins_below` and `bins_above` are auto-calculated server-side from pool volatility and strategy. Do not configure them manually.
 
 ### Schedule
 
@@ -423,44 +467,6 @@ node -e "import('./hive-mind.js').then(m => m.register('https://meridian-hive-ap
 
 ---
 
-## Web Dashboard
-
-The bot includes a built-in web dashboard accessible from any browser — no SSH required.
-
-**Setup:**
-
-Add to `.env`:
-```env
-DASHBOARD_PORT=3000          # port to listen on (default: 3000)
-DASHBOARD_TOKEN=yourtoken    # secret token for authentication
-```
-
-If `DASHBOARD_TOKEN` is not set, the dashboard runs **without authentication** (only do this on a private network).
-
-**Access:**
-
-Open in browser: `http://your-vps-ip:3000`
-
-If you set a token, append it: `http://your-vps-ip:3000?token=yourtoken`
-
-**Dashboard features:**
-- Live positions with PnL, fee velocity bar, in-range status
-- Top pool candidates with quality score and volume change
-- Run Management / Run Screening buttons manually
-- Live config editor — change thresholds without restarting
-- Real-time log stream via WebSocket
-- Close / Claim buttons with confirmation dialog
-
-**Firewall (VPS):**
-```bash
-# Open dashboard port (UFW)
-sudo ufw allow 3000/tcp
-```
-
-> For security on a public VPS, always set `DASHBOARD_TOKEN` and consider using an SSH tunnel or nginx reverse proxy with HTTPS instead of exposing port 3000 directly.
-
----
-
 ## Using a local model (LM Studio)
 
 ```env
@@ -521,19 +527,37 @@ tools/
 
 ### Latest improvements
 
-**Dynamic bins_below** — Range width is now calculated from pool volatility at deploy time instead of a fixed 69 bins. Low-volatility pools get tighter ranges (more time in range = more fees). High-volatility pools get wider buffers to avoid premature OOR.
+**Strategy-aware stop loss** — Stop loss is now applied per strategy: bid_ask positions exit at −20% (tighter, since they're volatile by design), spot positions at −35% (more IL tolerance). Previously a single global −50% applied to both.
 
-**Composite pool scoring** — Every candidate pool receives a 0–100 quality score based on projected daily yield, fee-per-position (dilution signal), organic score, and smart money bonuses/risk penalties. Pools are sorted by score before the LLM sees them, so the best candidate is always presented first.
+**Smart rebalance gate** — Rebalance-on-OOR now checks pool fee velocity before redeploying. If the pool's fee rate has already collapsed (< 30% of peak), it closes instead of redeploying into a dying pool.
 
-**Rebalance-on-OOR** — When price pumps above range (Rule 4), Meridian closes and immediately redeploys at the new active bin in the same pool. No screening cycle, no dead time. Capital stays deployed and earning fees continuously. Rule 4b (below range / token dump) always closes — never rebalances a falling token.
+**Losing streak protection** — After 2 consecutive losing positions the next deploy uses 75% of normal size; after 3 losses, 50%; after 4+ losses, 30%. Automatically resets after a winning position.
+
+**Fast redeploy** — After any position close, the screening cooldown drops from 5 minutes to 1 minute. Capital gets back to work faster after OOR exits.
+
+**Dual-sided deploy signal** — If your wallet holds ≥$0.50 of a base token that matches a top candidate pool, the screener is told it can deploy dual-sided (token + SOL) for that pool.
+
+**Scoring depth** — Composite quality score now includes: time-in-range signal (low-volatility pools get bonus), pool age sweet spot (6–48h old), LP competition (few active positions = higher score), bin step preference, and volume consistency (churn patterns).
+
+**Minimum fee-per-position hard filter** — Pools where your estimated slice of fees is < $1.50 are dropped before the LLM sees them. Eliminates overcrowded pools that look good on 24h metrics but pay near-zero per LP.
+
+**Auto bins_above** — bins_above is now auto-calculated server-side from strategy (bid_ask → 20% of bins_below, spot → 35%). Previously always sent as 0, which placed price at the top of range and caused immediate OOR on any upward move.
+
+**Entry timing filters** — Price momentum guards enabled by default: skip pools up > 12% in the window (buying the top), skip pools down > 20% (catching a falling knife), skip pools within 15% of ATH.
+
+**Dynamic bins_below** — Range width is calculated from pool volatility at deploy time instead of a fixed bin count. Low-volatility pools get tighter ranges (more time in range = more fees). High-volatility pools get wider buffers.
+
+**Composite pool scoring** — Every candidate pool receives a 0–100 quality score based on projected daily yield, fee-per-position (dilution signal), organic score, and smart money bonuses/risk penalties. Pools are sorted by score before the LLM sees them.
+
+**Rebalance-on-OOR** — When price pumps above range (Rule 4), Meridian closes and immediately redeploys at the new active bin in the same pool. No screening cycle, no dead time. Rule 4b (below range / token dump) always closes.
 
 **Fee velocity exit** — Tracks per-position fee accumulation rate over a 3-hour rolling window. If the current rate drops below 20% of the position's peak rate, exits immediately. Detects dying pools 1–2 hours before the 24h fee/TVL metric catches up.
 
 **Market mode presets** — One command switches all risk/timing parameters for current market conditions (bullish/bearish/sideways/volatile/conservative).
 
-**evolveThresholds bug fix** — The automatic threshold learning system was silently failing due to incorrect config key names (`minFeeTvlRatio` → `minFeeActiveTvlRatio`). Fixed. Thresholds now actually evolve after 5 closed positions.
+**evolveThresholds fix** — The automatic threshold learning system was silently failing due to incorrect config key names. Fixed. Thresholds now actually evolve after 5 closed positions.
 
-**Below-range OOR fast exit** — Added dedicated Rule 4b for when price drops below the position's lower bin. Exits faster (`belowOORWaitMinutes` default 15 min) than standard OOR, because the position is 100% base token at maximum impermanent loss.
+**Below-range OOR fast exit** — Dedicated Rule 4b for price drops below lower bin. Exits at `belowOORWaitMinutes` (default 15 min) — faster than standard OOR since the position is 100% base token at maximum impermanent loss.
 
 ---
 
