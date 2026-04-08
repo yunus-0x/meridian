@@ -57,7 +57,7 @@ export const config = {
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
     oorCooldownHours:       u.oorCooldownHours       ?? 12,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
-    stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
+    stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -8,
     takeProfitFeePct:      u.takeProfitFeePct      ?? 5,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close

@@ -1,5 +1,6 @@
 import {
   Connection,
+  ComputeBudgetProgram,
   Keypair,
   PublicKey,
   sendAndConfirmTransaction,
@@ -8,6 +9,57 @@ import BN from "bn.js";
 import bs58 from "bs58";
 import { config } from "../config.js";
 import { log } from "../logger.js";
+
+// ─── Transaction reliability infrastructure ──────────────────
+const PRIORITY_FEE_MICRO_LAMPORTS = 50_000
+
+function addPriorityFee(tx) {
+  tx.instructions.unshift(
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_MICRO_LAMPORTS })
+  )
+  return tx
+}
+
+const RETRYABLE = [
+  '429', 'Too Many Requests', 'timeout', 'ETIMEDOUT',
+  'block height exceeded', 'Blockhash not found', 'BlockheightExceeded',
+]
+
+async function withRetry(fn, { maxRetries = 5, label = 'tx' } = {}) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn()
+    } catch (err) {
+      const msg = err?.message || String(err)
+      const retryable = RETRYABLE.some(r => msg.includes(r))
+      if (!retryable || attempt === maxRetries) throw err
+      const delay = Math.pow(2, attempt) * 1000
+      log('tx_retry', `${ label } attempt ${ attempt }/${ maxRetries } failed (${ msg.slice(0, 80) }), retrying in ${ delay / 1000 }s`)
+      await new Promise(r => setTimeout(r, delay))
+    }
+  }
+}
+
+async function sendTxWithRetry(connection, tx, signers, label = 'tx') {
+  if (process.env.DRY_RUN === 'true') return 'dry-run-signature'
+  addPriorityFee(tx)
+  return withRetry(
+    () => sendAndConfirmTransaction(connection, tx, signers, { maxRetries: 3 }),
+    { label }
+  )
+}
+
+async function sendTxBatch(connection, txs, signersFn, label = 'batch') {
+  const hashes = []
+  for (let i = 0; i < txs.length; i++) {
+    const tx = txs[i]
+    const signers = typeof signersFn === 'function' ? signersFn(i) : signersFn
+    const hash = await sendTxWithRetry(connection, tx, signers, `${ label }[${ i + 1 }/${ txs.length }]`)
+    hashes.push(hash)
+    if (txs.length > 1 && i < txs.length - 1) await new Promise(r => setTimeout(r, 1000))
+  }
+  return hashes
+}
 import {
   trackPosition,
   markOutOfRange,
@@ -203,12 +255,13 @@ export async function deployPosition({
         wallet.publicKey,
       );
       const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
-      for (let i = 0; i < createTxArray.length; i++) {
-        const signers = i === 0 ? [wallet, newPosition] : [wallet];
-        const txHash = await sendAndConfirmTransaction(getConnection(), createTxArray[i], signers);
-        txHashes.push(txHash);
-        log("deploy", `Create tx ${i + 1}/${createTxArray.length}: ${txHash}`);
-      }
+      const createHashes = await sendTxBatch(
+        getConnection(), createTxArray,
+        (i) => i === 0 ? [wallet, newPosition] : [wallet],
+        'deploy_create'
+      )
+      txHashes.push(...createHashes)
+      createHashes.forEach((h, i) => log("deploy", `Create tx ${i + 1}/${createTxArray.length}: ${h}`))
 
       // Phase 2: Add liquidity (may be multiple txs)
       const addTxs = await pool.addLiquidityByStrategyChunkable({
@@ -220,11 +273,9 @@ export async function deployPosition({
         slippage: 10, // 10%
       });
       const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
-      for (let i = 0; i < addTxArray.length; i++) {
-        const txHash = await sendAndConfirmTransaction(getConnection(), addTxArray[i], [wallet]);
-        txHashes.push(txHash);
-        log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
-      }
+      const addHashes = await sendTxBatch(getConnection(), addTxArray, [wallet], 'deploy_add')
+      txHashes.push(...addHashes)
+      addHashes.forEach((h, i) => log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${h}`))
     } else {
       // ── Standard Path (≤69 bins) ─────────────────────────────────
       const tx = await pool.initializePositionAndAddLiquidityByStrategy({
@@ -235,7 +286,7 @@ export async function deployPosition({
         strategy: { maxBinId, minBinId, strategyType },
         slippage: 1000, // 10% in bps
       });
-      const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet, newPosition]);
+      const txHash = await sendTxWithRetry(getConnection(), tx, [wallet, newPosition], 'deploy');
       txHashes.push(txHash);
     }
 
@@ -284,6 +335,46 @@ export async function deployPosition({
     };
   } catch (error) {
     log("deploy_error", error.message);
+
+    // Check on-chain if position exists despite tx error (RPC timeout but tx landed)
+    try {
+      await new Promise(r => setTimeout(r, 3000))
+      const acct = await getConnection().getAccountInfo(newPosition.publicKey)
+      if (acct) {
+        log("deploy", `Position EXISTS on-chain despite error — recovering`)
+        _positionsCacheAt = 0
+        trackPosition({
+          position: newPosition.publicKey.toString(),
+          pool: pool_address,
+          pool_name,
+          strategy: activeStrategy,
+          bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
+          bin_step,
+          volatility,
+          fee_tvl_ratio,
+          organic_score,
+          amount_sol: finalAmountY,
+          amount_x: finalAmountX,
+          active_bin: activeBin.binId,
+          initial_value_usd,
+        })
+        return {
+          success: true,
+          position: newPosition.publicKey.toString(),
+          pool: pool_address,
+          pool_name,
+          bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+          strategy: activeStrategy,
+          amount_x: finalAmountX,
+          amount_y: finalAmountY,
+          txs: [],
+          note: 'Created on-chain despite tx error — recovered',
+        }
+      }
+    } catch (checkErr) {
+      log("deploy_error", `On-chain check also failed: ${ checkErr.message }`)
+    }
+
     return { success: false, error: error.message };
   }
 }
@@ -703,11 +794,7 @@ export async function claimFees({ position_address }) {
       return { success: false, error: "No fees to claim — transaction is empty" };
     }
 
-    const txHashes = [];
-    for (const tx of txs) {
-      const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
-      txHashes.push(txHash);
-    }
+    const txHashes = await sendTxBatch(getConnection(), txs, [wallet], 'claim')
     log("claim", `SUCCESS txs: ${txHashes.join(", ")}`);
     _positionsCacheAt = 0; // invalidate cache after claim
     recordClaim(position_address);
@@ -732,6 +819,47 @@ export async function closePosition({ position_address, reason }) {
     log("close", `Closing position: ${position_address}`);
     const wallet = getWallet();
     const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
+
+    // ─── Pre-close PnL snapshot (capture BEFORE close txs) ───
+    let preClosePnl = null
+    try {
+      // Source 1: LPAgent (more reliable for meme coins)
+      const lpAgentData = await fetchLpAgentOpenPositions(wallet.publicKey.toString()).catch(() => ({}))
+      const lpEntry = Object.values(lpAgentData).find(p => p.position === position_address)
+
+      // Source 2: Meteora PnL API
+      let meteoraPnl = null
+      try {
+        const pnlUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=open&pageSize=50&page=1`
+        const res = await fetch(pnlUrl)
+        if (res.ok) {
+          const data = await res.json()
+          meteoraPnl = (data.positions || []).find(p => p.positionAddress === position_address)
+        }
+      } catch {}
+
+      preClosePnl = {
+        lpagent: lpEntry ? {
+          pnl_usd: parseFloat(lpEntry.pnl_usd || 0),
+          pnl_pct: parseFloat(lpEntry.pnl_pct || 0),
+          fees_usd: parseFloat(lpEntry.fees_usd || 0),
+          value_usd: parseFloat(lpEntry.value_usd || 0),
+        } : null,
+        meteora: meteoraPnl ? {
+          pnl_usd: parseFloat(meteoraPnl.pnlUsd || 0),
+          pnl_pct: parseFloat(meteoraPnl.pnlPctChange || 0),
+          fees_usd: parseFloat(meteoraPnl.allTimeFees?.total?.usd || 0),
+          deposits_usd: parseFloat(meteoraPnl.allTimeDeposits?.total?.usd || 0),
+        } : null,
+      }
+      if (preClosePnl.lpagent || preClosePnl.meteora) {
+        const src = preClosePnl.lpagent || preClosePnl.meteora
+        log("close", `Pre-close PnL snapshot: ${ src.pnl_usd?.toFixed(2) } USD (${ src.pnl_pct?.toFixed(2) }%)`)
+      }
+    } catch (e) {
+      log("close_warn", `Pre-close PnL snapshot failed: ${ e.message }`)
+    }
+
     // Clear cached pool so SDK loads fresh position fee state
     poolCache.delete(poolAddress.toString());
     const pool = await getPool(poolAddress);
@@ -753,10 +881,8 @@ export async function closePosition({ position_address, reason }) {
           position: positionData,
         });
         if (claimTxs && claimTxs.length > 0) {
-          for (const tx of claimTxs) {
-            const claimHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
-            claimTxHashes.push(claimHash);
-          }
+          const hashes = await sendTxBatch(getConnection(), claimTxs, [wallet], 'close_claim')
+          claimTxHashes.push(...hashes)
           log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
         }
       }
@@ -772,10 +898,18 @@ export async function closePosition({ position_address, reason }) {
       const positionDataForClose = await pool.getPosition(positionPubKey);
       const processed = positionDataForClose?.positionData;
       if (processed) {
-        closeFromBinId = processed.lowerBinId ?? closeFromBinId;
-        closeToBinId = processed.upperBinId ?? closeToBinId;
+        // Use actual bin IDs from positionBinData (not hardcoded ±887272)
         const bins = Array.isArray(processed.positionBinData) ? processed.positionBinData : [];
         hasLiquidity = bins.some((bin) => new BN(bin.positionLiquidity || "0").gt(new BN(0)));
+        if (bins.length > 0) {
+          const binIds = bins.map(b => b.binId)
+          closeFromBinId = Math.min(...binIds)
+          closeToBinId = Math.max(...binIds)
+          log("close", `Using actual bin range: ${closeFromBinId} to ${closeToBinId} (${bins.length} bins)`)
+        } else {
+          closeFromBinId = processed.lowerBinId ?? closeFromBinId;
+          closeToBinId = processed.upperBinId ?? closeToBinId;
+        }
       }
     } catch (e) {
       log("close_warn", `Could not check liquidity state: ${e.message}`);
@@ -792,17 +926,16 @@ export async function closePosition({ position_address, reason }) {
         shouldClaimAndClose: true,
       });
 
-      for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
-        const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
-        closeTxHashes.push(txHash);
-      }
+      const closeTxArray = Array.isArray(closeTx) ? closeTx : [closeTx]
+      const hashes = await sendTxBatch(getConnection(), closeTxArray, [wallet], 'close_remove')
+      closeTxHashes.push(...hashes)
     } else {
       log("close", `Step 2: Position is empty, forcing close account`);
       const closeTx = await pool.closePosition({
         owner: wallet.publicKey,
         position: { publicKey: positionPubKey },
       });
-      const txHash = await sendAndConfirmTransaction(getConnection(), closeTx, [wallet]);
+      const txHash = await sendTxWithRetry(getConnection(), closeTx, [wallet], 'close_empty');
       closeTxHashes.push(txHash);
     }
     const txHashes = [...claimTxHashes, ...closeTxHashes];
@@ -853,34 +986,59 @@ export async function closePosition({ position_address, reason }) {
         minutesOOR = Math.floor((Date.now() - new Date(tracked.out_of_range_since).getTime()) / 60000);
       }
 
-      // Fetch closed PnL from API — authoritative source after withdrawal settles
+      // PnL recording priority: pre-close snapshot > closed API > cache
       let pnlUsd = 0;
       let pnlPct = 0;
       let finalValueUsd = 0;
       let initialUsd = 0;
       let feesUsd = tracked.total_fees_claimed_usd || 0;
-      try {
-        const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
-        const res = await fetch(closedUrl);
-        if (res.ok) {
-          const data = await res.json();
-          const posEntry = (data.positions || []).find(p => p.positionAddress === position_address);
-          if (posEntry) {
-            pnlUsd        = parseFloat(posEntry.pnlUsd || 0);
-            pnlPct        = parseFloat(posEntry.pnlPctChange || 0);
-            finalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
-            initialUsd    = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
-            feesUsd       = parseFloat(posEntry.allTimeFees?.total?.usd || 0) || feesUsd;
-            log("close", `Closed PnL from API: pnl=${pnlUsd.toFixed(2)} USD (${pnlPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(2)}, deposited=${initialUsd.toFixed(2)}`);
-          } else {
-            log("close_warn", `Position not found in status=closed response — may still be settling`);
-          }
-        }
-      } catch (e) {
-        log("close_warn", `Closed PnL fetch failed: ${e.message}`);
+      let pnlSource = 'none';
+
+      // Source 1: Pre-close snapshot (captured before close txs — most reliable)
+      if (preClosePnl?.lpagent && preClosePnl.lpagent.pnl_pct !== 0) {
+        pnlUsd = preClosePnl.lpagent.pnl_usd
+        pnlPct = preClosePnl.lpagent.pnl_pct
+        feesUsd = preClosePnl.lpagent.fees_usd || feesUsd
+        initialUsd = tracked.initial_value_usd || 0
+        finalValueUsd = initialUsd > 0 ? initialUsd + pnlUsd : preClosePnl.lpagent.value_usd || 0
+        pnlSource = 'lpagent_preclose'
+        log("close", `PnL from LPAgent pre-close: ${ pnlUsd.toFixed(2) } USD (${ pnlPct.toFixed(2) }%)`)
+      } else if (preClosePnl?.meteora && preClosePnl.meteora.pnl_pct !== 0) {
+        pnlUsd = preClosePnl.meteora.pnl_usd
+        pnlPct = preClosePnl.meteora.pnl_pct
+        feesUsd = preClosePnl.meteora.fees_usd || feesUsd
+        initialUsd = preClosePnl.meteora.deposits_usd || tracked.initial_value_usd || 0
+        finalValueUsd = initialUsd > 0 ? initialUsd + pnlUsd : 0
+        pnlSource = 'meteora_preclose'
+        log("close", `PnL from Meteora pre-close: ${ pnlUsd.toFixed(2) } USD (${ pnlPct.toFixed(2) }%)`)
       }
-      // Fallback to pre-close cache snapshot if closed API had no data
-      if (finalValueUsd === 0) {
+
+      // Source 2: Closed positions API (fallback — may still be settling)
+      if (pnlSource === 'none') {
+        try {
+          const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
+          const res = await fetch(closedUrl);
+          if (res.ok) {
+            const data = await res.json();
+            const posEntry = (data.positions || []).find(p => p.positionAddress === position_address);
+            if (posEntry) {
+              pnlUsd        = parseFloat(posEntry.pnlUsd || 0);
+              pnlPct        = parseFloat(posEntry.pnlPctChange || 0);
+              finalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
+              initialUsd    = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
+              feesUsd       = parseFloat(posEntry.allTimeFees?.total?.usd || 0) || feesUsd;
+              pnlSource = 'closed_api'
+              log("close", `PnL from closed API: pnl=${pnlUsd.toFixed(2)} USD (${pnlPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(2)}, deposited=${initialUsd.toFixed(2)}`);
+            } else {
+              log("close_warn", `Position not found in status=closed response — may still be settling`);
+            }
+          }
+        } catch (e) {
+          log("close_warn", `Closed PnL fetch failed: ${e.message}`);
+        }
+      }
+      // Source 3: Fallback to pre-close cache snapshot if no source had data
+      if (pnlSource === 'none' && finalValueUsd === 0) {
         const cachedPos = _positionsCache?.positions?.find(p => p.position === position_address);
         if (cachedPos) {
           pnlUsd        = cachedPos.pnl_true_usd ?? cachedPos.pnl_usd ?? 0;
