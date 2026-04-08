@@ -18,9 +18,10 @@ export function buildSystemPrompt(agentType, portfolio, positions, stateSummary 
   const marketPreset = marketMode !== "auto" ? MARKET_PRESETS[marketMode] : null;
   const marketModeBlock = marketMode !== "auto"
     ? `\nACTIVE MARKET MODE: ${marketMode.toUpperCase()} — ${marketPreset?.description ?? ""}\n` +
-      `  binsAbove=${config.strategy.binsAbove} | stopLoss=${config.management.stopLossPct}% | ` +
+      `  stopLoss=${config.management.stopLossPct}% | ` +
       `trailingTrigger=${config.management.trailingTriggerPct}% | trailingDrop=${config.management.trailingDropPct}% | ` +
-      `oorWait=${config.management.outOfRangeWaitMinutes}m | maxVolatility=${config.screening.maxVolatility ?? "none"}\n`
+      `oorWait=${config.management.outOfRangeWaitMinutes}m | maxVolatility=${config.screening.maxVolatility ?? "none"}\n` +
+      `  (bins_above is always auto-calculated server-side — do not pass it)\n`
     : "";
 
   // MANAGER gets a leaner prompt — positions are pre-loaded in the goal, not repeated here
@@ -133,9 +134,10 @@ POOL MEMORY: Past losses or problems → strong skip signal.
 
 DEPLOY RULES:
 - COMPOUNDING: Use the deploy amount from the goal EXACTLY. Do NOT default to a smaller number.
-- bins_below = round(35 + (volatility/5)*34) clamped to [35,69]. bins_above = ${config.strategy.binsAbove ?? 0}.
+- bins_below = round(35 + (volatility/5)*34) clamped to [35,69]. Do NOT pass bins_above — it is auto-calculated server-side from strategy and bins_below. Passing any bins_above value (including 0) will OVERRIDE the optimization and break range asymmetry.
 - Bin steps must be [80-125].
 - Pick ONE pool. Deploy or explain why none qualify.
+- DRY_RUN MODE: If the deploy result contains { dry_run: true, would_deploy: {...} }, that IS a SUCCESS. Report it as "Simulated deploy successful (DRY_RUN active)" — do NOT treat it as a block, failure, or system rejection.
 
 POOL QUALITY SIGNALS (use these in evaluation):
 - fee_per_position_est: Fee earned per LP position in this window. LOW (<$1) = overcrowded, your share is tiny. HIGH (>$5) = few LPs, you capture a large slice. Prefer pools with high fee_per_position_est.
