@@ -243,8 +243,17 @@ function derivLesson(perf) {
 export function evolveThresholds(perfData, config) {
   if (!perfData || perfData.length < MIN_EVOLVE_POSITIONS) return null;
 
-  const winners = perfData.filter((p) => p.pnl_pct > 0);
-  const losers  = perfData.filter((p) => p.pnl_pct < -5);
+  // Rolling window — only learn from recent data
+  const windowMs = (config.darwin?.windowDays ?? 60) * 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - windowMs;
+  const recentData = perfData.filter(p => {
+    const ts = new Date(p.recorded_at).getTime();
+    return Number.isFinite(ts) && ts >= cutoff;
+  });
+  if (recentData.length < MIN_EVOLVE_POSITIONS) return null;
+
+  const winners = recentData.filter((p) => p.pnl_pct > 0);
+  const losers  = recentData.filter((p) => p.pnl_pct < -5);
 
   // Need at least some signal in both directions before adjusting
   const hasSignal = winners.length >= 2 || losers.length >= 2;
@@ -353,6 +362,80 @@ export function evolveThresholds(perfData, config) {
     }
   }
 
+  // ── 4. minHolders ─────────────────────────────────────────────
+  // Raise holder floor if low-holder tokens consistently lost.
+  {
+    const loserHolders  = losers.map((p) => p.holder_count ?? p.holders).filter(isFiniteNum);
+    const winnerHolders = winners.map((p) => p.holder_count ?? p.holders).filter(isFiniteNum);
+    const current       = config.screening.minHolders;
+
+    if (winnerHolders.length >= 2 && loserHolders.length >= 1) {
+      const avgWinnerHolders = avg(winnerHolders);
+      const avgLoserHolders  = avg(loserHolders);
+      if (avgWinnerHolders - avgLoserHolders >= 100) {
+        const minWinnerHolder = Math.min(...winnerHolders);
+        const target = Math.max(minWinnerHolder - 50, current);
+        const newVal = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 100, 2000);
+        if (newVal > current) {
+          changes.minHolders = newVal;
+          rationale.minHolders = `Winner avg holders ${Math.round(avgWinnerHolders)} vs loser avg ${Math.round(avgLoserHolders)} — raised from ${current} → ${newVal}`;
+        }
+      }
+    }
+  }
+
+  // ── 5. minVolume ──────────────────────────────────────────────
+  // Raise volume floor if low-volume pools consistently lost.
+  {
+    const winnerVols = winners.map((p) => p.volume ?? p.volume_window).filter(isFiniteNum);
+    const loserVols  = losers.map((p) => p.volume ?? p.volume_window).filter(isFiniteNum);
+    const current    = config.screening.minVolume;
+
+    if (winnerVols.length >= 2) {
+      const minWinnerVol = Math.min(...winnerVols);
+      if (minWinnerVol > current * 1.2) {
+        const target  = minWinnerVol * 0.85;
+        const newVal  = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 100, 50000);
+        if (newVal > current) {
+          changes.minVolume = newVal;
+          rationale.minVolume = `Lowest winner volume=${Math.round(minWinnerVol)} — raised floor from ${current} → ${newVal}`;
+        }
+      }
+    }
+  }
+
+  // ── 6. outOfRangeWaitMinutes ──────────────────────────────────
+  // If OOR positions that waited longer eventually profited, loosen.
+  // If OOR positions always lost, tighten.
+  {
+    const oorPositions = recentData.filter(p => (p.minutes_held ?? 0) - (p.minutes_in_range ?? 0) > 5);
+    const oorWinners = oorPositions.filter(p => p.pnl_pct > 0);
+    const oorLosers  = oorPositions.filter(p => p.pnl_pct < -5);
+    const current    = config.management.outOfRangeWaitMinutes;
+
+    if (oorPositions.length >= 3) {
+      if (oorWinners.length >= 2) {
+        const oorWinnerHolds = oorWinners.map(p => p.minutes_held).filter(isFiniteNum);
+        if (oorWinnerHolds.length >= 2) {
+          const medianHold = percentile(oorWinnerHolds, 50);
+          const target = Math.min(medianHold * 0.8, 60);
+          const newVal = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 10, 60);
+          if (newVal > current) {
+            changes.outOfRangeWaitMinutes = newVal;
+            rationale.outOfRangeWaitMinutes = `${oorWinners.length} good OOR recoveries — relaxed from ${current} → ${newVal}m`;
+          }
+        }
+      } else if (oorLosers.length >= 3 && oorWinners.length === 0) {
+        const target = current * 0.8;
+        const newVal = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 10, 60);
+        if (newVal < current) {
+          changes.outOfRangeWaitMinutes = newVal;
+          rationale.outOfRangeWaitMinutes = `All ${oorLosers.length} OOR positions lost — tightened from ${current} → ${newVal}m`;
+        }
+      }
+    }
+  }
+
   if (Object.keys(changes).length === 0) return { changes: {}, rationale: {} };
 
   // ── Persist changes to user-config.json ───────────────────────
@@ -363,21 +446,25 @@ export function evolveThresholds(perfData, config) {
 
   Object.assign(userConfig, changes);
   userConfig._lastEvolved = new Date().toISOString();
-  userConfig._positionsAtEvolution = perfData.length;
+  userConfig._positionsAtEvolution = recentData.length;
 
   fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
 
   // Apply to live config object immediately
   const s = config.screening;
-  if (changes.maxVolatility    != null) s.maxVolatility    = changes.maxVolatility;
-  if (changes.minFeeTvlRatio   != null) s.minFeeTvlRatio   = changes.minFeeTvlRatio;
-  if (changes.minOrganic       != null) s.minOrganic       = changes.minOrganic;
+  if (changes.maxVolatility         != null) s.maxVolatility         = changes.maxVolatility;
+  if (changes.minFeeTvlRatio        != null) s.minFeeTvlRatio        = changes.minFeeTvlRatio;
+  if (changes.minOrganic            != null) s.minOrganic            = changes.minOrganic;
+  if (changes.minHolders            != null) s.minHolders            = changes.minHolders;
+  if (changes.minVolume             != null) s.minVolume             = changes.minVolume;
+  if (changes.outOfRangeWaitMinutes != null) config.management.outOfRangeWaitMinutes = changes.outOfRangeWaitMinutes;
 
   // Log a lesson summarizing the evolution
   const data = load();
+  const windowLabel = config.darwin?.windowDays ?? 60;
   data.lessons.push({
     id: Date.now(),
-    rule: `[AUTO-EVOLVED @ ${perfData.length} positions] ${Object.entries(changes).map(([k, v]) => `${k}=${v}`).join(", ")} — ${Object.values(rationale).join("; ")}`,
+    rule: `[AUTO-EVOLVED @ ${recentData.length} positions (${windowLabel}d window)] ${Object.entries(changes).map(([k, v]) => `${k}=${v}`).join(", ")} — ${Object.values(rationale).join("; ")}`,
     tags: ["evolution", "config_change"],
     outcome: "manual",
     created_at: new Date().toISOString(),
