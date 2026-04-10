@@ -150,7 +150,7 @@ export const config = {
     rsiLength: indicatorUserConfig.rsiLength ?? 2,
     intervals: Array.isArray(indicatorUserConfig.intervals)
       ? indicatorUserConfig.intervals
-      : ["5_MINUTE", "15_MINUTE"],
+      : ["5_MINUTE"],
     candles: indicatorUserConfig.candles ?? 298,
     rsiOversold: indicatorUserConfig.rsiOversold ?? 30,
     rsiOverbought: indicatorUserConfig.rsiOverbought ?? 80,

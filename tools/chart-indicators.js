@@ -1,7 +1,7 @@
 import { config } from "../config.js";
 import { log } from "../logger.js";
 
-const DEFAULT_INTERVALS = ["5_MINUTE", "15_MINUTE"];
+const DEFAULT_INTERVALS = ["5_MINUTE"];
 const DEFAULT_CANDLES = 298;
 
 function getApiBase() {
@@ -29,11 +29,14 @@ function safeNum(value) {
 function buildSignalSummary(payload) {
   const latest = payload?.latest || {};
   const candle = latest?.candle || {};
+  const previousCandle = latest?.previousCandle || {};
   const rsi = safeNum(latest?.rsi?.value);
   const bollinger = latest?.bollinger || {};
   const supertrend = latest?.supertrend || {};
+  const fibonacciLevels = latest?.fibonacci?.levels || {};
   return {
     close: safeNum(candle.close),
+    previousClose: safeNum(previousCandle.close),
     rsi,
     lowerBand: safeNum(bollinger.lower),
     middleBand: safeNum(bollinger.middle),
@@ -42,6 +45,9 @@ function buildSignalSummary(payload) {
     supertrendDirection: String(supertrend.direction || "unknown"),
     supertrendBreakUp: !!latest?.states?.supertrendBreakUp,
     supertrendBreakDown: !!latest?.states?.supertrendBreakDown,
+    fib50: safeNum(fibonacciLevels["0.500"]),
+    fib618: safeNum(fibonacciLevels["0.618"]),
+    fib786: safeNum(fibonacciLevels["0.786"]),
   };
 }
 
@@ -50,11 +56,24 @@ function evaluatePreset(side, preset, payload) {
   const oversold = Number(config.indicators.rsiOversold ?? 30);
   const overbought = Number(config.indicators.rsiOverbought ?? 80);
   const close = summary.close;
+  const previousClose = summary.previousClose;
   const lowerBand = summary.lowerBand;
   const upperBand = summary.upperBand;
   const rsi = summary.rsi;
   const isBullish = summary.supertrendDirection === "bullish";
   const isBearish = summary.supertrendDirection === "bearish";
+  const crossedUp = (level) =>
+    level != null &&
+    close != null &&
+    previousClose != null &&
+    previousClose < level &&
+    close >= level;
+  const crossedDown = (level) =>
+    level != null &&
+    close != null &&
+    previousClose != null &&
+    previousClose > level &&
+    close <= level;
 
   switch (preset) {
     case "supertrend_break":
@@ -107,6 +126,80 @@ function evaluatePreset(side, preset, payload) {
               (rsi != null && rsi >= overbought) &&
               (summary.supertrendBreakDown || isBearish),
             reason: `RSI overbought with bearish Supertrend context`,
+            signal: summary,
+          };
+    case "supertrend_or_rsi":
+      return side === "entry"
+        ? {
+            confirmed:
+              summary.supertrendBreakUp ||
+              (isBullish && close != null && summary.supertrendValue != null && close >= summary.supertrendValue) ||
+              (rsi != null && rsi <= oversold),
+            reason: "Supertrend bullish confirmation or RSI oversold",
+            signal: summary,
+          }
+        : {
+            confirmed:
+              summary.supertrendBreakDown ||
+              (isBearish && close != null && summary.supertrendValue != null && close <= summary.supertrendValue) ||
+              (rsi != null && rsi >= overbought),
+            reason: "Supertrend bearish confirmation or RSI overbought",
+            signal: summary,
+          };
+    case "bb_plus_rsi":
+      return side === "entry"
+        ? {
+            confirmed:
+              close != null &&
+              lowerBand != null &&
+              close <= lowerBand &&
+              rsi != null &&
+              rsi <= oversold,
+            reason: "Close at/below lower band with RSI oversold",
+            signal: summary,
+          }
+        : {
+            confirmed:
+              close != null &&
+              upperBand != null &&
+              close >= upperBand &&
+              rsi != null &&
+              rsi >= overbought,
+            reason: "Close at/above upper band with RSI overbought",
+            signal: summary,
+          };
+    case "fibo_reclaim":
+      return side === "entry"
+        ? {
+            confirmed:
+              crossedUp(summary.fib618) ||
+              crossedUp(summary.fib50) ||
+              crossedUp(summary.fib786),
+            reason: "Price reclaimed a key Fibonacci level",
+            signal: summary,
+          }
+        : {
+            confirmed:
+              crossedUp(summary.fib618) ||
+              crossedUp(summary.fib50),
+            reason: "Price reclaimed a key Fibonacci level upward",
+            signal: summary,
+          };
+    case "fibo_reject":
+      return side === "entry"
+        ? {
+            confirmed:
+              crossedDown(summary.fib618) ||
+              crossedDown(summary.fib50),
+            reason: "Price rejected from a key Fibonacci level",
+            signal: summary,
+          }
+        : {
+            confirmed:
+              crossedDown(summary.fib618) ||
+              crossedDown(summary.fib50) ||
+              crossedDown(summary.fib786),
+            reason: "Price rejected below a key Fibonacci level",
             signal: summary,
           };
     default:

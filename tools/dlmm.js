@@ -738,6 +738,26 @@ function safeNum(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function normalizeRelayPosition(position) {
+  if (!position || typeof position !== "object") return position;
+  if (!config.management.solMode) return position;
+
+  const totalValueNative = position.total_value_native ?? position.total_value_usd;
+  const unclaimedFeesNative = position.unclaimed_fees_native ?? position.unclaimed_fees_usd;
+  const collectedFeesNative = position.collected_fees_native ?? position.collected_fees_usd;
+  const pnlNative = position.pnl_native ?? position.pnl_usd;
+  const derivedPnlPct = position.pnl_pct_derived_native ?? position.pnl_pct_derived;
+
+  return {
+    ...position,
+    total_value_usd: totalValueNative,
+    unclaimed_fees_usd: unclaimedFeesNative,
+    collected_fees_usd: collectedFeesNative,
+    pnl_usd: pnlNative,
+    pnl_pct_derived: derivedPnlPct,
+  };
+}
+
 function deriveOpenPnlPct(binData, solMode = false) {
   if (!binData) return null;
 
@@ -779,9 +799,15 @@ async function fetchOpenPositionsFromMeridian({ walletAddress, agentId }) {
     owner: walletAddress,
     agentId: agentId || "agent-local",
   });
-  return meridianJson(`/positions/open?${search.toString()}`, {
+  const payload = await meridianJson(`/positions/open?${search.toString()}`, {
     headers: config.api.publicApiKey ? { "x-api-key": config.api.publicApiKey } : {},
   });
+  return {
+    ...payload,
+    positions: Array.isArray(payload?.positions)
+      ? payload.positions.map((position) => normalizeRelayPosition(position))
+      : [],
+  };
 }
 
 // ─── Get My Positions ──────────────────────────────────────────
@@ -806,11 +832,12 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
           walletAddress,
           agentId: config.hiveMind.agentId || "agent-local",
         });
-        syncOpenPositions((result.positions || []).map((p) => p.position));
+        const normalizedPositions = Array.isArray(result.positions) ? result.positions : [];
+        syncOpenPositions(normalizedPositions.map((p) => p.position));
         _positionsCache = {
           wallet: walletAddress,
           total_positions: Number(result.total_positions || 0),
-          positions: Array.isArray(result.positions) ? result.positions : [],
+          positions: normalizedPositions,
           request_id: result.requestId || null,
         };
         _positionsCacheAt = Date.now();

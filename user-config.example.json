@@ -91,7 +91,7 @@
     "entryPreset": "supertrend_break",
     "exitPreset": "supertrend_break",
     "rsiLength": 2,
-    "intervals": ["5_MINUTE", "15_MINUTE"],
+    "intervals": ["5_MINUTE"],
     "candles": 298,
     "rsiOversold": 30,
     "rsiOverbought": 80,
