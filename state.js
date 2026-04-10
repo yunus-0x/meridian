@@ -11,7 +11,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 
-const STATE_FILE = "./state.json";
+const STATE_FILE = `${process.env.DATA_DIR || "."}/state.json`;
 
 const MAX_RECENT_EVENTS = 20;
 const MAX_INSTRUCTION_LENGTH = 280;

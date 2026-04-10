@@ -30,7 +30,7 @@ export function dedupCheck(address) {
 
 // Stage 2: Token blacklist — reject if mint is blacklisted
 export function blacklistCheck(mint) {
-  const file = path.join(ROOT, "token-blacklist.json");
+  const file = path.join(process.env.DATA_DIR || ROOT, "token-blacklist.json");
   if (!fs.existsSync(file)) return { pass: true };
   try {
     const data = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -108,7 +108,7 @@ export async function rugCheck(mint) {
 
 // Stage 5: Deployer blacklist
 export async function deployerCheck(poolAddress) {
-  const file = path.join(ROOT, "deployer-blacklist.json");
+  const file = path.join(process.env.DATA_DIR || ROOT, "deployer-blacklist.json");
   if (!fs.existsSync(file)) return { pass: true };
   try {
     const data = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -132,7 +132,7 @@ export async function feesCheck(mint) {
 
   let minFeesSol = 30;
   try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, "user-config.json"), "utf8"));
+    const cfg = JSON.parse(fs.readFileSync(path.join(process.env.DATA_DIR || ROOT, "user-config.json"), "utf8"));
     minFeesSol = cfg.screening?.minTokenFeesSol ?? cfg.minTokenFeesSol ?? 30;
   } catch { /* use default */ }
 

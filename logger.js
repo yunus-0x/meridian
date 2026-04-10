@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 
-const LOG_DIR = "./logs";
+const LOG_DIR = process.env.DATA_DIR ? path.join(process.env.DATA_DIR, "logs") : "./logs";
 const LOG_LEVEL = process.env.LOG_LEVEL || "info";
 
 const LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };

@@ -8,7 +8,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 
-const BLACKLIST_FILE = "./token-blacklist.json";
+const BLACKLIST_FILE = `${process.env.DATA_DIR || "."}/token-blacklist.json`;
 
 function load() {
   if (!fs.existsSync(BLACKLIST_FILE)) return {};

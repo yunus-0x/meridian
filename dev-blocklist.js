@@ -9,7 +9,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 
-const BLOCKLIST_FILE = "./dev-blocklist.json";
+const BLOCKLIST_FILE = `${process.env.DATA_DIR || "."}/dev-blocklist.json`;
 
 function load() {
   if (!fs.existsSync(BLOCKLIST_FILE)) return {};

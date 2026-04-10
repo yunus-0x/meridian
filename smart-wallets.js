@@ -4,7 +4,7 @@ import { fileURLToPath } from "url";
 import { log } from "./logger.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const WALLETS_PATH = path.join(__dirname, "smart-wallets.json");
+const WALLETS_PATH = path.join(process.env.DATA_DIR || process.env.DATA_DIR || process.cwd(), "smart-wallets.json");
 
 function loadWallets() {
   if (!fs.existsSync(WALLETS_PATH)) return { wallets: [] };

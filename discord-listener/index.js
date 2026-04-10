@@ -24,7 +24,7 @@ dotenv.config({ path: path.join(ROOT, ".env") });
 
 import { runPreChecks } from "./pre-checks.js";
 
-const SIGNALS_FILE = path.join(ROOT, "discord-signals.json");
+const SIGNALS_FILE = path.join(process.env.DATA_DIR || ROOT, "discord-signals.json");
 
 // Solana address regex: base58, 32-44 chars
 const SOL_ADDR_RE = /[1-9A-HJ-NP-Za-km-z]{32,44}/g;

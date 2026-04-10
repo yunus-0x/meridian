@@ -2,8 +2,8 @@ import fs from "fs";
 import { log } from "./logger.js";
 import { getPerformanceSummary } from "./lessons.js";
 
-const STATE_FILE = "./state.json";
-const LESSONS_FILE = "./lessons.json";
+const STATE_FILE = `${process.env.DATA_DIR || "."}/state.json`;
+const LESSONS_FILE = `${process.env.DATA_DIR || "."}/lessons.json`;
 
 export async function generateBriefing() {
   const state = loadJson(STATE_FILE) || { positions: {}, recentEvents: [] };

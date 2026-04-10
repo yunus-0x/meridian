@@ -559,7 +559,7 @@ switch (subcommand) {
     const { config } = await import("./config.js");
     const { evolveThresholds } = await import("./lessons.js");
     const fs2 = await import("fs");
-    const lessonsFile = "./lessons.json";
+    const lessonsFile = `${process.env.DATA_DIR || "."}/lessons.json`;
     let perfData = [];
     if (fs2.existsSync(lessonsFile)) {
       try { perfData = JSON.parse(fs2.readFileSync(lessonsFile, "utf8")).performance || []; } catch { /* no data */ }

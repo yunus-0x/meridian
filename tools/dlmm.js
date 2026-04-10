@@ -46,7 +46,10 @@ let _wallet = null;
 
 function getConnection() {
   if (!_connection) {
-    _connection = new Connection(process.env.RPC_URL, "confirmed");
+    _connection = new Connection(process.env.RPC_URL, "confirmed", {
+      skipPreflight: true,
+      preflightCommitment: "confirmed",
+    });
   }
   return _connection;
 }
