@@ -342,8 +342,8 @@ RULES:
 Execute the required actions. Do NOT re-evaluate CLOSE/CLAIM — rules already applied. Just execute.
 After executing, write a brief one-line result per position.
       `, config.llm.maxSteps, [], "MANAGER", config.llm.managementModel, 2048, {
-        onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
-        onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
+        onToolStart: async ({ name, model }) => { await liveMessage?.toolStart(name, model); },
+        onToolFinish: async ({ name, result, success, model }) => { await liveMessage?.toolFinish(name, result, success, model); },
       });
 
       mgmtReport += `\n\n${content}`;
@@ -604,8 +604,8 @@ IMPORTANT:
 - Never write "unknown" for OKX. Use real values, omit missing fields, or write exactly "OKX: unavailable".
 - Keep the whole report compact and highly scannable for Telegram.
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, 2048, {
-        onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
-        onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
+        onToolStart: async ({ name, model }) => { await liveMessage?.toolStart(name, model); },
+        onToolFinish: async ({ name, result, success, model }) => { await liveMessage?.toolFinish(name, result, success, model); },
       });
     screenReport = content;
   } catch (error) {

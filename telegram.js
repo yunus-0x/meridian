@@ -91,7 +91,9 @@ async function postTelegram(method, body) {
     });
     if (!res.ok) {
       const err = await res.text();
-      log("telegram_error", `${method} ${res.status}: ${err.slice(0, 200)}`);
+      if (!err.includes("message is not modified")) {
+        log("telegram_error", `${method} ${res.status}: ${err.slice(0, 200)}`);
+      }
       return null;
     }
     return await res.json();
@@ -246,9 +248,10 @@ export async function createLiveMessage(title, intro = "Starting...") {
     }, delay);
   }
 
-  async function upsertToolLine(name, icon, suffix = "") {
+  async function upsertToolLine(name, icon, suffix = "", model = null) {
     const label = toolLabel(name);
-    const line = `${icon} ${label}${suffix ? ` ${suffix}` : ""}`;
+    const modelTag = model ? ` [${model}]` : "";
+    const line = `${icon} ${label}${modelTag}${suffix ? ` ${suffix}` : ""}`;
     const idx = state.toolLines.findIndex((entry) => entry.includes(` ${label}`));
     if (idx >= 0) state.toolLines[idx] = line;
     else state.toolLines.push(line);
@@ -259,13 +262,13 @@ export async function createLiveMessage(title, intro = "Starting...") {
   await flushNow();
 
   return {
-    async toolStart(name) {
-      await upsertToolLine(name, "ℹ️", "...");
+    async toolStart(name, model) {
+      await upsertToolLine(name, "ℹ️", "...", model);
     },
-    async toolFinish(name, result, success) {
+    async toolFinish(name, result, success, model) {
       const icon = success ? "✅" : "❌";
       const summary = summarizeToolResult(name, result);
-      await upsertToolLine(name, icon, summary ? `— ${summary}` : "");
+      await upsertToolLine(name, icon, summary ? `— ${summary}` : "", model);
     },
     async note(text) {
       state.intro = text;

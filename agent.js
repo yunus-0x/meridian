@@ -131,7 +131,7 @@ function isSystemRoleError(error) {
 
 function isToolChoiceRequiredError(error) {
   const message = String(error?.message || error?.error?.message || error || "");
-  return /tool_choice/i.test(message) && /required/i.test(message);
+  return /tool[_ ]choice/i.test(message) && /(required|auto)/i.test(message);
 }
 
 /**
@@ -162,16 +162,26 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   const mustUseRealTool = shouldRequireRealToolUse(goal, agentType, requireTool);
   let sawToolCall = false;
   let noToolRetryCount = 0;
+  const duplicateReadCounts = {};
+  const MAX_DUPLICATE_READS = 2;
+
+  // Per-tool-name frequency cap — prevents calling ANY single read tool too many times
+  // even with varying args (e.g. get_pool_detail on different pools 20x)
+  const toolNameCounts = {};
+  const MAX_SAME_TOOL_PER_SESSION = 5;
+
+  // Cooldown tracker for screening tools — prevents rapid-fire get_top_candidates
+  const SCREENING_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 
   let emptyStreak = 0;
   for (let step = 0; step < maxSteps; step++) {
-    log("agent", `Step ${step + 1}/${maxSteps}`);
+    const activeModel = model || DEFAULT_MODEL;
+    const shortModel = activeModel.split("/").pop();
+    log("agent", `Step ${step + 1}/${maxSteps} [${shortModel}]`);
 
     try {
-      const activeModel = model || DEFAULT_MODEL;
-
       // Retry up to 3 times on transient provider errors (502, 503, 529)
-      const FALLBACK_MODEL = "stepfun/step-3.5-flash:free";
+      const FALLBACK_MODEL = "gemini/gemini-2.5-flash";
       let response;
       let usedModel = activeModel;
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes
@@ -202,25 +212,47 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             attempt -= 1;
             continue;
           }
+
+          const errorMessage = String(error?.message || error?.error?.message || error || "");
+          const isProviderErrorMatch = /DEGRADED|Not found for account|Function.*Not found/i.test(errorMessage);
+          const status = error?.status;
+
+          // Retry on transient provider errors or Cloudflare degraded/missing nodes
+          if (status === 502 || status === 503 || status === 529 || isProviderErrorMatch) {
+            const wait = (attempt + 1) * 5000;
+            if (attempt === 1 && usedModel !== FALLBACK_MODEL) {
+              usedModel = FALLBACK_MODEL;
+              log("agent", `Switching to fallback model ${FALLBACK_MODEL}`);
+            } else {
+              log("agent", `Provider error ${status || "DEGRADED"}, retrying in ${wait / 1000}s (attempt ${attempt + 1}/3)`);
+              await sleep(wait);
+            }
+            continue;
+          }
+
           throw error;
         }
-        if (response.choices?.length) break;
-        const errCode = response.error?.code;
-        if (errCode === 502 || errCode === 503 || errCode === 529) {
-          const wait = (attempt + 1) * 5000;
-          if (attempt === 1 && usedModel !== FALLBACK_MODEL) {
-            usedModel = FALLBACK_MODEL;
-            log("agent", `Switching to fallback model ${FALLBACK_MODEL}`);
-          } else {
-            log("agent", `Provider error ${errCode}, retrying in ${wait / 1000}s (attempt ${attempt + 1}/3)`);
-            await new Promise((r) => setTimeout(r, wait));
-          }
+        if (response?.choices?.length > 0) break;
+
+        // Handle 200 OK but empty choices (common with Gemini/some proxies on tool_choice forced or safety filters)
+        if (toolChoice === "required") {
+          toolChoice = "auto";
+          log("agent", "Provider returned empty choices with tool_choice=required — retrying with auto");
+          attempt -= 1;
+          continue;
+        }
+
+        const wait = (attempt + 1) * 5000;
+        if (attempt === 1 && usedModel !== FALLBACK_MODEL) {
+          usedModel = FALLBACK_MODEL;
+          log("agent", `Switching to fallback model ${FALLBACK_MODEL} due to empty choices`);
         } else {
-          break;
+          log("agent", `Empty choices from provider, retrying in ${wait / 1000}s (attempt ${attempt + 1}/3)`);
+          await sleep(wait);
         }
       }
 
-      if (!response.choices?.length) {
+      if (!response?.choices?.length) {
         log("error", `Bad API response: ${JSON.stringify(response).slice(0, 200)}`);
         throw new Error(`API returned no choices: ${response.error?.message || JSON.stringify(response)}`);
       }
@@ -272,9 +304,10 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           });
           continue;
         }
-        log("agent", "Final answer reached");
+        const activeShortModel = usedModel.split("/").pop();
+        log("agent", `Final answer reached [${activeShortModel}]`);
         log("agent", msg.content);
-        return { content: msg.content, userMessage: goal };
+        return { content: msg.content, userMessage: goal, model: activeShortModel };
       }
       sawToolCall = true;
 
@@ -283,27 +316,30 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
         const functionName = toolCall.function.name.replace(/<.*$/, "").trim();
         let functionArgs;
 
+        const activeShortModel = usedModel.split("/").pop();
+
         try {
           functionArgs = JSON.parse(toolCall.function.arguments);
         } catch {
           try {
             functionArgs = JSON.parse(jsonrepair(toolCall.function.arguments));
-            log("warn", `Repaired malformed JSON args for ${functionName}`);
+            log("warn", `Repaired malformed JSON args for ${functionName} [${activeShortModel}]`);
           } catch (parseError) {
-            log("error", `Failed to parse args for ${functionName}: ${parseError.message}`);
+            log("error", `Failed to parse args for ${functionName}: ${parseError.message} [${activeShortModel}]`);
             functionArgs = {};
           }
         }
 
         // Block once-per-session tools from firing a second time
         if (ONCE_PER_SESSION.has(functionName) && firedOnce.has(functionName)) {
-          log("agent", `Blocked duplicate ${functionName} call — already executed this session`);
+          log("agent", `Blocked duplicate ${functionName} call — already executed this session [${activeShortModel}]`);
           await onToolFinish?.({
             name: functionName,
             args: functionArgs,
             result: { blocked: true, reason: `${functionName} already attempted this session — do not retry. If it failed, report the error and stop.` },
             success: false,
             step,
+            model: activeShortModel
           });
           return {
             role: "tool",
@@ -312,14 +348,88 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           };
         }
 
-        await onToolStart?.({ name: functionName, args: functionArgs, step });
+        // Normalize call hash — sort args keys so {a:1,b:2} === {b:2,a:1}
+        const sortedArgs = Object.keys(functionArgs).sort().reduce((o, k) => { o[k] = functionArgs[k]; return o; }, {});
+        const callHash = `${functionName}:${JSON.stringify(sortedArgs)}`;
+        if (!ONCE_PER_SESSION.has(functionName)) {
+          // Per-exact-call dedup
+          duplicateReadCounts[callHash] = (duplicateReadCounts[callHash] || 0) + 1;
+          if (duplicateReadCounts[callHash] > MAX_DUPLICATE_READS) {
+            log("agent", `Blocked infinite loop on read tool: ${functionName} (exact args repeated ${duplicateReadCounts[callHash]}x) [${activeShortModel}]`);
+            const reason = `You have called ${functionName} with these exact arguments ${duplicateReadCounts[callHash]} times in this session. The result is already in your chat history. Do not call it again. Analyze the data you already have and make a decision or proceed.`;
+            await onToolFinish?.({
+              name: functionName,
+              args: functionArgs,
+              result: { blocked: true, reason },
+              success: false,
+              step,
+              model: activeShortModel
+            });
+            return {
+              role: "tool",
+              tool_call_id: toolCall.id,
+              content: JSON.stringify({ blocked: true, reason }),
+            };
+          }
+
+          // Per-tool-name frequency cap (independent of args)
+          toolNameCounts[functionName] = (toolNameCounts[functionName] || 0) + 1;
+          if (toolNameCounts[functionName] > MAX_SAME_TOOL_PER_SESSION) {
+            log("agent", `Blocked tool frequency cap: ${functionName} called ${toolNameCounts[functionName]}x this session [${activeShortModel}]`);
+            const reason = `You have called ${functionName} ${toolNameCounts[functionName]} times this session (limit: ${MAX_SAME_TOOL_PER_SESSION}). Stop calling this tool and work with the data you already have.`;
+            await onToolFinish?.({
+              name: functionName,
+              args: functionArgs,
+              result: { blocked: true, reason },
+              success: false,
+              step,
+              model: activeShortModel
+            });
+            return {
+              role: "tool",
+              tool_call_id: toolCall.id,
+              content: JSON.stringify({ blocked: true, reason }),
+            };
+          }
+
+          // Screening tool cooldown — get_top_candidates has a 5-minute cooldown
+          if (functionName === "get_top_candidates" && agentLoop._lastScreeningCall) {
+            const elapsed = Date.now() - agentLoop._lastScreeningCall;
+            if (elapsed < SCREENING_COOLDOWN_MS) {
+              const waitSec = Math.ceil((SCREENING_COOLDOWN_MS - elapsed) / 1000);
+              log("agent", `Blocked get_top_candidates — cooldown (${waitSec}s remaining) [${activeShortModel}]`);
+              const reason = `get_top_candidates was called recently (${Math.floor(elapsed / 1000)}s ago). Wait ${waitSec}s before calling again. Use already-fetched candidate data if available.`;
+              await onToolFinish?.({
+                name: functionName,
+                args: functionArgs,
+                result: { blocked: true, reason },
+                success: false,
+                step,
+                model: activeShortModel
+              });
+              return {
+                role: "tool",
+                tool_call_id: toolCall.id,
+                content: JSON.stringify({ blocked: true, reason }),
+              };
+            }
+          }
+        }
+
+        await onToolStart?.({ name: functionName, args: functionArgs, step, model: activeShortModel });
         const result = await executeTool(functionName, functionArgs);
+
+        // Track screening cooldown timestamp
+        if (functionName === "get_top_candidates" && result?.success !== false && !result?.error) {
+          agentLoop._lastScreeningCall = Date.now();
+        }
         await onToolFinish?.({
           name: functionName,
           args: functionArgs,
           result,
           success: result?.success !== false && !result?.error && !result?.blocked,
           step,
+          model: activeShortModel
         });
 
         // Lock deploy_position after first attempt regardless of outcome — retrying is never right

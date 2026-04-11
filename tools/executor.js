@@ -31,6 +31,19 @@ const USER_CONFIG_PATH = path.join(process.env.DATA_DIR || path.join(__dirname, 
 import { log, logAction } from "../logger.js";
 import { notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
 
+// ─── Solana address validator ─────────────────────────────────
+// Valid Solana addresses are 32-44 chars of base58 (no 0, O, I, l)
+const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+function isValidSolanaAddress(addr) {
+  return typeof addr === "string" && BASE58_RE.test(addr);
+}
+
+// Tools that take position or pool addresses and should be validated
+const ADDRESS_VALIDATED_TOOLS = new Set([
+  "close_position", "claim_fees", "get_position_pnl", "set_position_note",
+  "deploy_position", "get_active_bin", "get_pool_detail",
+]);
+
 // Registered by index.js so update_config can restart cron jobs when intervals change
 let _cronRestarter = null;
 export function registerCronRestarter(fn) { _cronRestarter = fn; }
@@ -269,6 +282,22 @@ export async function executeTool(name, args) {
     return { error };
   }
 
+  // ─── Validate address arguments ───────────
+  if (ADDRESS_VALIDATED_TOOLS.has(name)) {
+    const posAddr = args.position_address;
+    const poolAddr = args.pool_address;
+    if (posAddr && !isValidSolanaAddress(posAddr)) {
+      const error = `Invalid position_address format: "${String(posAddr).slice(0, 20)}..." is not a valid Solana address. Use get_my_positions to get current position addresses.`;
+      log("safety_block", error);
+      return { error, blocked: true };
+    }
+    if (poolAddr && !isValidSolanaAddress(poolAddr)) {
+      const error = `Invalid pool_address format: "${String(poolAddr).slice(0, 20)}..." is not a valid Solana address. Use get_top_candidates or search_pools to find pool addresses.`;
+      log("safety_block", error);
+      return { error, blocked: true };
+    }
+  }
+
   // ─── Pre-execution safety checks ──────────
   if (PROTECTED_TOOLS.has(name)) {
     const safetyCheck = await runSafetyChecks(name, args);
@@ -278,6 +307,22 @@ export async function executeTool(name, args) {
         blocked: true,
         reason: safetyCheck.reason,
       };
+    }
+  }
+
+  // ─── Verify position exists before close ───
+  if (name === "close_position" && args.position_address) {
+    try {
+      const positions = await getMyPositions({ force: true, silent: true });
+      const exists = positions?.positions?.some(p => p.position === args.position_address);
+      if (!exists) {
+        const error = `Position ${args.position_address} not found in open positions — it may already be closed. Use get_my_positions to check current positions.`;
+        log("safety_block", `close_position blocked: ${error}`);
+        return { blocked: true, reason: error };
+      }
+    } catch (e) {
+      log("safety_warn", `Could not verify position before close: ${e.message}`);
+      // Don't block — let the close attempt proceed and fail naturally
     }
   }
 
