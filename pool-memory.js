@@ -126,17 +126,34 @@ export function recordPoolDeploy(poolAddress, deployData) {
   entry.deploys.push(deploy);
   entry.total_deploys = entry.deploys.length;
   entry.last_deployed_at = deploy.closed_at;
-  entry.last_outcome = (deploy.pnl_pct ?? 0) >= 0 ? "profit" : "loss";
+  // Classify Rule 3 (pumped far above range) closes with near break-even PnL
+  // as "neutral" rather than "loss" — these are healthy exits, not failures.
+  const closeText = String(deploy.close_reason || "").toLowerCase();
+  const pnl = deploy.pnl_pct ?? 0;
+  if (closeText.includes("pumped far above range") && pnl >= -1 && pnl <= 2) {
+    entry.last_outcome = "neutral";
+  } else {
+    entry.last_outcome = pnl >= 0 ? "profit" : "loss";
+  }
 
   // Recompute aggregates
+  // Exclude "pumped far above range" break-even closes from win_rate —
+  // they are neutral exits and should not count as losses.
+  const isNeutralPumpClose = (d) => {
+    const r = String(d.close_reason || "").toLowerCase();
+    return r.includes("pumped far above range") && (d.pnl_pct ?? 0) >= -1 && (d.pnl_pct ?? 0) <= 2;
+  };
   const withPnl = entry.deploys.filter((d) => d.pnl_pct != null);
+  const meaningfulDeploys = withPnl.filter((d) => !isNeutralPumpClose(d));
   if (withPnl.length > 0) {
     entry.avg_pnl_pct = Math.round(
       (withPnl.reduce((s, d) => s + d.pnl_pct, 0) / withPnl.length) * 100
     ) / 100;
-    entry.win_rate = Math.round(
-      (withPnl.filter((d) => d.pnl_pct >= 0).length / withPnl.length) * 100
-    ) / 100;
+    entry.win_rate = meaningfulDeploys.length > 0
+      ? Math.round(
+          (meaningfulDeploys.filter((d) => d.pnl_pct >= 0).length / meaningfulDeploys.length) * 100
+        ) / 100
+      : 1; // All deploys were neutral pump closes — treat as clean record
   }
   const adjusted = withPnl.filter((d) => !isAdjustedWinRateExcludedReason(d.close_reason));
   entry.adjusted_win_rate_sample_count = adjusted.length;
