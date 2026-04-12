@@ -202,7 +202,6 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             attempt -= 1;
             continue;
           }
-          // Retry on intermittent 401 (OpenAI permission propagation / load balancer inconsistency)
           if (error?.status === 401 && attempt < 2) {
             const wait = (attempt + 1) * 2000;
             log("agent", `401 auth error (intermittent) — retrying in ${wait / 1000}s (attempt ${attempt + 1}/3)`);
