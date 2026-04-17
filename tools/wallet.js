@@ -27,7 +27,30 @@ function getWallet() {
 
 const JUPITER_PRICE_API = "https://api.jup.ag/price/v3";
 const JUPITER_SWAP_V2_API = "https://api.jup.ag/swap/v2";
-const JUPITER_API_KEY = "b15d42e9-e0e4-4f90-a424-ae41ceeaa382";
+const DEFAULT_JUPITER_API_KEY = "b15d42e9-e0e4-4f90-a424-ae41ceeaa382";
+
+function getJupiterApiKey() {
+  return config.jupiter.apiKey || process.env.JUPITER_API_KEY || DEFAULT_JUPITER_API_KEY;
+}
+
+function getJupiterReferralParams() {
+  const referralAccount = String(config.jupiter.referralAccount || "").trim();
+  const referralFee = Number(config.jupiter.referralFeeBps || 0);
+  if (!referralAccount || !Number.isFinite(referralFee) || referralFee <= 0) {
+    return null;
+  }
+  if (referralFee < 50 || referralFee > 255) {
+    log("swap_warn", `Ignoring Jupiter referral fee ${referralFee}; Ultra requires 50-255 bps`);
+    return null;
+  }
+  try {
+    new PublicKey(referralAccount);
+  } catch {
+    log("swap_warn", "Ignoring invalid Jupiter referral account");
+    return null;
+  }
+  return { referralAccount, referralFee: Math.round(referralFee) };
+}
 
 /**
  * Get current wallet balances: SOL, USDC, and all SPL tokens using Helius Wallet API.
@@ -149,15 +172,22 @@ export async function swapToken({
     const amountStr = Math.floor(amount * Math.pow(10, decimals)).toString();
 
     // ─── Get Swap V2 order (unsigned tx + requestId) ───────────
-    const orderUrl =
-      `${JUPITER_SWAP_V2_API}/order` +
-      `?inputMint=${input_mint}` +
-      `&outputMint=${output_mint}` +
-      `&amount=${amountStr}` +
-      `&taker=${wallet.publicKey.toString()}`;
+    const search = new URLSearchParams({
+      inputMint: input_mint,
+      outputMint: output_mint,
+      amount: amountStr,
+      taker: wallet.publicKey.toString(),
+    });
+    const referralParams = getJupiterReferralParams();
+    if (referralParams) {
+      search.set("referralAccount", referralParams.referralAccount);
+      search.set("referralFee", String(referralParams.referralFee));
+    }
+    const orderUrl = `${JUPITER_SWAP_V2_API}/order?${search.toString()}`;
+    const jupiterApiKey = getJupiterApiKey();
 
     const orderRes = await fetch(orderUrl, {
-      headers: { "x-api-key": JUPITER_API_KEY },
+      headers: jupiterApiKey ? { "x-api-key": jupiterApiKey } : {},
     });
     if (!orderRes.ok) {
       const body = await orderRes.text();
@@ -181,7 +211,7 @@ export async function swapToken({
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": JUPITER_API_KEY,
+        ...(jupiterApiKey ? { "x-api-key": jupiterApiKey } : {}),
       },
       body: JSON.stringify({ signedTransaction: signedTx, requestId }),
     });
@@ -195,6 +225,12 @@ export async function swapToken({
     }
 
     log("swap", `SUCCESS tx: ${result.signature}`);
+    if (referralParams && order.feeBps !== referralParams.referralFee) {
+      log(
+        "swap_warn",
+        `Jupiter referral fee requested ${referralParams.referralFee} bps but order applied ${order.feeBps ?? "unknown"} bps`,
+      );
+    }
 
     return {
       success: true,
@@ -203,6 +239,10 @@ export async function swapToken({
       output_mint,
       amount_in: result.inputAmountResult,
       amount_out: result.outputAmountResult,
+      referral_account: referralParams?.referralAccount || null,
+      referral_fee_bps_requested: referralParams?.referralFee || 0,
+      fee_bps_applied: order.feeBps ?? null,
+      fee_mint: order.feeMint ?? null,
     };
   } catch (error) {
     log("swap_error", error.message);
