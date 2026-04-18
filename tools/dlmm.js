@@ -775,6 +775,10 @@ async function fetchOpenPositionsFromMeridian({ walletAddress, agentId }) {
   });
   const payload = await agentMeridianJson(`/positions/open?${search.toString()}`, {
     headers: getAgentMeridianHeaders(),
+    retry: {
+      maxElapsedMs: 30_000,
+      perAttemptTimeoutMs: 10_000,
+    },
   });
   return {
     ...payload,
