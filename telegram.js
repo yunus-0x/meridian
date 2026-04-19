@@ -103,9 +103,37 @@ async function postTelegram(method, body) {
   }
 }
 
+async function postTelegramRaw(method, body) {
+  if (!TOKEN) return null;
+  try {
+    const res = await fetch(`${BASE}/${method}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      log("telegram_error", `${method} ${res.status}: ${err.slice(0, 200)}`);
+      return null;
+    }
+    return await res.json();
+  } catch (e) {
+    log("telegram_error", `${method} failed: ${e.message}`);
+    return null;
+  }
+}
+
 export async function sendMessage(text) {
   if (!TOKEN || !chatId) return;
   return postTelegram("sendMessage", { text: String(text).slice(0, 4096) });
+}
+
+export async function sendMessageWithButtons(text, inlineKeyboard) {
+  if (!TOKEN || !chatId) return;
+  return postTelegram("sendMessage", {
+    text: String(text).slice(0, 4096),
+    reply_markup: { inline_keyboard: inlineKeyboard },
+  });
 }
 
 export async function sendHTML(html) {
@@ -121,7 +149,24 @@ async function editMessage(text, messageId) {
   });
 }
 
-function hasActiveLiveMessage() {
+export async function editMessageWithButtons(text, messageId, inlineKeyboard) {
+  if (!TOKEN || !chatId || !messageId) return null;
+  return postTelegram("editMessageText", {
+    message_id: messageId,
+    text: String(text).slice(0, 4096),
+    reply_markup: { inline_keyboard: inlineKeyboard },
+  });
+}
+
+export async function answerCallbackQuery(callbackQueryId, text = "") {
+  if (!TOKEN || !callbackQueryId) return null;
+  return postTelegramRaw("answerCallbackQuery", {
+    callback_query_id: callbackQueryId,
+    ...(text ? { text: String(text).slice(0, 200) } : {}),
+  });
+}
+
+export function hasActiveLiveMessage() {
   return _liveMessageDepth > 0;
 }
 
@@ -311,6 +356,23 @@ async function poll(onMessage) {
       const data = await res.json();
       for (const update of data.result || []) {
         _offset = update.update_id + 1;
+        const callback = update.callback_query;
+        if (callback?.data && callback?.message) {
+          const callbackMsg = {
+            chat: callback.message.chat,
+            from: callback.from,
+            text: callback.data,
+          };
+          if (!isAuthorizedIncomingMessage(callbackMsg)) continue;
+          await onMessage({
+            ...callbackMsg,
+            isCallback: true,
+            callbackQueryId: callback.id,
+            callbackData: callback.data,
+            messageId: callback.message.message_id,
+          });
+          continue;
+        }
         const msg = update.message;
         if (!msg?.text) continue;
         if (!isAuthorizedIncomingMessage(msg)) continue;

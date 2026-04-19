@@ -267,6 +267,16 @@ const toolMap = {
       publicApiKey: ["api", "publicApiKey"],
       agentMeridianApiUrl: ["api", "url"],
       lpAgentRelayEnabled: ["api", "lpAgentRelayEnabled"],
+      // chart indicators
+      chartIndicatorsEnabled: ["indicators", "enabled", ["chartIndicators", "enabled"]],
+      indicatorEntryPreset: ["indicators", "entryPreset", ["chartIndicators", "entryPreset"]],
+      indicatorExitPreset: ["indicators", "exitPreset", ["chartIndicators", "exitPreset"]],
+      rsiLength: ["indicators", "rsiLength", ["chartIndicators", "rsiLength"]],
+      indicatorIntervals: ["indicators", "intervals", ["chartIndicators", "intervals"]],
+      indicatorCandles: ["indicators", "candles", ["chartIndicators", "candles"]],
+      rsiOversold: ["indicators", "rsiOversold", ["chartIndicators", "rsiOversold"]],
+      rsiOverbought: ["indicators", "rsiOverbought", ["chartIndicators", "rsiOverbought"]],
+      requireAllIntervals: ["indicators", "requireAllIntervals", ["chartIndicators", "requireAllIntervals"]],
     };
 
     const applied = {};
@@ -313,7 +323,21 @@ const toolMap = {
       log("config", `update_config: config.${section}.${field} ${before} → ${val} (verify: ${config[section][field]})`);
     }
 
-    Object.assign(userConfig, applied);
+    for (const [key, val] of Object.entries(applied)) {
+      const persistPath = CONFIG_MAP[key]?.[2];
+      if (Array.isArray(persistPath) && persistPath.length > 0) {
+        let target = userConfig;
+        for (const part of persistPath.slice(0, -1)) {
+          if (!target[part] || typeof target[part] !== "object" || Array.isArray(target[part])) {
+            target[part] = {};
+          }
+          target = target[part];
+        }
+        target[persistPath[persistPath.length - 1]] = val;
+      } else {
+        userConfig[key] = val;
+      }
+    }
     userConfig._lastAgentTune = new Date().toISOString();
     fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
 
