@@ -1082,19 +1082,19 @@ function renderSettingsMenu(page = "main") {
   let rows;
   if (page === "risk") {
     rows = [
-      stepButtons("deployAmountSol", "Deploy", 0.1),
-      stepButtons("gasReserve", "Gas", 0.05),
-      stepButtons("maxPositions", "Max pos", 1, { digits: 0 }),
-      stepButtons("maxDeployAmount", "Max SOL", 1, { digits: 0 }),
-      stepButtons("takeProfitPct", "TP %", 1, { digits: 0 }),
-      stepButtons("stopLossPct", "SL %", 5, { digits: 0 }),
+      inputButton("deployAmountSol", "Deploy SOL", { digits: 2 }),
+      inputButton("gasReserve", "Gas reserve", { digits: 2 }),
+      inputButton("maxPositions", "Max positions"),
+      inputButton("maxDeployAmount", "Max SOL"),
+      inputButton("takeProfitPct", "TP %"),
+      inputButton("stopLossPct", "SL %"),
       [toggleButton("trailingTakeProfit", "Trailing TP")],
-      stepButtons("trailingTriggerPct", "Trail trigger", 0.5, { digits: 1 }),
-      stepButtons("trailingDropPct", "Trail drop", 0.5, { digits: 1 }),
+      inputButton("trailingTriggerPct", "Trail trigger", { digits: 1 }),
+      inputButton("trailingDropPct", "Trail drop", { digits: 1 }),
       [toggleButton("repeatDeployCooldownEnabled", "Repeat cooldown")],
-      stepButtons("repeatDeployCooldownTriggerCount", "Repeat count", 1, { digits: 0 }),
-      stepButtons("repeatDeployCooldownHours", "Repeat hrs", 1, { digits: 0 }),
-      stepButtons("repeatDeployCooldownMinFeeEarnedPct", "Fee earned %", 0.1, { digits: 1 }),
+      inputButton("repeatDeployCooldownTriggerCount", "Repeat count"),
+      inputButton("repeatDeployCooldownHours", "Repeat hrs"),
+      inputButton("repeatDeployCooldownMinFeeEarnedPct", "Min fee earned %", { digits: 1 }),
     ];
   } else if (page === "screen") {
     rows = [
@@ -1108,8 +1108,8 @@ function renderSettingsMenu(page = "main") {
         settingButton(`Strategy: spot`, "cfg:set:strategy:spot"),
         settingButton(`Strategy: bid_ask`, "cfg:set:strategy:bid_ask"),
       ],
-      stepButtons("managementIntervalMin", "Manage min", 1, { digits: 0 }),
-      stepButtons("screeningIntervalMin", "Screen min", 5, { digits: 0 }),
+      inputButton("managementIntervalMin", "Manage interval (min)"),
+      inputButton("screeningIntervalMin", "Screen interval (min)"),
     ];
   } else if (page === "gmgn") {
     rows = [
@@ -1144,7 +1144,7 @@ function renderSettingsMenu(page = "main") {
         settingButton("Exit: RSI", "cfg:set:indicatorExitPreset:rsi_reversal"),
         settingButton("Exit: BB+RSI", "cfg:set:indicatorExitPreset:bb_plus_rsi"),
       ],
-      stepButtons("rsiLength", "RSI len", 1, { digits: 0 }),
+      inputButton("rsiLength", "RSI length"),
     ];
   } else {
     rows = [
