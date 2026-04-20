@@ -1046,7 +1046,7 @@ function stepButtons(key, label, step, { digits = 2 } = {}) {
 
 function inputButton(key, label, { digits = 0 } = {}) {
   const value = settingValue(key);
-  const shown = value == null ? "off" : Number.isFinite(Number(value)) ? Number(value).toFixed(digits).replace(/\.?0+$/, "") : String(value);
+  const shown = value == null ? "off" : Number.isFinite(Number(value)) ? String(parseFloat(Number(value).toFixed(digits))) : String(value);
   return [settingButton(`${label}: ${shown} ✏`, `cfg:input:${key}`)];
 }
 
