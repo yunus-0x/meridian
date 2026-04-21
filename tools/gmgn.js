@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { Agent } from "undici";
 import { config } from "../config.js";
 import { log } from "../logger.js";
 import { fetchChartIndicatorsForMint } from "./chart-indicators.js";
@@ -6,6 +7,9 @@ import { fetchChartIndicatorsForMint } from "./chart-indicators.js";
 const METEORA_DLMM_API = "https://dlmm.datapi.meteora.ag";
 const SUPPORTED_INTERVALS = new Set(["1m", "5m", "1h", "6h", "24h"]);
 let lastGmgnRequestAt = 0;
+
+// Force IPv4 — GMGN OpenAPI does not support IPv6
+const ipv4Agent = new Agent({ connect: { family: 4 } });
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -63,6 +67,7 @@ async function gmgnFetch(pathname, { method = "GET", params = {}, body = null } 
         "Content-Type": "application/json",
       },
       body: body ? JSON.stringify(body) : null,
+      dispatcher: ipv4Agent,
     });
     const text = await res.text().catch(() => "");
     let payload = {};
