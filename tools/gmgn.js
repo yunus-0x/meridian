@@ -311,29 +311,27 @@ async function fetchTopMeteoraDlmmPoolsForMint(mint, minTvl = 0, limit = 2) {
   const pools = Array.isArray(data?.data) ? data.data : [];
   return pools
     .filter((pool) => {
-      const isDlmm = !pool.pool_type || String(pool.pool_type).toLowerCase().includes("dlmm") || pool.dlmm_params;
+      // pool_type and dlmm_params are always undefined on this endpoint — DLMM is
+      // inferred from the presence of pool_config.bin_step
       const baseMatches = pool?.token_x?.address === mint || pool?.token_x_mint === mint;
       const quoteIsSol =
         pool?.token_y?.address === config.tokens.SOL ||
         pool?.token_y_mint === config.tokens.SOL ||
         pool?.token_y?.symbol === "SOL";
-      return isDlmm && baseMatches && quoteIsSol;
+      return baseMatches && quoteIsSol;
     })
     .slice(0, limit);
 }
 
 async function fetchPoolDetailDirect(poolAddress) {
-  const useServer = !!config.api?.publicApiKey;
-  const apiBase = String(config.api?.url || "https://api.agentmeridian.xyz/api").replace(/\/+$/, "");
+  // Always use Meteora's public Pool Discovery API — the server-side endpoint
+  // (api.agentmeridian.xyz) returns stale/fee=0 data for some pools.
   const discoveryBase = "https://pool-discovery-api.datapi.meteora.ag";
-  const url = useServer
-    ? `${apiBase}/discovery/pools/${poolAddress}?timeframe=5m`
-    : `${discoveryBase}/pools?page_size=1&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}&timeframe=5m`;
-  const headers = useServer ? { "x-api-key": config.api.publicApiKey } : {};
-  const res = await fetch(url, { headers });
+  const url = `${discoveryBase}/pools?page_size=1&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}&timeframe=5m`;
+  const res = await fetch(url);
   if (!res.ok) return null;
   const data = await res.json();
-  return useServer ? data : ((data?.data || [])[0] ?? null);
+  return (data?.data || [])[0] ?? null;
 }
 
 async function pickBestPool(pools) {
@@ -346,8 +344,10 @@ async function pickBestPool(pools) {
   const scored = pools.map((pool, i) => {
     const d = details[i];
     const activeTvl = num(d?.active_tvl ?? pool.active_tvl ?? pool.tvl ?? pool.liquidity);
-    const fee = num(d?.fee ?? pool.fees?.["1h"] ?? pool.fee ?? 0);
-    const feeActiveTvlRatio = activeTvl > 0 ? fee / activeTvl : 0;
+    // Use the API-provided fee_active_tvl_ratio directly (already a percentage, e.g. 7.95 = 7.95%)
+    const feeActiveTvlRatio = Number(d?.fee_active_tvl_ratio) > 0
+      ? Number(d.fee_active_tvl_ratio)
+      : (activeTvl > 0 ? (num(d?.fee) / activeTvl) * 100 : 0);
     return { pool, detail: d, feeActiveTvlRatio, activeTvl };
   });
   scored.sort((a, b) => b.feeActiveTvlRatio - a.feeActiveTvlRatio || b.activeTvl - a.activeTvl);
@@ -356,13 +356,13 @@ async function pickBestPool(pools) {
 
 function condenseGmgnCandidate({ token, pool, poolDetail, security, info, infoAnalysis, holdersAnalysis, indicatorSignal }) {
   const poolAddress = pool.address || pool.pool_address;
-  // prefer pool discovery (5m fee/tvl) over datapi when available
-  const activeTvl = num(poolDetail?.active_tvl ?? pool.active_tvl ?? pool.tvl ?? pool.liquidity);
-  const feeWindow = num(poolDetail?.fee ?? pool.fees?.["1h"] ?? pool.fee ?? 0);
-  const volumeWindow = num(poolDetail?.volume ?? pool.volume ?? token.volume);
-  const feeActiveTvlRatio = poolDetail?.fee_active_tvl_ratio > 0
+  // Stage 5 Pool Discovery provides active_tvl and fee_active_tvl_ratio
+  // Stage 3 Meteora search provides tvl and bin_step/base_fee_pct via pool_config
+  const activeTvl = num(poolDetail?.active_tvl ?? pool.tvl ?? pool.liquidity);
+  // Use API-provided ratio directly; fee_active_tvl_ratio from Pool Discovery is already computed
+  const feeActiveTvlRatio = Number(poolDetail?.fee_active_tvl_ratio) > 0
     ? Number(Number(poolDetail.fee_active_tvl_ratio).toFixed(4))
-    : activeTvl > 0 ? Number(((feeWindow / activeTvl) * 100).toFixed(4)) : 0;
+    : 0;
   const kolCount = holdersAnalysis.kolHolding || num(token.renowned_count) || num(info?.wallet_tags_stat?.renowned_wallets);
   const smartCount = holdersAnalysis.smartHolding + holdersAnalysis.smartAccumulating || num(token.smart_degen_count) || num(info?.wallet_tags_stat?.smart_wallets);
   const gmgnScore =
@@ -389,27 +389,22 @@ function condenseGmgnCandidate({ token, pool, poolDetail, security, info, infoAn
       mint: pool.token_y?.address || config.tokens.SOL,
     },
     pool_type: "dlmm",
-    bin_step: poolDetail?.dlmm_params?.bin_step ?? pool.dlmm_params?.bin_step ?? pool.pool_config?.bin_step ?? pool.bin_step ?? null,
-    fee_pct: poolDetail?.fee_pct ?? pool.pool_config?.base_fee_pct ?? pool.fee_pct ?? pool.base_fee_percentage ?? null,
+    // Stage 3 Meteora search: pool_config.bin_step / base_fee_pct
+    bin_step: pool.pool_config?.bin_step ?? poolDetail?.dlmm_params?.bin_step ?? null,
+    fee_pct: pool.pool_config?.base_fee_pct ?? poolDetail?.fee_pct ?? null,
+    // Stage 5 Pool Discovery: active_tvl, fee_active_tvl_ratio, volatility
     active_tvl: round(activeTvl),
-    fee_window: round(feeWindow),
-    volume_window: round(volumeWindow),
     fee_active_tvl_ratio: feeActiveTvlRatio,
     volatility: poolDetail?.volatility != null ? Number(Number(poolDetail.volatility).toFixed(2)) : null,
+    // Stage 1 GMGN rank: token-level metrics
     holders: num(token.holder_count || info.holder_count),
     mcap: round(num(token.market_cap || (num(info.price) * num(info.circulating_supply)))),
-    organic_score: null,
     token_age_hours: token.open_timestamp ? Math.floor((Date.now() / 1000 - num(token.open_timestamp)) / 3600) : null,
     dev: info.dev?.creator_address || null,
-    active_positions: pool.active_positions ?? null,
-    active_pct: pool.active_positions_pct != null ? Number(num(pool.active_positions_pct).toFixed(1)) : null,
-    open_positions: pool.open_positions ?? null,
     price: num(info.price || token.price),
     price_change_pct: num(token.price_change_percent5m ?? token.price_change_percent),
-    volume_change_pct: null,
-    fee_change_pct: null,
+    volume: num(token.volume ?? 0),
     swap_count: token.swaps ?? null,
-    unique_traders: null,
     gmgn: true,
     gmgn_score: Number(gmgnScore.toFixed(2)),
     gmgn_total_fee_sol: num(infoAnalysis?.totalFeeSol ?? info.total_fee),

@@ -30,3 +30,6 @@ logs/
 # Dev context
 context.md
 docs/
+
+# Test files
+test-*.js

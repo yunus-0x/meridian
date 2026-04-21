@@ -966,6 +966,7 @@ function formatConfigSnapshot() {
     `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
     `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,
     `Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl}`,
+    `GMGN interval: ${config.gmgn.interval} | OrderBy: ${config.gmgn.orderBy} | Dir: ${config.gmgn.direction}`,
     `Intervals: manage ${config.schedule.managementIntervalMin}m | screen ${config.schedule.screeningIntervalMin}m`,
     `HiveMind: ${isHiveMindEnabled() ? "enabled" : "disabled"}${config.hiveMind.agentId ? ` | ${config.hiveMind.agentId}` : ""}`,
   ].join("\n");
@@ -993,7 +994,16 @@ function settingValue(key) {
     blockPvpSymbols: config.screening.blockPvpSymbols,
     screeningSource: config.screening.source,
     gmgnRequireKol: config.gmgn.requireKol,
+    gmgnInterval: config.gmgn.interval,
     gmgnIndicatorFilter: config.gmgn.indicatorFilter,
+    gmgnMinVolume: config.gmgn.minVolume,
+    gmgnMinTokenAgeHours: config.gmgn.minTokenAgeHours,
+    gmgnMaxTokenAgeHours: config.gmgn.maxTokenAgeHours,
+    gmgnMaxBundlerRate: config.gmgn.maxBundlerRate,
+    gmgnPreferredKolNames: config.gmgn.preferredKolNames,
+    gmgnPreferredKolMinHoldPct: config.gmgn.preferredKolMinHoldPct,
+    gmgnDumpKolNames: config.gmgn.dumpKolNames,
+    gmgnDumpKolMinHoldPct: config.gmgn.dumpKolMinHoldPct,
     gmgnIndicatorInterval: config.gmgn.indicatorInterval,
     gmgnRequireBullishSt: config.gmgn.indicatorRules?.requireBullishSupertrend,
     gmgnRejectAtBottom: config.gmgn.indicatorRules?.rejectAlreadyAtBottom,
@@ -1081,6 +1091,7 @@ function renderSettingsMenu(page = "main") {
       settingButton("Screen", "cfg:page:screen"),
       settingButton("Indicators", "cfg:page:indicators"),
       settingButton("GMGN", "cfg:page:gmgn"),
+      settingButton("KOL", "cfg:page:kol"),
     ],
   ];
 
@@ -1116,6 +1127,12 @@ function renderSettingsMenu(page = "main") {
       ],
       [toggleButton("gmgnRequireKol", "GMGN require KOL")],
       [toggleButton("useDiscordSignals", "Discord signals"), toggleButton("blockPvpSymbols", "PVP hard block")],
+      [
+        settingButton("5m", "cfg:set:gmgnInterval:5m"),
+        settingButton("1h", "cfg:set:gmgnInterval:1h"),
+        settingButton("6h", "cfg:set:gmgnInterval:6h"),
+        settingButton("24h", "cfg:set:gmgnInterval:24h"),
+      ],
       inputButton("managementIntervalMin", "Manage interval (min)"),
       inputButton("screeningIntervalMin", "Screen interval (min)"),
     ];
@@ -1145,6 +1162,22 @@ function renderSettingsMenu(page = "main") {
       inputButton("gmgnMinKolCount", "Min KOL"),
       inputButton("gmgnMinTotalFeeSol", "Min fee SOL"),
       inputButton("gmgnMinHolders", "Min holders"),
+      [settingButton("KOL settings", "cfg:page:kol")],
+    ];
+  } else if (page === "kol") {
+    rows = [
+      [inputButton("gmgnPreferredKolNames", "Preferred KOL (comma-sep)")],
+      [inputButton("gmgnPreferredKolMinHoldPct", "Preferred KOL min hold %")],
+      [inputButton("gmgnDumpKolNames", "Dump KOL (comma-sep)")],
+      [inputButton("gmgnDumpKolMinHoldPct", "Dump KOL min hold %")],
+      [
+        inputButton("gmgnMinVolume", "Min volume"),
+        inputButton("gmgnMinTokenAgeHours", "Min token age (h)"),
+      ],
+      [
+        inputButton("gmgnMaxTokenAgeHours", "Max token age (h)"),
+        inputButton("gmgnMaxBundlerRate", "Max bundler %"),
+      ],
     ];
   } else if (page === "indicators") {
     rows = [
@@ -1202,6 +1235,9 @@ function normalizeMenuValue(key, raw) {
     if (raw === "both") return ["5_MINUTE", "15_MINUTE"];
     return [raw];
   }
+  if (key === "gmgnPreferredKolNames" || key === "gmgnDumpKolNames") {
+    return raw.split(",").map((s) => s.trim()).filter(Boolean);
+  }
   return parseConfigValue(raw);
 }
 
@@ -1218,7 +1254,8 @@ async function applySettingsMenuCallback(msg) {
   if (action === "input") {
     const inputKey = parts[2];
     const currentVal = settingValue(inputKey);
-    const inputPage = inputKey.startsWith("gmgn") && inputKey !== "gmgnRequireKol" ? "gmgn"
+    const inputPage = ["gmgnPreferredKolNames", "gmgnPreferredKolMinHoldPct", "gmgnDumpKolNames", "gmgnDumpKolMinHoldPct"].includes(inputKey) ? "kol"
+      : inputKey.startsWith("gmgn") && inputKey !== "gmgnRequireKol" ? "gmgn"
       : inputKey.startsWith("indicator") || inputKey === "chartIndicatorsEnabled" || inputKey === "rsiLength" || inputKey === "requireAllIntervals" ? "indicators"
       : ["strategy", "minBinsBelow", "maxBinsBelow", "deployAmountSol", "maxDeployAmount", "maxPositions"].includes(inputKey) ? "strategy"
       : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "gmgnRequireKol"].includes(inputKey) ? "screen"
