@@ -471,6 +471,41 @@ export function setLastBriefingDate() {
   save(state);
 }
 
+
+// ─── Daily Stop-Loss Tracking ────────────────────────────────
+
+/**
+ * Record a stop-loss close event for daily limit tracking.
+ */
+export function recordStopLoss(position_address, pnl_pct) {
+  const state = load();
+  if (!state.dailySLHistory) state.dailySLHistory = [];
+  state.dailySLHistory.push({
+    position: position_address,
+    pnl_pct,
+    ts: new Date().toISOString(),
+  });
+  // Keep only last 100 entries to prevent unbounded growth
+  if (state.dailySLHistory.length > 100) {
+    state.dailySLHistory = state.dailySLHistory.slice(-100);
+  }
+  pushEvent(state, { action: "stop_loss", position: position_address, pnl_pct });
+  save(state);
+  log("state", "Recorded stop-loss for " + position_address + " at " + pnl_pct + "%");
+}
+
+/**
+ * Count stop-loss events in the rolling 24-hour window.
+ * Returns { count, events } so the agent can report details.
+ */
+export function getDailySLCount() {
+  const state = load();
+  if (!state.dailySLHistory) return { count: 0, events: [] };
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const recent = state.dailySLHistory.filter(e => new Date(e.ts).getTime() >= cutoff);
+  return { count: recent.length, events: recent };
+}
+
 /**
  * Reconcile local state with actual on-chain positions.
  * Marks any local open positions as closed if they are not in the on-chain list.

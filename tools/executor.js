@@ -12,7 +12,7 @@ import {
 import { getWalletBalances, swapToken } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
-import { setPositionInstruction } from "../state.js";
+import { setPositionInstruction, recordStopLoss, getDailySLCount } from "../state.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
 import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
@@ -249,6 +249,7 @@ const toolMap = {
       // risk
       maxPositions: ["risk", "maxPositions"],
       maxDeployAmount: ["risk", "maxDeployAmount"],
+      maxSLPerDay: ["risk", "maxSLPerDay"],
       // schedule
       managementIntervalMin: ["schedule", "managementIntervalMin"],
       screeningIntervalMin: ["schedule", "screeningIntervalMin"],
@@ -429,6 +430,10 @@ export async function executeTool(name, args) {
         notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
       } else if (name === "close_position") {
         notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0 }).catch(() => {});
+        // Track stop-loss for daily limit
+        if (result.pnl_pct != null && result.pnl_pct <= (config.management.stopLossPct ?? config.management.emergencyPriceDropPct ?? -50)) {
+          recordStopLoss(args.position_address, result.pnl_pct);
+        }
         // Note low-yield closes in pool memory so screener avoids redeploying
         if (args.reason && args.reason.toLowerCase().includes("yield")) {
           const poolAddr = result.pool || args.pool_address;
@@ -564,6 +569,19 @@ async function runSafetyChecks(name, args) {
           return {
             pass: false,
             reason: `Insufficient SOL: have ${balance.sol} SOL, need ${minRequired} SOL (${amountY} deploy + ${gasReserve} gas reserve).`,
+          };
+        }
+      }
+
+      // Daily stop-loss limit — pause deploying if too many SLs in 24h
+      const maxSLPerDay = config.risk.maxSLPerDay;
+      if (maxSLPerDay != null && maxSLPerDay > 0) {
+        const { count: dailySLs, events } = getDailySLCount();
+        if (dailySLs >= maxSLPerDay) {
+          const lastSL = events.length > 0 ? events[events.length - 1] : null;
+          return {
+            pass: false,
+            reason: "Daily stop-loss limit reached (" + dailySLs + "/" + maxSLPerDay + " in last 24h). Deploying paused. Last SL: " + (lastSL ? lastSL.pnl_pct + "%" : "N/A") + ". Review market conditions before resuming.",
           };
         }
       }

@@ -39,6 +39,7 @@ export const config = {
   risk: {
     maxPositions:    u.maxPositions    ?? 3,
     maxDeployAmount: u.maxDeployAmount ?? 50,
+    maxSLPerDay:     u.maxSLPerDay     ?? null,  // stop deploying after N stop-loss closes in 24h (null = disabled)
   },
 
   // ─── Pool Screening Thresholds ───────────
