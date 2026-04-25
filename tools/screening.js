@@ -395,6 +395,26 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       if (eligible.length < before) log("screening", `ATH filter removed ${before - eligible.length} pool(s)`);
     }
 
+    // TVL/MC ratio filter — reject pools with disproportionate TVL vs market cap
+    // High ratio often indicates manipulation, dead coins with trapped LP, or low real demand
+    const maxTvlMcapRatio = config.screening.maxTvlMcapRatio;
+    if (maxTvlMcapRatio != null && maxTvlMcapRatio > 0) {
+      const beforeTvlMcap = eligible.length;
+      eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+        const tvl = p.active_tvl;
+        const mcap = p.mcap;
+        if (tvl == null || mcap == null || mcap <= 0) return true; // no data = pass through
+        const ratio = tvl / mcap;
+        if (ratio > maxTvlMcapRatio) {
+          log("screening", "TVL/MC filter: dropped " + p.name + " — TVL/MC " + ratio.toFixed(2) + " > " + maxTvlMcapRatio);
+          pushFilteredReason(filteredOut, p, "TVL/MC ratio " + ratio.toFixed(2) + " > " + maxTvlMcapRatio);
+          return false;
+        }
+        return true;
+      }));
+      if (eligible.length < beforeTvlMcap) log("screening", "TVL/MC ratio filter removed " + (beforeTvlMcap - eligible.length) + " pool(s)");
+    }
+
     // Drop any pools whose creator is on the dev blocklist (caught via advanced-info)
     const before = eligible.length;
     const filtered = eligible.filter((p) => {
