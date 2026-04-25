@@ -203,7 +203,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             tools: getToolsForRole(agentType, goal),
             tool_choice: toolChoice,
             temperature: config.llm.temperature,
-            max_tokens: maxOutputTokens ?? config.llm.maxTokens,
+            max_completion_tokens: maxOutputTokens ?? config.llm.maxTokens,
           });
         } catch (error) {
           if (providerMode === "system" && isSystemRoleError(error)) {
@@ -217,6 +217,12 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             toolChoice = "auto";
             log("agent", "Provider rejected tool_choice=required — retrying with tool_choice=auto");
             attempt -= 1;
+            continue;
+          }
+          if (error?.status === 401 && attempt < 2) {
+            const wait = (attempt + 1) * 2000;
+            log("agent", `401 auth error (intermittent) — retrying in ${wait / 1000}s (attempt ${attempt + 1}/3)`);
+            await new Promise((r) => setTimeout(r, wait));
             continue;
           }
           throw error;
