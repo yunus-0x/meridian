@@ -208,8 +208,15 @@ export async function discoverPools({
 
   const condensed = rawPools.map(condensePool);
 
+  // Drop pools where fee/TVL is below threshold after condensing — the API filter passes them but
+  // the response fields can come back as 0 or near-zero (known API quirk on short timeframes).
+  const minFee = config.screening.minFeeActiveTvlRatio ?? 0;
+  const preBlacklist = condensed.filter((p) => p.fee_active_tvl_ratio >= minFee);
+  if (preBlacklist.length < condensed.length)
+    log("screening", `Dropped ${condensed.length - preBlacklist.length} pool(s) below fee/TVL threshold (${minFee}) after condensing`);
+
   // Hard-filter blacklisted tokens and blocked deployers (what pool discovery already gave us)
-  let pools = condensed.filter((p) => {
+  let pools = preBlacklist.filter((p) => {
     if (isBlacklisted(p.base?.mint)) {
       log("blacklist", `Filtered blacklisted token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)}) in pool ${p.name}`);
       return false;
@@ -221,7 +228,7 @@ export async function discoverPools({
     return true;
   });
 
-  const filtered = condensed.length - pools.length;
+  const filtered = preBlacklist.length - pools.length;
   if (filtered > 0) log("blacklist", `Filtered ${filtered} pool(s) with blacklisted tokens/devs`);
 
   // If pool discovery didn't supply dev field, batch-fetch from Jupiter for any pools
@@ -270,17 +277,42 @@ export async function discoverPools({
 export async function getTopCandidates({ limit = 10 } = {}) {
   const { config } = await import("../config.js");
   const source = String(config.screening.source || "meteora").toLowerCase();
-  if (!["meteora", "gmgn"].includes(source)) {
-    throw new Error(`Invalid screeningSource: ${config.screening.source}. Use meteora or gmgn.`);
+  if (!["meteora", "gmgn", "both"].includes(source)) {
+    throw new Error(`Invalid screeningSource: ${config.screening.source}. Use meteora, gmgn, or both.`);
   }
-  const discovery = source === "gmgn"
-    ? await discoverGmgnPools({ limit: Math.max(limit, config.gmgn.enrichLimit || 20) })
-    : await discoverPools({ page_size: 50 });
-  let { pools } = discovery;
-  const filteredOut = Array.isArray(discovery.filtered_examples) ? [...discovery.filtered_examples] : [];
+
+  let pools, filteredOut, discovery;
+  if (source === "both") {
+    const [meteoraResult, gmgnResult] = await Promise.allSettled([
+      discoverPools({ page_size: 50 }),
+      discoverGmgnPools({ limit: Math.max(limit, config.gmgn.enrichLimit || 20) }),
+    ]);
+    const meteoraPools = meteoraResult.status === "fulfilled" ? (meteoraResult.value.pools || []) : [];
+    const gmgnPools   = gmgnResult.status   === "fulfilled" ? (gmgnResult.value.pools   || []) : [];
+    if (meteoraResult.status === "rejected") log("screening", `Meteora source failed: ${meteoraResult.reason?.message}`);
+    if (gmgnResult.status   === "rejected") log("screening", `GMGN source failed: ${gmgnResult.reason?.message}`);
+    // Deduplicate by pool address — GMGN entry wins if both sources have the same pool
+    const seen = new Map();
+    for (const p of [...meteoraPools, ...gmgnPools]) {
+      const key = p.pool || p.address;
+      if (key && !seen.has(key)) seen.set(key, p);
+    }
+    pools = Array.from(seen.values());
+    filteredOut = [
+      ...(meteoraResult.status === "fulfilled" && Array.isArray(meteoraResult.value.filtered_examples) ? meteoraResult.value.filtered_examples : []),
+      ...(gmgnResult.status   === "fulfilled" && Array.isArray(gmgnResult.value.filtered_examples)   ? gmgnResult.value.filtered_examples   : []),
+    ];
+    log("screening", `Both sources: ${meteoraPools.length} Meteora + ${gmgnPools.length} GMGN = ${pools.length} unique pools`);
+  } else {
+    discovery = source === "gmgn"
+      ? await discoverGmgnPools({ limit: Math.max(limit, config.gmgn.enrichLimit || 20) })
+      : await discoverPools({ page_size: 50 });
+    pools = discovery.pools;
+    filteredOut = Array.isArray(discovery.filtered_examples) ? [...discovery.filtered_examples] : [];
+  }
 
   // Token blacklist + dev blocklist (Meteora path runs these inside discoverPools; GMGN path does not)
-  if (source === "gmgn") {
+  if (source === "gmgn" || source === "both") {
     const before = pools.length;
     pools = pools.filter((p) => {
       if (isBlacklisted(p.base?.mint)) {
@@ -296,6 +328,20 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       return true;
     });
     if (pools.length < before) log("blacklist", `GMGN: filtered ${before - pools.length} blacklisted/blocked pool(s)`);
+  }
+
+  // Hard-filter by minimum pool base fee %
+  if (config.screening.minPoolFeePct > 0) {
+    const before = pools.length;
+    pools = pools.filter((p) => {
+      const feePct = Number(p.fee_pct ?? 0);
+      if (feePct < config.screening.minPoolFeePct) {
+        pushFilteredReason(filteredOut, p, `fee_pct ${feePct}% < minPoolFeePct ${config.screening.minPoolFeePct}%`);
+        return false;
+      }
+      return true;
+    });
+    if (pools.length < before) log("screening", `minPoolFeePct filter removed ${before - pools.length} pool(s) below ${config.screening.minPoolFeePct}% fee`);
   }
 
   // Exclude pools where the wallet already has an open position
@@ -329,6 +375,18 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     .sort((a, b) => scoreCandidate(b) - scoreCandidate(a))
     .slice(0, limit);
 
+  if (config.screening.maxVolatility != null) {
+    const maxVol = Number(config.screening.maxVolatility);
+    const before = eligible.length;
+    eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+      if (p.volatility == null || p.volatility <= maxVol) return true;
+      log("screening", `Volatility filter: dropped ${p.name} — volatility ${p.volatility} > ${maxVol}`);
+      pushFilteredReason(filteredOut, p, `volatility ${p.volatility} > maxVolatility ${maxVol}`);
+      return false;
+    }));
+    if (eligible.length < before) log("screening", `maxVolatility filter removed ${before - eligible.length} pool(s) above ${maxVol}`);
+  }
+
   if (config.screening.avoidPvpSymbols && eligible.length > 0) {
     await enrichPvpRisk(eligible);
     if (config.screening.blockPvpSymbols) {
@@ -344,7 +402,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
 
   // Enrich with OKX data — advanced info (risk/bundle/sniper) + ATH price (no API key required)
   // Skipped for GMGN: bundler/bot/wash data already sourced from GMGN pipeline
-  if (source !== "gmgn" && eligible.length > 0) {
+  if (source === "meteora" && eligible.length > 0) {
     const { getAdvancedInfo, getPriceInfo, getClusterList, getRiskFlags } = await import("./okx.js");
     const okxResults = await Promise.allSettled(
       eligible.map(async (p) => {
@@ -427,6 +485,22 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       if (eligible.length < before) log("screening", `ATH filter removed ${before - eligible.length} pool(s)`);
     }
 
+    // Phishing/suspicious holder filter
+    const maxPhishing = config.screening.maxPhishingPct;
+    if (maxPhishing != null) {
+      const before = eligible.length;
+      eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+        if (p.suspicious_pct == null) return true;
+        if (p.suspicious_pct > maxPhishing) {
+          log("screening", `Phishing filter: dropped ${p.name} — ${p.suspicious_pct}% suspicious (limit: ${maxPhishing}%)`);
+          pushFilteredReason(filteredOut, p, `${p.suspicious_pct}% suspicious > ${maxPhishing}% limit`);
+          return false;
+        }
+        return true;
+      }));
+      if (eligible.length < before) log("screening", `Phishing filter removed ${before - eligible.length} pool(s)`);
+    }
+
     // Drop any pools whose creator is on the dev blocklist (caught via advanced-info)
     const before = eligible.length;
     const filtered = eligible.filter((p) => {
@@ -482,10 +556,10 @@ export async function getTopCandidates({ limit = 10 } = {}) {
 
   return {
     candidates: eligible,
-    total_screened: discovery.total ?? pools.length,
+    total_screened: discovery?.total ?? pools.length,
     source,
     filtered_examples: filteredOut.slice(0, 3),
-    stage_counts: discovery.stage_counts ? { ranked: discovery.total, ...discovery.stage_counts } : null,
+    stage_counts: discovery?.stage_counts ? { ranked: discovery.total, ...discovery.stage_counts } : null,
     all_filtered: filteredOut,
   };
 }

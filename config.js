@@ -90,6 +90,8 @@ export const config = {
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
     athFilterPct:       u.athFilterPct       ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
+    maxPhishingPct:     u.maxPhishingPct     ?? null, // max suspicious/phishing holder % (OKX suspiciousHoldingPercent)
+    minPoolFeePct:      u.minPoolFeePct      ?? 0,    // minimum pool base fee % (e.g. 10 = 10%). 0 = disabled
   },
 
   gmgn: {
@@ -252,10 +254,10 @@ export const config = {
     rsiLength: indicatorUserConfig.rsiLength ?? 2,
     intervals: Array.isArray(indicatorUserConfig.intervals)
       ? indicatorUserConfig.intervals
-      : ["5_MINUTE"],
+      : ["1_HOUR", "4_HOUR"],
     candles: indicatorUserConfig.candles ?? 298,
     rsiOversold: indicatorUserConfig.rsiOversold ?? 30,
-    rsiOverbought: indicatorUserConfig.rsiOverbought ?? 80,
+    rsiOverbought: indicatorUserConfig.rsiOverbought ?? 90,
     requireAllIntervals: indicatorUserConfig.requireAllIntervals ?? false,
   },
 };
@@ -316,6 +318,7 @@ export function reloadScreeningThresholds() {
     if (fresh.avoidPvpSymbols   !== undefined) s.avoidPvpSymbols = fresh.avoidPvpSymbols;
     if (fresh.blockPvpSymbols   !== undefined) s.blockPvpSymbols = fresh.blockPvpSymbols;
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
+    if (fresh.maxPhishingPct    !== undefined) s.maxPhishingPct = fresh.maxPhishingPct;
     if (fresh.allowedLaunchpads !== undefined) s.allowedLaunchpads = fresh.allowedLaunchpads;
     if (fresh.blockedLaunchpads !== undefined) s.blockedLaunchpads = fresh.blockedLaunchpads;
   } catch { /* ignore */ }

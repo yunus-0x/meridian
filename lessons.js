@@ -256,7 +256,7 @@ function derivLesson(perf) {
   }
 
   return {
-    id: Date.now(),
+    id: Date.now() * 1000 + Math.floor(Math.random() * 1000),
     rule,
     tags,
     outcome,
@@ -419,7 +419,7 @@ export function evolveThresholds(perfData, config) {
   // Log a lesson summarizing the evolution
   const data = load();
   data.lessons.push({
-    id: Date.now(),
+    id: Date.now() * 1000 + Math.floor(Math.random() * 1000),
     rule: `[AUTO-EVOLVED @ ${perfData.length} positions] ${Object.entries(changes).map(([k, v]) => `${k}=${v}`).join(", ")} — ${Object.values(rationale).join("; ")}`,
     tags: ["evolution", "config_change"],
     outcome: "manual",
@@ -476,7 +476,7 @@ export function addLesson(rule, tags = [], { pinned = false, role = null } = {})
   if (!safeRule) return;
   const data = load();
   const lesson = {
-    id: Date.now(),
+    id: Date.now() * 1000 + Math.floor(Math.random() * 1000),
     rule: safeRule,
     tags,
     outcome: "manual",

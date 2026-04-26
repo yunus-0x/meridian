@@ -221,7 +221,57 @@ Not required for normal operation.
 
 ---
 
+## Active Strategy
+
+**Medium-term 3–5 hour holds.** No chart indicators (RSI, SuperTrend, MACD, ATH all off). Entry based on fundamentals: fee/TVL, organic score, volume, smart wallet presence, narrative. Exits via trailing TP (4%/2%), hard TP (+18%), stop-loss (−15%), OOR (30 min), yield-check (after 240 min). Deploy size: 0.2 SOL fixed, max 3 positions.
+
+The screener strategy is defined in `prompts/screener-strategy.md` — edit that file to change strategy behaviour.
+
+---
+
+## Deploy Report Format
+
+Every time a trade is opened, the agent must report in this exact format:
+
+```
+🚀 DEPLOYED
+
+<pool name>
+<pool address>
+
+◎ <amount> SOL | <strategy> | bin <active_bin>
+Range: <minPrice> → <maxPrice>
+Range cover: <downside%> downside | <upside%> upside | <total%> total
+
+MARKET
+Fee/TVL: <x>%
+Volume: $<x>
+TVL: $<x>
+Volatility: <x>
+Organic: <x>
+Mcap: $<x>
+Age: <x>h
+
+AUDIT
+Top10: <x>%
+Bots: <x>%
+Fees paid: <x> SOL
+Smart wallets: <names or none>
+
+RISK
+OKX: Risk level <x>, Bundle <x>%, Sniper <x>%, Rugpull YES/NO, Wash YES/NO
+(if OKX unavailable: "OKX: unavailable")
+
+WHY THIS WON
+3-5 sentences. Must reference specific threshold values cleared, standout metrics,
+pool memory if relevant, and primary risk.
+```
+
+This format is enforced in the screening prompt in `index.js` (the STEPS section). If it ever reverts, restore it there.
+
+---
+
 ## Known Issues / Tech Debt
 
-- `lessons.js evolveThresholds()` evolves `maxVolatility` + `minFeeTvlRatio` (wrong key names — should be `minFeeActiveTvlRatio`; `maxVolatility` doesn't exist in config at all). The evolution is a no-op for those keys.
+- `lessons.js evolveThresholds()` correctly evolves `maxVolatility`, `minFeeActiveTvlRatio`, and `minOrganic` — these key names match `config.screening` and are working. (Old note said this was a no-op — it was fixed and is now accurate.)
 - `get_wallet_positions` tool (dlmm.js) is in definitions.js but not in MANAGER_TOOLS or SCREENER_TOOLS — only available in GENERAL role.

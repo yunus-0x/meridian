@@ -168,6 +168,24 @@ export function recordPoolDeploy(poolAddress, deployData) {
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
   }
 
+  // Set cooldown after stop-loss close — token is in a bad state, don't re-enter
+  const isStopLoss = deploy.close_reason && (
+    deploy.close_reason.toLowerCase().includes("stop loss") ||
+    deploy.close_reason.toLowerCase().includes("stop-loss") ||
+    deploy.close_reason.toLowerCase().includes("emergency")
+  );
+  if (isStopLoss) {
+    const slCooldownHours = 8;
+    const poolCooldownUntil = setPoolCooldown(entry, slCooldownHours, "stop-loss close");
+    log("pool-memory", `Cooldown set for ${entry.name} until ${poolCooldownUntil} (stop-loss close)`);
+    if (entry.base_mint) {
+      const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, slCooldownHours, "stop-loss close");
+      if (mintCooldownUntil) {
+        log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (stop-loss close)`);
+      }
+    }
+  }
+
   const oorTriggerCount = config.management.oorCooldownTriggerCount ?? 3;
   const oorCooldownHours = config.management.oorCooldownHours ?? 12;
   const recentDeploys = entry.deploys.slice(-oorTriggerCount);

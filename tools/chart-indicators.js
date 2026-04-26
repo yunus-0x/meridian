@@ -18,7 +18,7 @@ function normalizeIntervals(intervals) {
   const list = Array.isArray(intervals) ? intervals : DEFAULT_INTERVALS;
   return list
     .map((value) => String(value || "").trim().toUpperCase())
-    .filter((value) => value === "5_MINUTE" || value === "15_MINUTE");
+    .filter((value) => ["5_MINUTE", "15_MINUTE", "1_HOUR", "4_HOUR"].includes(value));
 }
 
 function safeNum(value) {
@@ -34,6 +34,7 @@ function buildSignalSummary(payload) {
   const bollinger = latest?.bollinger || {};
   const supertrend = latest?.supertrend || {};
   const fibonacciLevels = latest?.fibonacci?.levels || {};
+  const macd = latest?.macd || {};
   return {
     close: safeNum(candle.close),
     previousClose: safeNum(previousCandle.close),
@@ -48,6 +49,9 @@ function buildSignalSummary(payload) {
     fib50: safeNum(fibonacciLevels["0.500"]),
     fib618: safeNum(fibonacciLevels["0.618"]),
     fib786: safeNum(fibonacciLevels["0.786"]),
+    macdLine: safeNum(macd.macd ?? macd.value ?? macd.line),
+    macdSignal: safeNum(macd.signal),
+    macdHistogram: safeNum(macd.histogram),
   };
 }
 
@@ -200,6 +204,22 @@ function evaluatePreset(side, preset, payload) {
               crossedDown(summary.fib50) ||
               crossedDown(summary.fib786),
             reason: "Price rejected below a key Fibonacci level",
+            signal: summary,
+          };
+    case "supertrend_rsi_momentum":
+      // Entry: SuperTrend green (price above bullish line) + RSI >= overbought (strong impulse)
+      // Exit: RSI cycled back up to >= overbought after dipping below oversold (full cycle = fees collected)
+      return side === "entry"
+        ? {
+            confirmed:
+              (summary.supertrendBreakUp || (summary.supertrendDirection === "bullish" && summary.close != null && summary.supertrendValue != null && summary.close >= summary.supertrendValue)) &&
+              rsi != null && rsi >= overbought,
+            reason: `SuperTrend bullish + RSI ${rsi ?? "n/a"} >= ${overbought}`,
+            signal: summary,
+          }
+        : {
+            confirmed: rsi != null && rsi >= overbought,
+            reason: `RSI ${rsi ?? "n/a"} >= ${overbought} (cycled back to overbought — fee collection window closed)`,
             signal: summary,
           };
     default:

@@ -191,7 +191,8 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           volatility: { type: "number", description: "Pool volatility at deploy time" },
           fee_tvl_ratio: { type: "number", description: "fee/TVL ratio at deploy time" },
           organic_score: { type: "number", description: "Base token organic score at deploy time" },
-          initial_value_usd: { type: "number", description: "Estimated USD value being deployed" }
+          initial_value_usd: { type: "number", description: "Estimated USD value being deployed" },
+          entry_reason: { type: "string", description: "Full deploy report. Use this exact format (plain text, no markdown):\n\nMARKET\nFee/TVL: X%\nVolume: $X\nTVL: $X\nVolatility: X\nOrganic: X\nMcap: $X\nAge: Xh\n\nAUDIT\nTop10: X%\nBots: X%\nFees paid: X SOL\nSmart wallets: names or none\n\nRISK\nOKX: Risk level X, Bundle X%, Sniper X%, Rugpull YES/NO, Wash YES/NO\n\nWHY THIS WON\n3-5 sentences referencing specific thresholds cleared, standout metrics, pool memory, and primary risk." }
         },
         required: ["pool_address"]
       }
@@ -967,20 +968,19 @@ Returns individual closed positions with PnL, fees, strategy, hold time, and clo
     type: "function",
     function: {
       name: "get_pool_memory",
-      description: `Check your deploy history for a pool BEFORE deploying.
-Returns all past deploys, PnL, win rate, and any notes you've added.
+      description: `Check deploy history for a pool before deploying. Returns past deploys, PnL, win rate, and notes.
 
-Call this tool before deploying to any pool — you may have been here before and it didn't work.
-Also useful during screening to skip pools with a bad track record.`,
+IMPORTANT: pool_address must be a plain base58 string with no extra fields, quotes, or nesting.`,
       parameters: {
         type: "object",
         properties: {
           pool_address: {
             type: "string",
-            description: "The pool address to look up"
+            description: "Pool address as a plain base58 string, e.g. \"AbCd1234...\""
           }
         },
-        required: ["pool_address"]
+        required: ["pool_address"],
+        additionalProperties: false
       }
     }
   },

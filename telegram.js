@@ -385,8 +385,20 @@ async function poll(onMessage) {
   }
 }
 
-export function startPolling(onMessage) {
+export async function startPolling(onMessage) {
   if (!TOKEN) return;
+  // Drain any queued updates accumulated during downtime so they don't replay
+  try {
+    const res = await fetch(`${BASE}/getUpdates?offset=-1&timeout=0`, { signal: AbortSignal.timeout(5000) });
+    if (res.ok) {
+      const data = await res.json();
+      const updates = data.result || [];
+      if (updates.length > 0) {
+        _offset = updates[updates.length - 1].update_id + 1;
+        log("telegram", `Drained ${updates.length} queued update(s) on startup (offset → ${_offset})`);
+      }
+    }
+  } catch { /* non-fatal — proceed with offset 0 */ }
   _polling = true;
   poll(onMessage); // fire-and-forget
   log("telegram", "Bot polling started");
@@ -397,34 +409,33 @@ export function stopPolling() {
 }
 
 // ─── Notification helpers ────────────────────────────────────────
-export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee }) {
-  if (hasActiveLiveMessage()) return;
-  const priceStr = priceRange
-    ? `Price range: ${priceRange.min < 0.0001 ? priceRange.min.toExponential(3) : priceRange.min.toFixed(6)} – ${priceRange.max < 0.0001 ? priceRange.max.toExponential(3) : priceRange.max.toFixed(6)}\n`
-    : "";
+export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee, entryReason }) {
   const coverageStr = rangeCoverage
     ? `Range cover: ${fmtPct(rangeCoverage.downside_pct)} downside | ${fmtPct(rangeCoverage.upside_pct)} upside | ${fmtPct(rangeCoverage.width_pct)} total\n`
     : "";
   const poolStr = (binStep || baseFee)
     ? `Bin step: ${binStep ?? "?"}  |  Base fee: ${baseFee != null ? baseFee + "%" : "?"}\n`
     : "";
+  const reportStr = entryReason ? `\n${entryReason}\n` : "";
   await sendHTML(
     `✅ <b>Deployed</b> ${pair}\n` +
     `Amount: ${amountSol} SOL\n` +
-    priceStr +
     coverageStr +
     poolStr +
     `Position: <code>${position?.slice(0, 8)}...</code>\n` +
-    `Tx: <code>${tx?.slice(0, 16)}...</code>`
+    `Tx: <code>${tx?.slice(0, 16)}...</code>` +
+    reportStr
   );
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlPct }) {
+export async function notifyClose({ pair, pnlUsd, pnlPct, reason }) {
   if (hasActiveLiveMessage()) return;
   const sign = pnlUsd >= 0 ? "+" : "";
+  const reasonLine = reason ? `\nReason: ${reason}` : "";
   await sendHTML(
     `🔒 <b>Closed</b> ${pair}\n` +
-    `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)`
+    `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)` +
+    reasonLine
   );
 }
 

@@ -500,7 +500,7 @@ function getDlmmInstructionDiscriminators(serialized) {
 const poolCache = new Map();
 const poolMetadataCache = new Map();
 
-async function getPool(poolAddress) {
+export async function getPool(poolAddress) {
   const key = poolAddress.toString();
   if (!poolCache.has(key)) {
     const { DLMM } = await getDLMM();
@@ -580,7 +580,7 @@ export async function deployPosition({
 }) {
   pool_address = normalizeMint(pool_address);
   const activeStrategy = strategy || config.strategy.strategy;
-  let activeBinsBelow = bins_below ?? config.strategy.binsBelow;
+  let activeBinsBelow = bins_below ?? config.strategy.minBinsBelow;
   let activeBinsAbove = bins_above ?? 0;
 
   if (isPoolOnCooldown(pool_address)) {
@@ -1440,7 +1440,7 @@ export async function searchPools({ query, limit = 10 }) {
 }
 
 // ─── Claim Fees ────────────────────────────────────────────────
-export async function claimFees({ position_address }) {
+export async function claimFees({ position_address, fees_usd }) {
   position_address = normalizeMint(position_address);
   if (process.env.DRY_RUN === "true") {
     return { dry_run: true, would_claim: position_address, message: "DRY RUN — no transaction sent" };
@@ -1476,7 +1476,7 @@ export async function claimFees({ position_address }) {
     }
     log("claim", `SUCCESS txs: ${txHashes.join(", ")}`);
     _positionsCacheAt = 0; // invalidate cache after claim
-    recordClaim(position_address);
+    recordClaim(position_address, fees_usd ?? null);
 
     return { success: true, position: position_address, txs: txHashes, base_mint: pool.lbPair.tokenXMint.toString() };
   } catch (error) {
