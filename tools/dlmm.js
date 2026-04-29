@@ -575,9 +575,11 @@ export async function deployPosition({
   base_fee,
   volatility,
   fee_tvl_ratio,
+  fee_active_tvl_ratio, // alias — get_top_candidates returns this name
   organic_score,
   initial_value_usd,
 }) {
+  const resolvedFeeTvlRatio = fee_tvl_ratio ?? fee_active_tvl_ratio ?? null;
   pool_address = normalizeMint(pool_address);
   const activeStrategy = strategy || config.strategy.strategy;
   let activeBinsBelow = bins_below ?? config.strategy.minBinsBelow;
@@ -772,7 +774,7 @@ export async function deployPosition({
           bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
           bin_step,
           volatility,
-          fee_tvl_ratio,
+          fee_tvl_ratio: resolvedFeeTvlRatio,
           organic_score,
           amount_sol: finalAmountY,
           amount_x: finalAmountX,
@@ -906,7 +908,7 @@ export async function deployPosition({
       bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
       bin_step,
       volatility,
-      fee_tvl_ratio,
+      fee_tvl_ratio: resolvedFeeTvlRatio,
       organic_score,
       amount_sol: finalAmountY,
       amount_x: finalAmountX,
@@ -1220,7 +1222,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
     const binDataByPool = {};
     const pnlMaps = await Promise.all(pools.map(pool => fetchDlmmPnlForPool(pool.poolAddress, walletAddress)));
     pools.forEach((pool, i) => { binDataByPool[pool.poolAddress] = pnlMaps[i]; });
-    const lpAgentByPosition = await fetchLpAgentOpenPositions(walletAddress);
+    const lpAgentByPosition = {}; // Meteora PnL only — LPAgent excluded (undercounts claimed fees)
 
     const positions = [];
     for (const pool of pools) {
@@ -1337,6 +1339,12 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
           pnl_pct_derived:    derivedPnlPct != null ? Math.round(derivedPnlPct * 100) / 100 : null,
           pnl_pct_diff:       pnlPctDiff != null ? Math.round(pnlPctDiff * 100) / 100 : null,
           pnl_pct_suspicious: !!pnlPctSuspicious,
+          fee_pnl_pct: (() => {
+            const deposit = lpData ? safeNum(lpData.inputValue) : 0;
+            if (deposit <= 0) return null;
+            const fees = safeNum(lpData.unCollectedFee) + safeNum(lpData.collectedFee);
+            return Math.round((fees / deposit) * 10000) / 100;
+          })(),
           unclaimed_fees_true_usd: lpData
             ? Math.round(safeNum(lpData.unCollectedFee) * 10000) / 10000
             : binData
@@ -1348,6 +1356,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
           age_minutes:        binData?.createdAt ? Math.floor((Date.now() - binData.createdAt * 1000) / 60000) : ageFromState,
           minutes_out_of_range: minutesOutOfRange(positionAddress),
           instruction:        tracked?.instruction ?? null,
+          strategy:           tracked?.strategy    ?? null,
         });
       }
     }
@@ -1643,10 +1652,10 @@ export async function closePosition({ position_address, reason }) {
             base_mint: livePosition?.base_mint || null,
             strategy: tracked.strategy,
             bin_range: tracked.bin_range,
-            bin_step: tracked.bin_step || null,
-            volatility: tracked.volatility || null,
-            fee_tvl_ratio: tracked.fee_tvl_ratio || null,
-            organic_score: tracked.organic_score || null,
+            bin_step: tracked.bin_step ?? null,
+            volatility: tracked.volatility ?? null,
+            fee_tvl_ratio: tracked.fee_tvl_ratio ?? null,
+            organic_score: tracked.organic_score ?? null,
             amount_sol: tracked.amount_sol,
             fees_earned_usd: feesUsd,
             final_value_usd: finalValueUsd,
@@ -1918,10 +1927,10 @@ export async function closePosition({ position_address, reason }) {
         base_mint: pool.lbPair.tokenXMint.toString(),
         strategy: tracked.strategy,
         bin_range: tracked.bin_range,
-        bin_step: tracked.bin_step || null,
-        volatility: tracked.volatility || null,
-        fee_tvl_ratio: tracked.fee_tvl_ratio || null,
-        organic_score: tracked.organic_score || null,
+        bin_step: tracked.bin_step ?? null,
+        volatility: tracked.volatility ?? null,
+        fee_tvl_ratio: tracked.fee_tvl_ratio ?? null,
+        organic_score: tracked.organic_score ?? null,
         amount_sol: tracked.amount_sol,
         fees_earned_usd: feesUsd,
         final_value_usd: finalValueUsd,
@@ -1987,12 +1996,19 @@ export async function closePosition({ position_address, reason }) {
       base_mint: pool.lbPair.tokenXMint.toString(),
     };
   } catch (error) {
+    // Position already gone on-chain (e.g. closed externally) — mark closed in state so
+    // the management cycle stops trying to close it on every tick.
+    if (error.message?.includes("AccountOwnedByWrongProgram") || error.message?.includes("account is owned by a different program")) {
+      log("close_warn", `Position ${position_address} no longer exists on-chain — marking closed in state`);
+      recordClose(position_address, "auto-closed: account no longer exists on-chain");
+      return { success: false, already_closed: true, error: "Position no longer exists on-chain — marked as closed" };
+    }
     log("close_error", error.message);
     return { success: false, error: error.message };
   }
 }
 
-// ─── Helpers ──────────────────────────────────────────────────
+// ─── Helpers ────────────────────────────────────��─────────────
 async function lookupPoolForPosition(position_address, walletAddress) {
   // Check state registry first (fast path)
   const tracked = getTrackedPosition(position_address);

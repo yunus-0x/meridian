@@ -1,14 +1,16 @@
 import "./envcrypt.js";
+import Anthropic from "@anthropic-ai/sdk";
 import cron from "node-cron";
 import readline from "readline";
+import { execSync } from "child_process";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
-import { getWalletBalances } from "./tools/wallet.js";
+import { getWalletBalances, swapToken } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
-import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
+import { evolveThresholds, getPerformanceSummary, getLessonsForPrompt, getPerformanceHistory } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import {
   startPolling,
@@ -76,6 +78,210 @@ function buildPrompt() {
 // ═══════════════════════════════════════════
 let _cronTasks = [];
 let _managementBusy = false; // prevents overlapping management cycles
+
+const SWAP_SKIP_MINTS = new Set([
+  "So11111111111111111111111111111111111111112", // wrapped SOL
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
+]);
+
+// Swap a single known mint back to SOL — used after close to swap only the position's base token.
+async function swapMintToSol(mint) {
+  if (!mint) return null;
+  const SKIP = new Set([...SWAP_SKIP_MINTS, config.tokens.SOL, config.tokens.USDC].filter(Boolean));
+  if (SKIP.has(mint)) return null;
+  let token = null;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    if (attempt > 0) await new Promise(r => setTimeout(r, 5000));
+    const balances = await getWalletBalances({});
+    if (balances?.error) continue;
+    token = (balances.tokens || []).find(t => t.mint === mint && t.balance > 0);
+    if (token) break;
+  }
+  if (!token) { log("executor_warn", `swapMintToSol: ${mint.slice(0, 8)} not found in wallet after 30s`); return null; }
+  try {
+    log("executor", `Auto-swapping ${token.symbol || mint.slice(0, 8)} (${token.usd != null ? `$${token.usd.toFixed(2)}` : `${token.balance} tokens`}) back to SOL`);
+    const swapResult = await swapToken({ input_mint: mint, output_mint: "SOL", amount: token.balance });
+    if (swapResult?.success) return { symbol: token.symbol || mint.slice(0, 8), success: true, sol: swapResult.amount_out };
+    log("executor_warn", `Auto-swap of ${token.symbol || mint.slice(0, 8)} failed: ${swapResult?.error}`);
+    return { symbol: token.symbol || mint.slice(0, 8), success: false, error: swapResult?.error };
+  } catch (e) {
+    log("executor_warn", `Auto-swap of ${token.symbol || mint.slice(0, 8)} threw: ${e.message}`);
+    return { symbol: token.symbol || mint.slice(0, 8), success: false, error: e.message };
+  }
+}
+
+// Safety sweep — only used by the management cycle startup to catch tokens missed by prior closes.
+// High threshold ($0.50) to avoid touching dust from old positions.
+async function swapAllTokensToSol() {
+  // Also skip config-defined SOL/USDC mints in case they differ
+  const skipMints = new Set([...SWAP_SKIP_MINTS, config.tokens.SOL, config.tokens.USDC].filter(Boolean));
+  let tokens = [];
+  for (let attempt = 0; attempt < 6; attempt++) {
+    if (attempt > 0) await new Promise(r => setTimeout(r, 5000));
+    const balances = await getWalletBalances({});
+    if (balances?.error) {
+      log("executor_warn", `getWalletBalances error on attempt ${attempt + 1}: ${balances.error}`);
+      continue;
+    }
+    tokens = (balances.tokens || []).filter(t => !skipMints.has(t.mint) && t.balance > 0 && t.usd != null && t.usd >= 0.50);
+    if (tokens.length > 0) break;
+  }
+  const results = [];
+  for (let ti = 0; ti < tokens.length; ti++) {
+    const token = tokens[ti];
+    if (ti > 0) await new Promise(r => setTimeout(r, 1500));
+    try {
+      log("executor", `Auto-swapping ${token.symbol || token.mint.slice(0, 8)} (${token.usd != null ? `$${token.usd.toFixed(2)}` : `${token.balance} tokens`}) back to SOL`);
+      const swapResult = await swapToken({ input_mint: token.mint, output_mint: "SOL", amount: token.balance });
+      if (swapResult?.success) {
+        results.push({ symbol: token.symbol || token.mint.slice(0, 8), success: true, sol: swapResult.amount_out });
+      } else {
+        log("executor_warn", `Auto-swap of ${token.symbol || token.mint.slice(0, 8)} returned failure: ${swapResult?.error}`);
+        results.push({ symbol: token.symbol || token.mint.slice(0, 8), success: false, error: swapResult?.error || "swap returned failure" });
+      }
+    } catch (e) {
+      log("executor_warn", `Auto-swap of ${token.symbol || token.mint.slice(0, 8)} failed: ${e.message}`);
+      results.push({ symbol: token.symbol || token.mint.slice(0, 8), success: false, error: e.message });
+    }
+  }
+  return results;
+}
+
+// ═══════════════════════════════════════════
+//  CLAUDE CHAT
+// ═══════════════════════════════════════════
+let _anthropic = null;
+function getAnthropicClient() {
+  if (!_anthropic && process.env.ANTHROPIC_API_KEY) {
+    _anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  }
+  return _anthropic;
+}
+
+const _claudeHistory = []; // Claude-specific conversation history
+const MAX_CLAUDE_HISTORY = 20;
+
+async function claudeChat(userMessage, priorHistory = []) {
+  const client = getAnthropicClient();
+  if (!client) throw new Error("ANTHROPIC_API_KEY not set");
+
+  // Gather live bot context
+  const contextLines = [];
+  try {
+    const [wallet, positions] = await Promise.all([
+      getWalletBalances().catch(() => null),
+      getMyPositions({ force: false, silent: true }).catch(() => null),
+    ]);
+    if (wallet && !wallet.error) {
+      contextLines.push(`Wallet: ${wallet.sol} SOL ($${wallet.sol_usd}) | SOL price: $${wallet.sol_price}`);
+    }
+    if (positions?.positions?.length) {
+      const posLines = positions.positions.map((p) =>
+        `  - ${p.pair}: PnL ${p.pnl_pct ?? "?"}% | value $${p.total_value_usd ?? "?"} | ${p.in_range ? "in range" : `OOR ${p.minutes_out_of_range ?? 0}m`}`
+      );
+      contextLines.push(`Open positions (${positions.total_positions}):\n${posLines.join("\n")}`);
+    } else {
+      contextLines.push("Open positions: none");
+    }
+  } catch { /* non-fatal */ }
+
+  contextLines.push(
+    `Config: deploy ${config.management.deployAmountSol} SOL | TP ${config.management.takeProfitPct}% | SL ${config.management.stopLossPct}% | max ${config.risk.maxPositions} positions | trailing TP ${config.management.trailingTakeProfit ? "on" : "off"}`
+  );
+
+  // Trade history — all-time summary + per-day breakdown + full recent list
+  const tradeHistoryLines = [];
+  try {
+    const summary = getPerformanceSummary();
+    if (summary) {
+      tradeHistoryLines.push(
+        `All-time: ${summary.total_positions_closed} closed | win rate ${summary.win_rate_pct}% | total PnL $${summary.total_pnl_usd} | avg ${summary.avg_pnl_pct}%`
+      );
+    }
+
+    // Per-day breakdown for last 7 days
+    const allHistory = getPerformanceHistory({ hours: 24 * 365, limit: 500 });
+    if (allHistory.positions.length) {
+      // Group by calendar date (UTC)
+      const byDay = {};
+      for (const t of allHistory.positions) {
+        const day = (t.closed_at || "").slice(0, 10);
+        if (!day) continue;
+        if (!byDay[day]) byDay[day] = [];
+        byDay[day].push(t);
+      }
+      const days = Object.keys(byDay).sort().reverse().slice(0, 7);
+      if (days.length) {
+        const dayLines = days.map((day) => {
+          const trades = byDay[day];
+          const pnl = trades.reduce((s, t) => s + (t.pnl_usd ?? 0), 0);
+          const wins = trades.filter((t) => t.pnl_usd > 0).length;
+          const sign = pnl >= 0 ? "+" : "";
+          return `  ${day}: ${trades.length} trades | ${sign}$${pnl.toFixed(2)} | ${wins}W/${trades.length - wins}L`;
+        });
+        tradeHistoryLines.push(`Daily breakdown (last 7 days):\n${dayLines.join("\n")}`);
+      }
+
+      // Full individual trade list (most recent first, up to 100)
+      const recent = [...allHistory.positions].reverse().slice(0, 100);
+      const tradeLines = recent.map((t) => {
+        const sign = t.pnl_usd >= 0 ? "+" : "";
+        const date = (t.closed_at || "").slice(0, 10);
+        return `  [${date}] ${t.pool_name || t.pool?.slice(0, 8)}: ${sign}$${t.pnl_usd} (${sign}${t.pnl_pct}%) | ${t.close_reason || "closed"} | ${t.minutes_held ?? "?"}m`;
+      });
+      tradeHistoryLines.push(`Trade history (${recent.length} most recent):\n${tradeLines.join("\n")}`);
+    }
+  } catch { /* non-fatal */ }
+
+  // Learned lessons
+  const lessonsText = getLessonsForPrompt({ agentType: "GENERAL", maxLessons: 10 });
+
+  const systemPrompt = [
+    "You are the AI assistant for Meridian, an autonomous DLMM liquidity provider agent running on Solana's Meteora protocol.",
+    "You help the user manage their LP positions, understand market conditions, and optimize their DeFi strategy.",
+    "You are knowledgeable about DLMM mechanics, bin ranges, fee/TVL ratios, impermanent loss, and Solana DeFi.",
+    "Keep responses concise and practical — this is a Telegram chat interface.",
+    "You are advisory — you explain, analyze, and recommend. You cannot execute trades or config changes directly. If the user wants to act, tell them to send the command (e.g. 'deploy', 'close position 1', 'set SL to -5%').",
+    "",
+    "=== LIVE BOT STATE ===",
+    ...contextLines,
+    ...(tradeHistoryLines.length ? ["", "=== TRADE HISTORY ===", ...tradeHistoryLines] : []),
+    ...(lessonsText ? ["", "=== LEARNED LESSONS ===", lessonsText] : []),
+    ...(() => {
+      const lines = priorHistory
+        .filter(m => (m.role === "user" || m.role === "assistant") && typeof m.content === "string" && m.content.trim())
+        .slice(-10)
+        .map(m => `${m.role === "user" ? "User" : "Bot"}: ${m.content.trim()}`);
+      return lines.length ? ["", "=== RECENT CONVERSATION ===", ...lines] : [];
+    })(),
+  ].join("\n");
+
+  // Build messages including history
+  const messages = [
+    ..._claudeHistory.slice(-MAX_CLAUDE_HISTORY),
+    { role: "user", content: userMessage },
+  ];
+
+  const response = await client.messages.create({
+    model: config.llm.claudeModel,
+    max_tokens: 4096,
+    thinking: { type: "adaptive" },
+    system: systemPrompt,
+    messages,
+  });
+
+  const replyText = response.content.find((b) => b.type === "text")?.text || "(no response)";
+
+  // Store full content array so thinking blocks survive multi-turn
+  _claudeHistory.push({ role: "user", content: userMessage });
+  _claudeHistory.push({ role: "assistant", content: response.content });
+  if (_claudeHistory.length > MAX_CLAUDE_HISTORY) {
+    _claudeHistory.splice(0, _claudeHistory.length - MAX_CLAUDE_HISTORY);
+  }
+
+  return replyText;
+}
+
 let _screeningBusy = false;  // prevents overlapping screening cycles
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
 let _pollTriggeredAt = 0; // epoch ms — cooldown for poller-triggered management
@@ -202,6 +408,10 @@ export async function runManagementCycle({ silent = false } = {}) {
     if (!silent && telegramEnabled()) {
       liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...");
     }
+
+    // Safety sweep — catch any tokens left over from a previous close that weren't swapped
+    swapAllTokensToSol().catch((e) => log("executor_warn", `Token sweep failed: ${e.message}`));
+
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
 
@@ -236,8 +446,8 @@ export async function runManagementCycle({ silent = false } = {}) {
           }
           continue;
         }
-        exitMap.set(p.position, exit.reason);
-        log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
+        exitMap.set(p.position, { action: exit.action, reason: exit.reason });
+        log("state", `Exit alert for ${p.pair} [${exit.action}]: ${exit.reason}`);
       }
     }
 
@@ -247,7 +457,8 @@ export async function runManagementCycle({ silent = false } = {}) {
     for (const p of positionData) {
       // Hard exit — highest priority
       if (exitMap.has(p.position)) {
-        actionMap.set(p.position, { action: "CLOSE", rule: "exit", reason: exitMap.get(p.position) });
+        const exitEntry = exitMap.get(p.position);
+        actionMap.set(p.position, { action: "CLOSE", rule: exitEntry.action, reason: exitEntry.reason });
         continue;
       }
       // Instruction-set — pass to LLM, can't parse in JS
@@ -281,8 +492,9 @@ export async function runManagementCycle({ silent = false } = {}) {
       const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
       let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
       if (p.instruction) line += `\nNote: "${p.instruction}"`;
-      if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
-      if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
+      if (act.action === "CLOSE" && act.rule === "TRAILING_TP") line += `\n⚡ Trailing TP: ${act.reason}`;
+      else if (act.action === "CLOSE" && act.rule && typeof act.rule === "string" && act.rule !== "TRAILING_TP") line += `\n${act.reason}`;
+      else if (act.action === "CLOSE" && act.rule && typeof act.rule === "number") line += `\nRule ${act.rule}: ${act.reason}`;
       if (act.action === "CLAIM") line += `\n→ Claiming fees`;
       return line;
     });
@@ -310,8 +522,8 @@ export async function runManagementCycle({ silent = false } = {}) {
         return [
           `POSITION: ${p.pair} (${p.position})`,
           `  pool: ${p.pool}`,
-          `  action: ${act.action}${act.rule && act.rule !== "exit" ? ` — Rule ${act.rule}: ${act.reason}` : ""}${act.rule === "exit" ? ` — ⚡ Trailing TP: ${act.reason}` : ""}`,
-          `  pnl_pct: ${p.pnl_pct}% | unclaimed_fees: ${cur}${p.unclaimed_fees_usd} | value: ${cur}${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
+          `  action: ${act.action}${act.rule === "TRAILING_TP" ? ` — ⚡ Trailing TP: ${act.reason}` : act.rule && act.reason ? ` — ${act.reason}` : ""}`,
+          `  pnl_pct: ${p.pnl_pct}% | fee_pnl_pct: ${p.fee_pnl_pct ?? "?"}% | unclaimed_fees: ${cur}${p.unclaimed_fees_usd} | value: ${cur}${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
           `  bins: lower=${p.lower_bin} upper=${p.upper_bin} active=${p.active_bin} | oor_minutes: ${p.minutes_out_of_range ?? 0}`,
           p.instruction ? `  instruction: "${p.instruction}"` : null,
         ].filter(Boolean).join("\n");
@@ -761,27 +973,27 @@ Summarize the current portfolio health, total fees earned, and performance of al
             }
             continue;
           }
-          const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
+          const EXIT_COOLDOWN_MS = 60_000; // short cooldown for exit triggers — don't wait the full management interval
           const sinceLastTrigger = Date.now() - _pollTriggeredAt;
-          if (sinceLastTrigger >= cooldownMs) {
+          if (sinceLastTrigger >= EXIT_COOLDOWN_MS) {
             _pollTriggeredAt = Date.now();
             log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} — triggering management`);
             runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Poll-triggered management failed: ${e.message}`));
           } else {
-            log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} — cooldown (${Math.round((cooldownMs - sinceLastTrigger) / 1000)}s left)`);
+            log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} — cooldown (${Math.round((EXIT_COOLDOWN_MS - sinceLastTrigger) / 1000)}s left)`);
           }
           break;
         }
         const closeRule = getDeterministicCloseRule(p, config.management);
         if (closeRule) {
-          const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
+          const EXIT_COOLDOWN_MS = 60_000;
           const sinceLastTrigger = Date.now() - _pollTriggeredAt;
-          if (sinceLastTrigger >= cooldownMs) {
+          if (sinceLastTrigger >= EXIT_COOLDOWN_MS) {
             _pollTriggeredAt = Date.now();
             log("state", `[PnL poll] Deterministic close rule: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason} — triggering management`);
             runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Poll-triggered management failed: ${e.message}`));
           } else {
-            log("state", `[PnL poll] Deterministic close rule: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason} — cooldown (${Math.round((cooldownMs - sinceLastTrigger) / 1000)}s left)`);
+            log("state", `[PnL poll] Deterministic close rule: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason} — cooldown (${Math.round((EXIT_COOLDOWN_MS - sinceLastTrigger) / 1000)}s left)`);
           }
           break;
         }
@@ -837,6 +1049,10 @@ function getDeterministicCloseRule(position, managementConfig) {
   const tracked = getTrackedPosition(position.position);
   const pnlSuspect = (() => {
     if (position.pnl_pct == null) return false;
+    if (position.pnl_pct_suspicious) {
+      log("cron_warn", `Suspect PnL for ${position.pair}: ${position.pnl_pct}% flagged suspicious by sanity check — skipping PnL rules`);
+      return true;
+    }
     if (position.pnl_pct > -90) return false;
     if (tracked?.amount_sol && (position.total_value_usd ?? 0) > 0.01) {
       log("cron_warn", `Suspect PnL for ${position.pair}: ${position.pnl_pct}% but position still has value — skipping PnL rules`);
@@ -846,15 +1062,17 @@ function getDeterministicCloseRule(position, managementConfig) {
   })();
 
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
-    return { action: "CLOSE", rule: 1, reason: "stop loss" };
+    return { action: "CLOSE", rule: 1, reason: `Stop loss: PnL ${position.pnl_pct.toFixed(2)}% <= ${managementConfig.stopLossPct}%` };
   }
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
-    return { action: "CLOSE", rule: 2, reason: "take profit" };
+    return { action: "CLOSE", rule: 2, reason: `Take profit: PnL ${position.pnl_pct.toFixed(2)}% >= ${managementConfig.takeProfitPct}%` };
   }
   if (
     position.active_bin != null &&
     position.upper_bin != null &&
-    position.active_bin > position.upper_bin + managementConfig.outOfRangeBinsToClose
+    position.active_bin > position.upper_bin + managementConfig.outOfRangeBinsToClose &&
+    (managementConfig.outOfRangePumpWaitMinutes <= 0 ||
+      (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangePumpWaitMinutes)
   ) {
     return { action: "CLOSE", rule: 3, reason: "pumped far above range" };
   }
@@ -869,7 +1087,7 @@ function getDeterministicCloseRule(position, managementConfig) {
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
-    (position.age_minutes ?? 0) >= 60
+    (position.age_minutes ?? 0) >= (managementConfig.minAgeBeforeYieldCheck ?? 60)
   ) {
     return { action: "CLOSE", rule: 5, reason: "low yield" };
   }
@@ -913,6 +1131,8 @@ let _ttyInterface = null;
 let _latestCandidates = [];
 let _latestCandidatesAt = null;
 let _pendingInput = null; // { key, page, menuMsgId }
+let _pendingConfirmation = null; // { toolName, toolArgs } — set when agent queues a write action
+let _pendingShellCmd = null;    // string — set when /run <cmd> awaits user confirmation
 
 function setLatestCandidates(candidates = []) {
   _latestCandidates = Array.isArray(candidates) ? candidates : [];
@@ -1340,6 +1560,7 @@ function formatHelpText() {
     "/pool <n> — detailed info for one open position",
     "/close <n> — close one position by index",
     "/closeall — close all open positions",
+    "/swapall — swap all non-SOL tokens in wallet back to SOL",
     "/set <n> <note> — set note/instruction on position",
     "/config — show important runtime config",
     "/settings — button menu for common config",
@@ -1352,6 +1573,10 @@ function formatHelpText() {
     "/hive pull — manual HiveMind pull now",
     "/pause — stop cron cycles",
     "/resume — start cron cycles again",
+    "/logs [n] — tail last n stdout log lines (default 50)",
+    "/errors [n] — tail last n error log lines (default 30)",
+    "/restart — restart the meridian PM2 process",
+    "/run <command> — run a shell command (requires confirmation)",
     "/stop — shut down agent",
   ].join("\n");
 }
@@ -1516,7 +1741,8 @@ async function telegramHandler(msg) {
         const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
         const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
         const oor = !p.in_range ? " ⚠️OOR" : "";
-        return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
+        const strat = p.strategy ? ` [${p.strategy}]` : "";
+        return `${i + 1}. ${p.pair}${strat} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
       });
       await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
@@ -1550,7 +1776,8 @@ async function telegramHandler(msg) {
   if (closeMatch) {
     try {
       const idx = parseInt(closeMatch[1]) - 1;
-      const { positions } = await getMyPositions({ force: true });
+      const posResult = await getMyPositions({ force: true });
+      const positions = posResult?.positions || [];
       if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
       const pos = positions[idx];
       await sendMessage(`Closing ${pos.pair}...`);
@@ -1559,6 +1786,10 @@ async function telegramHandler(msg) {
         const closeTxs = result.close_txs?.length ? result.close_txs : result.txs;
         const claimNote = result.claim_txs?.length ? `\nClaim txs: ${result.claim_txs.join(", ")}` : "";
         await sendMessage(`✅ Closed ${pos.pair}\nPnL: ${config.management.solMode ? "◎" : "$"}${result.pnl_usd ?? "?"} | close txs: ${closeTxs?.join(", ") || "n/a"}${claimNote}`);
+        if (result.base_mint) {
+          const swap = await swapMintToSol(result.base_mint).catch(() => null);
+          if (swap) await sendMessage(`🔄 ${swap.success ? `✅ ${swap.symbol} → ${swap.sol ? swap.sol.toFixed(4) + " SOL" : "SOL"}` : `❌ ${swap.symbol}: ${swap.error}`}`).catch(() => {});
+        }
       } else {
         await sendMessage(`❌ Close failed: ${JSON.stringify(result)}`);
       }
@@ -1568,19 +1799,40 @@ async function telegramHandler(msg) {
 
   if (text === "/closeall") {
     try {
-      const { positions } = await getMyPositions({ force: true });
+      const posResult = await getMyPositions({ force: true });
+      const positions = posResult?.positions || [];
       if (!positions.length) { await sendMessage("No open positions."); return; }
       await sendMessage(`Closing ${positions.length} position(s)...`);
       const results = [];
+      const baseMints = [];
       for (const pos of positions) {
         try {
           const result = await closePosition({ position_address: pos.position });
           results.push(`${pos.pair}: ${result.success ? "closed" : `failed (${result.error || "unknown"})`}`);
+          if (result.success && result.base_mint) baseMints.push({ mint: result.base_mint, pair: pos.pair });
         } catch (error) {
           results.push(`${pos.pair}: failed (${error.message})`);
         }
       }
       await sendMessage(`Close-all finished.\n\n${results.join("\n")}`).catch(() => {});
+      const swapLines = [];
+      for (const { mint, pair } of baseMints) {
+        const swap = await swapMintToSol(mint).catch(() => null);
+        if (swap) swapLines.push(swap.success ? `✅ ${swap.symbol} → ${swap.sol ? swap.sol.toFixed(4) + " SOL" : "SOL"}` : `❌ ${swap.symbol}: ${swap.error}`);
+      }
+      if (swapLines.length) await sendMessage(`🔄 Auto-swapped:\n${swapLines.join("\n")}`).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/swapall") {
+    try {
+      await sendMessage("Scanning wallet for tokens to swap...");
+      const swaps = await swapAllTokensToSol();
+      if (!swaps.length) { await sendMessage("No tokens found to swap (all dust or already SOL)."); return; }
+      await sendMessage(`Swap-all done:\n\n${swaps.map(s => s.success ? `✅ ${s.symbol} → ${s.sol ? s.sol.toFixed(4) + " SOL" : "SOL"}` : `❌ ${s.symbol}: ${s.error}`).join("\n")}`).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -1592,7 +1844,8 @@ async function telegramHandler(msg) {
     try {
       const idx = parseInt(setMatch[1]) - 1;
       const note = setMatch[2].trim();
-      const { positions } = await getMyPositions({ force: true });
+      const posResult = await getMyPositions({ force: true });
+      const positions = posResult?.positions || [];
       if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
       const pos = positions[idx];
       setPositionInstruction(pos.position, note);
@@ -1708,23 +1961,164 @@ async function telegramHandler(msg) {
     return;
   }
 
+  // ─── /logs [n] — tail PM2 stdout log ─────────────────────────────────────
+  const logsMatch = text.match(/^\/logs(?:\s+(\d+))?$/i);
+  if (logsMatch) {
+    try {
+      const n = Math.min(parseInt(logsMatch[1] || "50", 10), 200);
+      const out = execSync(`tail -n ${n} ~/.pm2/logs/meridian-out.log 2>/dev/null || echo "(log file not found)"`, { encoding: "utf8" });
+      const trimmed = out.slice(-3800); // Telegram limit safe
+      await sendMessage(`📋 Last ${n} log lines:\n\n${trimmed || "(empty)"}`).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error reading logs: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  // ─── /errors [n] — tail PM2 stderr log ───────────────────────────────────
+  const errorsMatch = text.match(/^\/errors(?:\s+(\d+))?$/i);
+  if (errorsMatch) {
+    try {
+      const n = Math.min(parseInt(errorsMatch[1] || "30", 10), 200);
+      const out = execSync(`tail -n ${n} ~/.pm2/logs/meridian-error.log 2>/dev/null || echo "(error log not found)"`, { encoding: "utf8" });
+      const trimmed = out.slice(-3800);
+      await sendMessage(`⚠️ Last ${n} error lines:\n\n${trimmed || "(empty)"}`).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error reading error log: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  // ─── /restart — restart PM2 meridian process ─────────────────────────────
+  if (text === "/restart") {
+    _pendingShellCmd = "pm2 restart meridian";
+    await sendMessage("⚠️ Restart meridian PM2 process?\n\nReply yes to confirm or no to cancel.").catch(() => {});
+    return;
+  }
+
+  // ─── /run <command> — execute arbitrary shell command ────────────────────
+  const runMatch = text.match(/^\/run\s+(.+)$/i);
+  if (runMatch) {
+    const cmd = runMatch[1].trim();
+    const BLOCKED_RUN_PATTERNS = [
+      /\brm\s+-[^\s]*r/i,           // rm -rf, rm -r
+      /\bdd\s+if=/i,                 // dd if=... (disk overwrite)
+      /\bmkfs\b/i,                   // format filesystem
+      />\s*\/dev\//i,                // redirect to device
+      /\bshred\b/i,                  // shred files
+      /:\(\)\s*\{.*:\|:.*\}/,        // fork bomb pattern
+      /\bchmod\s+-[^\s]*R.*\//i,     // recursive chmod on /
+      /\bcurl\b.*\|\s*(ba)?sh/i,     // curl|bash download-and-exec
+      /\bwget\b.*\|\s*(ba)?sh/i,     // wget|bash
+    ];
+    const blocked = BLOCKED_RUN_PATTERNS.find(p => p.test(cmd));
+    if (blocked) {
+      await sendMessage(`❌ Command blocked — matches a destructive pattern. Use /restart for restarts or run the command directly on the server.`).catch(() => {});
+      return;
+    }
+    _pendingShellCmd = cmd;
+    await sendMessage(`⚠️ Run shell command:\n\`${cmd}\`\n\nReply yes to confirm or no to cancel.`).catch(() => {});
+    return;
+  }
+
+  // ─── Shell command confirmation ───────────────────────────────────────────
+  if (_pendingShellCmd) {
+    const trimmed = text.trim();
+    const isConfirm = /^(yes|y|confirm|proceed|go|do it|execute|sure|yep|yeah|ok)$/i.test(trimmed);
+    const isCancel = /^(no|n|cancel|stop|abort|nope|nah)$/i.test(trimmed);
+    if (isConfirm || isCancel) {
+      const cmd = _pendingShellCmd;
+      _pendingShellCmd = null;
+      if (isCancel) {
+        await sendMessage("Cancelled.").catch(() => {});
+        return;
+      }
+      try {
+        await sendMessage(`Running: \`${cmd}\`...`).catch(() => {});
+        const out = execSync(cmd, { encoding: "utf8", timeout: 30000, stdio: ["pipe", "pipe", "pipe"] });
+        const result = (out || "(no output)").slice(-3800);
+        await sendMessage(`✅ Done:\n\n${result}`).catch(() => {});
+      } catch (e) {
+        const errOut = (e.stdout || e.stderr || e.message || "unknown error").slice(0, 1000);
+        await sendMessage(`❌ Command failed:\n${errOut}`).catch(() => {});
+      }
+      return;
+    }
+    _pendingShellCmd = null; // non-yes/no clears it
+  }
+
+  // Confirmation reply — user responding to an AI-proposed action
+  if (_pendingConfirmation) {
+    const trimmed = text.trim();
+    const isConfirm = /^(yes|y|confirm|proceed|go|do it|execute|sure|yep|yeah|ok)$/i.test(trimmed);
+    const isCancel = /^(no|n|cancel|stop|abort|nope|nah)$/i.test(trimmed);
+    if (isConfirm || isCancel) {
+      if (isCancel) {
+        _pendingConfirmation = null;
+        await sendMessage("Cancelled.").catch(() => {});
+        return;
+      }
+      const { toolName, toolArgs } = _pendingConfirmation;
+      _pendingConfirmation = null;
+      busy = true;
+      try {
+        await sendMessage(`Executing ${toolName.replace(/_/g, " ")}...`).catch(() => {});
+        const result = await executeTool(toolName, toolArgs);
+        if (result?.error) {
+          await sendMessage(`❌ ${result.error}`).catch(() => {});
+        } else if (result?.success === false) {
+          await sendMessage(`❌ ${result.reason || "failed"}`).catch(() => {});
+        } else {
+          const summary = result?.position
+            ? `Position: ${String(result.position).slice(0, 12)}...`
+            : result?.tx ? `Tx: ${String(result.tx).slice(0, 16)}...`
+            : "Done";
+          await sendMessage(`✅ ${summary}`).catch(() => {});
+        }
+      } catch (e) {
+        await sendMessage(`❌ Error: ${e.message}`).catch(() => {});
+      } finally {
+        busy = false;
+        drainTelegramQueue().catch(() => {});
+      }
+      return;
+    }
+    // Not a yes/no — treat as a new message and clear pending
+    _pendingConfirmation = null;
+  }
+
   busy = true;
   let liveMessage = null;
   try {
     log("telegram", `Incoming: ${text}`);
-    const hasCloseIntent = /\bclose\b|\bsell\b|\bexit\b|\bwithdraw\b/i.test(text);
-    const isDeployRequest = !hasCloseIntent && /\bdeploy\b|\bopen position\b|\blp into\b|\badd liquidity\b/i.test(text);
-    const agentRole = isDeployRequest ? "SCREENER" : "GENERAL";
-    const agentModel = agentRole === "SCREENER" ? config.llm.screeningModel : config.llm.generalModel;
-    liveMessage = await createLiveMessage("🤖 Live Update", `Request: ${text.slice(0, 240)}`);
-    const { content } = await agentLoop(text, config.llm.maxSteps, sessionHistory, agentRole, agentModel, null, {
-      interactive: true,
-      onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
-      onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
-    });
-    appendHistory(text, content);
-    if (liveMessage) await liveMessage.finalize(stripThink(content));
-    else await sendMessage(stripThink(content));
+    const hasCloseIntent = /\bclose (my |the |all |position|positions)\b|\bclose all\b|\bsell (all|everything|my tokens)\b|\bexit (my |the |all |position|positions)\b|\bwithdraw (my |all |liquidity)\b/i.test(text);
+    const isDeployRequest = !hasCloseIntent && /\bdeploy\b|\bopen (a )?position\b|\blp into\b|\badd liquidity\b/i.test(text);
+    const isConfigChange = /\b(set|change|update|increase|decrease|lower|raise)\s+(stop.?loss|take.?profit|sl|tp|max\s*pos|deploy\s*amount|position\s*size|min\s*(tvl|mcap|vol)|max\s*(tvl|mcap|pos)|threshold|config|setting|interval)\b/i.test(text);
+    const isSwapRequest = /\bswap\b.{1,30}\bto\b|\bconvert\b.{1,20}\bto\b/i.test(text);
+    const isActionRequest = hasCloseIntent || isDeployRequest || isConfigChange || isSwapRequest;
+
+    // Route to Claude for general chat when ANTHROPIC_API_KEY is available
+    if (!isActionRequest && process.env.ANTHROPIC_API_KEY) {
+      liveMessage = await createLiveMessage("🤖 Claude", `Thinking...`);
+      const reply = await claudeChat(text, sessionHistory);
+      appendHistory(text, reply);
+      if (liveMessage) await liveMessage.finalize(reply);
+      else await sendMessage(reply);
+    } else {
+      // Action requests (deploy/close) and fallback go through agentLoop with tool use
+      const agentRole = isDeployRequest ? "SCREENER" : "GENERAL";
+      const agentModel = agentRole === "SCREENER" ? config.llm.screeningModel : config.llm.generalModel;
+      liveMessage = await createLiveMessage("🤖 Live Update", `Request: ${text.slice(0, 240)}`);
+      const { content } = await agentLoop(text, config.llm.maxSteps, sessionHistory, agentRole, agentModel, null, {
+        interactive: true,
+        onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
+        onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
+        onBeforeWrite: async (toolName, toolArgs) => { _pendingConfirmation = { toolName, toolArgs }; },
+      });
+      appendHistory(text, content);
+      if (liveMessage) await liveMessage.finalize(stripThink(content));
+      else await sendMessage(stripThink(content));
+    }
   } catch (e) {
     if (liveMessage) await liveMessage.fail(e.message).catch(() => {});
     else await sendMessage(`Error: ${e.message}`).catch(() => {});

@@ -12,7 +12,7 @@ import {
 import { getWalletBalances, swapToken } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
-import { setPositionInstruction } from "../state.js";
+import { setPositionInstruction, getTrackedPosition } from "../state.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
 import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
@@ -177,12 +177,14 @@ const toolMap = {
       minTokenAgeHours: ["screening", "minTokenAgeHours"],
       maxTokenAgeHours: ["screening", "maxTokenAgeHours"],
       athFilterPct:     ["screening", "athFilterPct"],
+      minVolatility:    ["screening", "minVolatility"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
       // management
       minClaimAmount: ["management", "minClaimAmount"],
       autoSwapAfterClaim: ["management", "autoSwapAfterClaim"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
+      outOfRangePumpWaitMinutes: ["management", "outOfRangePumpWaitMinutes"],
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
       oorCooldownHours: ["management", "oorCooldownHours"],
       repeatDeployCooldownEnabled: ["management", "repeatDeployCooldownEnabled"],
@@ -215,6 +217,7 @@ const toolMap = {
       managementModel: ["llm", "managementModel"],
       screeningModel: ["llm", "screeningModel"],
       generalModel: ["llm", "generalModel"],
+      claudeModel: ["llm", "claudeModel"],
       temperature: ["llm", "temperature"],
       maxTokens: ["llm", "maxTokens"],
       maxSteps: ["llm", "maxSteps"],
@@ -455,28 +458,91 @@ export async function executeTool(name, args) {
 
     if (success) {
       if (name === "swap_token" && result.tx) {
-        notifySwap({ inputSymbol: args.input_mint?.slice(0, 8), outputSymbol: args.output_mint === "So11111111111111111111111111111111111111112" || args.output_mint === "SOL" ? "SOL" : args.output_mint?.slice(0, 8), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
+        const resolveMintSymbol = (mint) => {
+          if (!mint) return "?";
+          if (mint === "SOL" || mint === "So11111111111111111111111111111111111111112") return "SOL";
+          if (mint === config.tokens.USDC || mint === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v") return "USDC";
+          return mint.slice(0, 8);
+        };
+        notifySwap({ inputSymbol: resolveMintSymbol(args.input_mint), outputSymbol: resolveMintSymbol(args.output_mint), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
       } else if (name === "deploy_position") {
-        notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
+        notifyDeploy({
+          pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8),
+          poolAddress: args.pool_address,
+          amountSol: args.amount_y ?? args.amount_sol ?? 0,
+          strategy: result.strategy || args.strategy,
+          binsBelow: args.bins_below,
+          binsAbove: args.bins_above,
+          position: result.position,
+          tx: result.txs?.[0] ?? result.tx,
+          priceRange: result.price_range,
+          rangeCoverage: result.range_coverage,
+          binStep: result.bin_step ?? args.bin_step,
+          baseFee: result.base_fee ?? args.base_fee,
+          activeBin: result.bin_range?.active,
+          feeTvlRatio: args.fee_tvl_ratio ?? args.fee_active_tvl_ratio,
+          organicScore: args.organic_score,
+          volatility: args.volatility,
+          tvl: args.initial_value_usd,
+          entryReason: args.entry_reason || null,
+        }).catch(() => {});
       } else if (name === "close_position") {
-        notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0 }).catch(() => {});
+        const tracked = getTrackedPosition(args.position_address);
+        const deployedAt = tracked?.deployed_at ? new Date(tracked.deployed_at).getTime() : null;
+        const minutesHeld = deployedAt ? Math.floor((Date.now() - deployedAt) / 60000) : null;
+        notifyClose({
+          pair: result.pool_name || tracked?.pool_name || args.position_address?.slice(0, 8),
+          pnlUsd: result.pnl_usd ?? 0,
+          pnlPct: result.pnl_pct ?? 0,
+          reason: args.reason,
+          minutesHeld,
+          amountSol: tracked?.amount_sol,
+          feeTvlRatio: tracked?.fee_tvl_ratio,
+          organicScore: tracked?.organic_score,
+          volatility: tracked?.volatility,
+          tx: result.close_txs?.[0] ?? result.txs?.[0],
+        }).catch(() => {});
         // Note low-yield closes in pool memory so screener avoids redeploying
         if (args.reason && args.reason.toLowerCase().includes("yield")) {
           const poolAddr = result.pool || args.pool_address;
           if (poolAddr) addPoolNote({ pool_address: poolAddr, note: `Closed: low yield (fee/TVL below threshold) at ${new Date().toISOString().slice(0,10)}` }).catch?.(() => {});
         }
-        // Auto-swap base token back to SOL unless user said to hold
+        // Auto-swap the position's base token back to SOL after close.
+        // Only targets the specific base_mint — never sweeps the whole wallet.
         if (!args.skip_swap && result.base_mint) {
           try {
-            const balances = await getWalletBalances({});
-            const token = balances.tokens?.find(t => t.mint === result.base_mint);
-            if (token && token.usd >= 0.10) {
-              log("executor", `Auto-swapping ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
-              const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
-              // Tell the model the swap already happened so it doesn't call swap_token again
-              result.auto_swapped = true;
-              result.auto_swap_note = `Base token already auto-swapped back to SOL (${token.symbol || result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
-              if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
+            const baseMint = result.base_mint;
+            const SKIP_MINTS = new Set([
+              "So11111111111111111111111111111111111111112",
+              "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+              config.tokens.SOL,
+              config.tokens.USDC,
+            ].filter(Boolean));
+            if (!SKIP_MINTS.has(baseMint)) {
+              let token = null;
+              for (let attempt = 0; attempt < 6; attempt++) {
+                if (attempt > 0) await new Promise(r => setTimeout(r, 5000));
+                const balances = await getWalletBalances({});
+                if (balances?.error) {
+                  log("executor_warn", `getWalletBalances error on attempt ${attempt + 1}: ${balances.error}`);
+                  continue;
+                }
+                token = (balances.tokens || []).find(t => t.mint === baseMint && t.balance > 0);
+                if (token) break;
+              }
+              if (!token) {
+                log("executor_warn", `Auto-swap: base token ${baseMint.slice(0, 8)} not found after 30s — management cycle will sweep on next run`);
+              } else {
+                log("executor", `Auto-swapping ${token.symbol || baseMint.slice(0, 8)} (${token.usd != null ? `$${token.usd.toFixed(2)}` : `${token.balance} tokens`}) back to SOL`);
+                const swapResult = await swapToken({ input_mint: baseMint, output_mint: "SOL", amount: token.balance });
+                if (swapResult?.success) {
+                  result.auto_swapped = true;
+                  result.auto_swap_note = `Base token auto-swapped to SOL (${token.symbol || baseMint.slice(0, 8)}). Do NOT call swap_token again.`;
+                  if (swapResult.amount_out) result.sol_received = swapResult.amount_out;
+                } else {
+                  log("executor_warn", `Auto-swap of ${token.symbol || baseMint.slice(0, 8)} failed: ${swapResult?.error}`);
+                }
+              }
             }
           } catch (e) {
             log("executor_warn", `Auto-swap after close failed: ${e.message}`);
@@ -484,11 +550,19 @@ export async function executeTool(name, args) {
         }
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
         try {
-          const balances = await getWalletBalances({});
-          const token = balances.tokens?.find(t => t.mint === result.base_mint);
-          if (token && token.usd >= 0.10) {
-            log("executor", `Auto-swapping claimed ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
-            await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
+          let token = null;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            if (attempt > 0) await new Promise(r => setTimeout(r, 3000));
+            const balances = await getWalletBalances({});
+            token = balances.tokens?.find(t => t.mint === result.base_mint);
+            if (token && token.balance > 0) break;
+          }
+          if (token && token.balance > 0 && (token.usd == null || token.usd >= 0.10)) {
+            log("executor", `Auto-swapping claimed ${token.symbol || result.base_mint.slice(0, 8)} (${token.usd != null ? `$${token.usd.toFixed(2)}` : `${token.balance} tokens`}) back to SOL`);
+            const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
+            result.auto_swapped = true;
+            result.auto_swap_note = `Claimed base token already auto-swapped back to SOL (${token.symbol || result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
+            if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
           }
         } catch (e) {
           log("executor_warn", `Auto-swap after claim failed: ${e.message}`);

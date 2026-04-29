@@ -387,6 +387,18 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     if (eligible.length < before) log("screening", `maxVolatility filter removed ${before - eligible.length} pool(s) above ${maxVol}`);
   }
 
+  if (config.screening.minVolatility != null) {
+    const minVol = Number(config.screening.minVolatility);
+    const before = eligible.length;
+    eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+      if (p.volatility != null && p.volatility >= minVol) return true;
+      log("screening", `Volatility filter: dropped ${p.name} — volatility ${p.volatility ?? "null"} < ${minVol}`);
+      pushFilteredReason(filteredOut, p, `volatility ${p.volatility ?? "null"} < minVolatility ${minVol}`);
+      return false;
+    }));
+    if (eligible.length < before) log("screening", `minVolatility filter removed ${before - eligible.length} pool(s) below ${minVol}`);
+  }
+
   if (config.screening.avoidPvpSymbols && eligible.length > 0) {
     await enrichPvpRisk(eligible);
     if (config.screening.blockPvpSymbols) {

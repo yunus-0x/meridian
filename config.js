@@ -92,6 +92,8 @@ export const config = {
     athFilterPct:       u.athFilterPct       ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
     maxPhishingPct:     u.maxPhishingPct     ?? null, // max suspicious/phishing holder % (OKX suspiciousHoldingPercent)
     minPoolFeePct:      u.minPoolFeePct      ?? 0,    // minimum pool base fee % (e.g. 10 = 10%). 0 = disabled
+    minVolatility:      u.minVolatility      ?? null, // null = no minimum; set to require price movement
+    maxVolatility:      u.maxVolatility      ?? null, // null = no ceiling; evolved automatically by lessons.js
   },
 
   gmgn: {
@@ -153,8 +155,9 @@ export const config = {
   management: {
     minClaimAmount:        u.minClaimAmount        ?? 5,
     autoSwapAfterClaim:    u.autoSwapAfterClaim    ?? false,
-    outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 10,
-    outOfRangeWaitMinutes: u.outOfRangeWaitMinutes ?? 30,
+    outOfRangeBinsToClose:  u.outOfRangeBinsToClose  ?? 10,
+    outOfRangeWaitMinutes:  u.outOfRangeWaitMinutes  ?? 30,
+    outOfRangePumpWaitMinutes: u.outOfRangePumpWaitMinutes ?? 0, // extra wait before Rule 3 (pumped above range) fires
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
     oorCooldownHours:       u.oorCooldownHours       ?? 12,
     repeatDeployCooldownEnabled: u.repeatDeployCooldownEnabled ?? true,
@@ -202,6 +205,7 @@ export const config = {
     managementModel: u.managementModel ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
     screeningModel:  u.screeningModel  ?? process.env.LLM_MODEL ?? "openrouter/hunter-alpha",
     generalModel:    u.generalModel    ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
+    claudeModel:     u.claudeModel     ?? process.env.CLAUDE_MODEL ?? "claude-sonnet-4-6",
   },
 
   // ─── Darwinian Signal Weighting ───────
@@ -296,6 +300,7 @@ export function reloadScreeningThresholds() {
     const s = config.screening;
     if (fresh.screeningSource != null) s.source = fresh.screeningSource;
     if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
+    if (fresh.maxVolatility !== undefined) s.maxVolatility = fresh.maxVolatility;
     if (fresh.useDiscordSignals !== undefined) s.useDiscordSignals = fresh.useDiscordSignals;
     if (fresh.discordSignalMode != null) s.discordSignalMode = fresh.discordSignalMode;
     if (fresh.excludeHighSupplyConcentration !== undefined) s.excludeHighSupplyConcentration = fresh.excludeHighSupplyConcentration;

@@ -219,9 +219,19 @@ function toolLabel(name) {
   return labels[name] || name.replace(/_/g, " ");
 }
 
+function cleanError(msg) {
+  if (!msg) return "failed";
+  // Extract the human-readable cause from Solana program logs if present
+  const logCause = msg.match(/"Program log: Error: ([^"]+)"/);
+  if (logCause) return `simulation failed: ${logCause[1]}`;
+  // Strip the raw Logs: [...] array and trailing SDK hint
+  const stripped = msg.replace(/\s*Logs:\s*\[[\s\S]*?\]\.?\s*(Catch[\s\S]*)?$/, "").trim();
+  return stripped.length > 100 ? stripped.slice(0, 97) + "..." : stripped;
+}
+
 function summarizeToolResult(name, result) {
   if (!result) return "";
-  if (result.error) return result.error;
+  if (result.error) return cleanError(result.error);
   if (result.reason && result.blocked) return result.reason;
   switch (name) {
     case "deploy_position":
@@ -409,34 +419,94 @@ export function stopPolling() {
 }
 
 // ─── Notification helpers ────────────────────────────────────────
-export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee, entryReason }) {
-  const coverageStr = rangeCoverage
-    ? `Range cover: ${fmtPct(rangeCoverage.downside_pct)} downside | ${fmtPct(rangeCoverage.upside_pct)} upside | ${fmtPct(rangeCoverage.width_pct)} total\n`
-    : "";
-  const poolStr = (binStep || baseFee)
-    ? `Bin step: ${binStep ?? "?"}  |  Base fee: ${baseFee != null ? baseFee + "%" : "?"}\n`
-    : "";
-  const reportStr = entryReason ? `\n${entryReason}\n` : "";
-  await sendHTML(
-    `✅ <b>Deployed</b> ${pair}\n` +
-    `Amount: ${amountSol} SOL\n` +
-    coverageStr +
-    poolStr +
-    `Position: <code>${position?.slice(0, 8)}...</code>\n` +
-    `Tx: <code>${tx?.slice(0, 16)}...</code>` +
-    reportStr
-  );
+export async function notifyDeploy({ pair, poolAddress, amountSol, strategy, binsBelow, binsAbove, position, tx, priceRange, rangeCoverage, binStep, baseFee, activeBin, feeTvlRatio, organicScore, volatility, tvl, entryReason }) {
+  const lines = [];
+  lines.push(`🚀 <b>DEPLOYED — ${pair}</b>`);
+  if (poolAddress) lines.push(`Pool: <code>${poolAddress}</code>`);
+  lines.push("");
+
+  // Position details
+  const stratLine = [
+    amountSol ? `◎ ${amountSol} SOL` : null,
+    strategy || null,
+    binsBelow != null && binsAbove != null ? `bins ${binsBelow}↓ / ${binsAbove}↑` : null,
+    activeBin != null ? `active bin ${activeBin}` : null,
+  ].filter(Boolean).join(" | ");
+  if (stratLine) lines.push(stratLine);
+
+  if (priceRange?.min != null && priceRange?.max != null) {
+    lines.push(`Range: $${Number(priceRange.min).toFixed(6)} → $${Number(priceRange.max).toFixed(6)}`);
+  }
+  if (rangeCoverage) {
+    lines.push(`Coverage: ${fmtPct(rangeCoverage.downside_pct)} down | ${fmtPct(rangeCoverage.upside_pct)} up | ${fmtPct(rangeCoverage.width_pct)} total`);
+  }
+  if (binStep != null || baseFee != null) {
+    lines.push(`Bin step: ${binStep ?? "?"} | Base fee: ${baseFee != null ? baseFee + "%" : "?"}`);
+  }
+
+  // Market data
+  const marketParts = [
+    feeTvlRatio != null ? `Fee/TVL: ${feeTvlRatio}%` : null,
+    tvl != null ? `TVL: $${Number(tvl).toLocaleString()}` : null,
+    organicScore != null ? `Organic: ${organicScore}` : null,
+    volatility != null ? `Volatility: ${volatility}` : null,
+  ].filter(Boolean);
+  if (marketParts.length) {
+    lines.push("");
+    lines.push("<b>MARKET</b>");
+    lines.push(marketParts.join(" | "));
+  }
+
+  lines.push("");
+  if (position) lines.push(`Position: <code>${position}</code>`);
+  if (tx) lines.push(`Tx: <code>${tx}</code>`);
+
+  // Extract just the WHY THIS WON section from the full entry_reason text
+  if (entryReason) {
+    const whyMatch = entryReason.match(/WHY THIS WON\s*\n([\s\S]+?)(?:\n\n[A-Z]+\n|$)/i);
+    const whyText = whyMatch ? whyMatch[1].trim() : null;
+    if (whyText) {
+      lines.push("");
+      lines.push("<b>WHY THIS WON</b>");
+      lines.push(whyText);
+    }
+  }
+
+  await sendHTML(lines.join("\n"));
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlPct, reason }) {
-  if (hasActiveLiveMessage()) return;
-  const sign = pnlUsd >= 0 ? "+" : "";
-  const reasonLine = reason ? `\nReason: ${reason}` : "";
-  await sendHTML(
-    `🔒 <b>Closed</b> ${pair}\n` +
-    `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)` +
-    reasonLine
-  );
+export async function notifyClose({ pair, pnlUsd, pnlPct, reason, minutesHeld, amountSol, feeTvlRatio, organicScore, volatility, tx }) {
+  const sign = (pnlUsd ?? 0) >= 0 ? "+" : "";
+  const pnlIcon = (pnlUsd ?? 0) >= 0 ? "🟢" : "🔴";
+
+  const lines = [];
+  lines.push(`🔒 <b>CLOSED — ${pair}</b>`);
+  if (reason) lines.push(`Reason: ${reason}`);
+  lines.push("");
+  lines.push(`${pnlIcon} PnL: <b>${sign}$${(pnlUsd ?? 0).toFixed(2)}</b> (${sign}${(pnlPct ?? 0).toFixed(2)}%)`);
+
+  // Hold details
+  const holdParts = [
+    amountSol != null ? `◎ ${amountSol} SOL deployed` : null,
+    minutesHeld != null ? `Held: ${minutesHeld >= 60 ? `${Math.floor(minutesHeld / 60)}h ${minutesHeld % 60}m` : `${minutesHeld}m`}` : null,
+  ].filter(Boolean);
+  if (holdParts.length) lines.push(holdParts.join(" | "));
+
+  // Entry metrics
+  const metricParts = [
+    feeTvlRatio != null ? `Fee/TVL: ${feeTvlRatio}%` : null,
+    organicScore != null ? `Organic: ${organicScore}` : null,
+    volatility != null ? `Volatility: ${volatility}` : null,
+  ].filter(Boolean);
+  if (metricParts.length) {
+    lines.push("");
+    lines.push("<b>ENTRY METRICS</b>");
+    lines.push(metricParts.join(" | "));
+  }
+
+  if (tx) { lines.push(""); lines.push(`Tx: <code>${tx}</code>`); }
+
+  await sendHTML(lines.join("\n"));
 }
 
 export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx }) {

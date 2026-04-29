@@ -149,6 +149,9 @@ function isToolChoiceRequiredError(error) {
  * @param {number} maxSteps - Safety limit on iterations (default 20)
  * @returns {string} - The agent's final text response
  */
+// Write tools that require explicit user confirmation when called interactively
+const CONFIRM_TOOLS = new Set(["deploy_position", "close_position", "update_config", "swap_token"]);
+
 export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHistory = [], agentType = "GENERAL", model = null, maxOutputTokens = null, options = {}) {
   const { interactive = false, onToolStart = null, onToolFinish = null } = options;
   // Build dynamic system prompt with current portfolio state
@@ -326,6 +329,20 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             role: "tool",
             tool_call_id: toolCall.id,
             content: JSON.stringify({ blocked: true, reason: `${functionName} already attempted this session — do not retry. If it failed, report the error and stop.` }),
+          };
+        }
+
+        // Confirmation gate — intercept write tools in interactive Telegram sessions
+        if (options.onBeforeWrite && CONFIRM_TOOLS.has(functionName)) {
+          await options.onBeforeWrite(functionName, functionArgs);
+          await onToolFinish?.({ name: functionName, args: functionArgs, result: { pending_confirmation: true }, success: false, step });
+          return {
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: JSON.stringify({
+              pending_confirmation: true,
+              instruction: "This action requires user confirmation before it executes. Describe exactly what you are about to do (amounts, pool, position) and tell the user to reply 'yes' to confirm or 'no' to cancel. Do NOT say the action was executed — it is paused.",
+            }),
           };
         }
 

@@ -290,7 +290,7 @@ WARNING: This executes a real on-chain transaction. Cannot be undone.`,
           },
           reason: {
             type: "string",
-            description: "Why this position is being closed. Include the rule that triggered it, e.g. 'low yield', 'stop loss', 'trailing TP', 'OOR'. Used for pool memory."
+            description: "Why this position is being closed. Write a descriptive 1-2 sentence explanation: which rule triggered it, the specific values (e.g. 'OOR for 32m, limit is 30m'), and any additional context like token conditions. This text appears directly in the Telegram close notification."
           }
         },
         required: ["position_address"]
@@ -390,7 +390,7 @@ GMGN (persisted to gmgn-config.json): gmgnApiKey, gmgnBaseUrl, gmgnInterval, gmg
 Management: minClaimAmount, outOfRangeBinsToClose, outOfRangeWaitMinutes, oorCooldownTriggerCount, oorCooldownHours, repeatDeployCooldownEnabled, repeatDeployCooldownTriggerCount, repeatDeployCooldownHours, repeatDeployCooldownScope, repeatDeployCooldownMinFeeEarnedPct, minVolumeToRebalance, stopLossPct, takeProfitPct, minSolToOpen, deployAmountSol, gasReserve, positionSizePct
 Risk: maxPositions, maxDeployAmount
 Schedule: managementIntervalMin, screeningIntervalMin
-Models: managementModel, screeningModel, generalModel
+Models: managementModel, screeningModel, generalModel, claudeModel
 Strategy: strategy, minBinsBelow, maxBinsBelow
 
 Reason is optional but helpful — logged as a lesson when provided.`,

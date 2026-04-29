@@ -10,6 +10,7 @@ setDefaultResultOrder("ipv4first");
 const METEORA_DLMM_API = "https://dlmm.datapi.meteora.ag";
 const SUPPORTED_INTERVALS = new Set(["1m", "5m", "1h", "6h", "24h"]);
 let lastGmgnRequestAt = 0;
+let _ipBannedUntil = 0; // epoch ms — when a ban is active, skip all requests immediately
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -49,6 +50,12 @@ function appendParams(url, params = {}) {
 }
 
 async function gmgnFetch(pathname, { method = "GET", params = {}, body = null } = {}) {
+  // Short-circuit immediately if IP is still banned — don't waste time on each token
+  if (Date.now() < _ipBannedUntil) {
+    const secsLeft = Math.ceil((_ipBannedUntil - Date.now()) / 1000);
+    throw new Error(`IP temporarily banned (${secsLeft}s remaining)`);
+  }
+
   const baseUrl = String(config.gmgn?.baseUrl || "https://openapi.gmgn.ai").replace(/\/+$/, "");
   const url = new URL(`${baseUrl}${pathname}`);
   appendParams(url, {
@@ -76,17 +83,25 @@ async function gmgnFetch(pathname, { method = "GET", params = {}, body = null } 
       payload = { raw: text };
     }
     const message = payload?.message || payload?.error || payload?.raw || `GMGN ${pathname} ${res.status}`;
-    const rateLimited = res.status === 429 || /rate limit|temporarily banned/i.test(String(message));
+    const isBanned = /temporarily banned/i.test(String(message));
+    const rateLimited = res.status === 429 || /rate limit/i.test(String(message)) || isBanned;
     if (res.ok) return payload;
-    if (rateLimited && attempt < maxRetries) {
+    if (rateLimited) {
       const retryAfter = Number(res.headers.get("retry-after"));
-      const backoffMs = Number.isFinite(retryAfter)
-        ? retryAfter * 1000
-        : /temporarily banned/i.test(String(message))
-          ? 60000
+      // Ban always gets full 10 min — never let Retry-After: 0 shrink it to nothing
+      const backoffMs = isBanned
+        ? 10 * 60 * 1000
+        : Number.isFinite(retryAfter) && retryAfter > 0
+          ? retryAfter * 1000
           : Math.min(30000, 3000 * Math.pow(2, attempt));
-      await sleep(backoffMs);
-      continue;
+      if (isBanned) {
+        _ipBannedUntil = Date.now() + backoffMs;
+        log("gmgn", `IP banned — pausing all GMGN requests for ${Math.round(backoffMs / 60000)}m`);
+      }
+      if (attempt < maxRetries && !isBanned) {
+        await sleep(backoffMs);
+        continue;
+      }
     }
     throw new Error(message);
   }

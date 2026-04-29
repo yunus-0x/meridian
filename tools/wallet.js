@@ -5,6 +5,7 @@ import {
   VersionedTransaction,
   Keypair,
 } from "@solana/web3.js";
+import { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
 import bs58 from "bs58";
 import { log } from "../logger.js";
 import { config } from "../config.js";
@@ -26,6 +27,10 @@ function getWallet() {
 }
 
 const JUPITER_PRICE_API = "https://api.jup.ag/price/v3";
+const DATAPI_ASSETS_URL = "https://datapi.jup.ag/v1/assets/search";
+let _priceCache = null;      // { prices: {}, mints: Set, at: ms }
+const PRICE_CACHE_TTL = 60_000; // reuse prices for 60s across concurrent calls
+const _symbolCache = new Map(); // mint → symbol, populated lazily, never evicted
 const JUPITER_SWAP_V2_API = "https://api.jup.ag/swap/v2";
 const DEFAULT_JUPITER_API_KEY = "b15d42e9-e0e4-4f90-a424-ae41ceeaa382";
 
@@ -53,72 +58,129 @@ function getJupiterReferralParams() {
 }
 
 /**
- * Get current wallet balances: SOL, USDC, and all SPL tokens using Helius Wallet API.
- * Returns USD-denominated values provided by Helius.
+ * Get current wallet balances via Solana RPC + Jupiter prices.
+ * No dependency on Helius REST API.
  */
 export async function getWalletBalances() {
   let walletAddress;
+  let walletPubkey;
   try {
-    walletAddress = getWallet().publicKey.toString();
+    const wallet = getWallet();
+    walletPubkey = wallet.publicKey;
+    walletAddress = walletPubkey.toString();
   } catch {
     return { wallet: null, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Wallet not configured" };
   }
 
-  const HELIUS_KEY = process.env.HELIUS_API_KEY;
-  if (!HELIUS_KEY) {
-    log("wallet_error", "HELIUS_API_KEY not set in .env");
-    return { wallet: walletAddress, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Helius API key missing" };
-  }
-
   try {
-    const url = `https://api.helius.xyz/v1/wallet/${walletAddress}/balances?api-key=${HELIUS_KEY}`;
-    const res = await fetch(url);
-    
-    if (!res.ok) {
-      throw new Error(`Helius API error: ${res.status} ${res.statusText}`);
+    const connection = getConnection();
+
+    // ─── SOL balance ──────────────────────────────────────────
+    const lamports = await connection.getBalance(walletPubkey);
+    const solBalance = lamports / LAMPORTS_PER_SOL;
+
+    // ─── SPL token balances (Token + Token-2022, parsed JSON) ────
+    const [tokenAccounts, token2022Accounts] = await Promise.all([
+      connection.getParsedTokenAccountsByOwner(walletPubkey, { programId: TOKEN_PROGRAM_ID }),
+      connection.getParsedTokenAccountsByOwner(walletPubkey, { programId: TOKEN_2022_PROGRAM_ID }).catch(() => ({ value: [] })),
+    ]);
+
+    const tokenMap = new Map(); // mint → { balance, decimals }
+    for (const { account } of [...tokenAccounts.value, ...token2022Accounts.value]) {
+      const info = account.data?.parsed?.info;
+      if (!info) continue;
+      const mint = info.mint;
+      const uiAmount = info.tokenAmount?.uiAmount ?? 0;
+      const decimals = info.tokenAmount?.decimals ?? 9;
+      if (uiAmount === 0) continue;
+      if (!tokenMap.has(mint)) tokenMap.set(mint, { balance: 0, decimals });
+      tokenMap.get(mint).balance += uiAmount;
     }
 
-    const data = await res.json();
-    const balances = data.balances || [];
+    const tokenEntries = [...tokenMap.entries()]
+      .map(([mint, { balance, decimals }]) => ({ mint, balance, decimals }))
+      .filter(t => t.balance > 0);
 
-    // ─── Find SOL and USDC ────────────────────────────────────
-    const solEntry = balances.find(b => b.mint === config.tokens.SOL || b.symbol === "SOL");
-    const usdcEntry = balances.find(b => b.mint === config.tokens.USDC || b.symbol === "USDC");
+    // ─── Resolve symbols for new mints (cached, parallel, non-blocking) ─────
+    const unknownMints = tokenEntries.map(t => t.mint).filter(m => !_symbolCache.has(m));
+    if (unknownMints.length) {
+      await Promise.all(unknownMints.map(async (mint) => {
+        try {
+          const res = await fetch(`${DATAPI_ASSETS_URL}?query=${mint}`, { signal: AbortSignal.timeout(4000) });
+          if (res.ok) {
+            const data = await res.json();
+            const tokens = Array.isArray(data) ? data : [data];
+            const match = tokens.find(t => t.id === mint);
+            if (match?.symbol) _symbolCache.set(mint, match.symbol);
+          }
+        } catch { /* non-critical — fall back to truncated mint */ }
+      }));
+    }
 
-    const solBalance = solEntry?.balance || 0;
-    const solPrice = solEntry?.pricePerToken || 0;
-    const solUsd = solEntry?.usdValue || 0;
-    const usdcBalance = usdcEntry?.balance || 0;
+    // ─── Fetch prices from Jupiter (SOL first, then tokens in batches of 30) ───
+    let prices = {};
+    const priceMints = [config.tokens.SOL, ...tokenEntries.map(t => t.mint)];
+    const BATCH = 30;
 
-    // ─── Map all tokens ───────────────────────────────────────
-    const enrichedTokens = balances.map(b => ({
-      mint: b.mint,
-      symbol: b.symbol || b.mint.slice(0, 8),
-      balance: b.balance,
-      usd: b.usdValue ? Math.round(b.usdValue * 100) / 100 : null,
-    }));
+    // Use cache if it covers all requested mints and is still fresh
+    const cacheHit = _priceCache &&
+      (Date.now() - _priceCache.at < PRICE_CACHE_TTL) &&
+      priceMints.every(m => _priceCache.mints.has(m));
+    if (cacheHit) {
+      prices = _priceCache.prices;
+    } else {
+      try {
+        const fetched = {};
+        for (let i = 0; i < priceMints.length; i += BATCH) {
+          const batch = priceMints.slice(i, i + BATCH).join(",");
+          const priceRes = await fetch(`${JUPITER_PRICE_API}?ids=${batch}`, { signal: AbortSignal.timeout(8000) });
+          if (priceRes.ok) {
+            const priceData = await priceRes.json();
+            Object.assign(fetched, priceData || {});
+          } else {
+            log("wallet_warn", `Jupiter price fetch failed: ${priceRes.status}`);
+          }
+        }
+        if (Object.keys(fetched).length) {
+          _priceCache = { prices: fetched, mints: new Set(priceMints), at: Date.now() };
+          prices = fetched;
+        }
+      } catch (e) {
+        log("wallet_warn", `Jupiter price fetch error: ${e.message}`);
+      }
+    }
+
+    const solPrice = Number(prices[config.tokens.SOL]?.usdPrice || 0);
+    const solUsd = solBalance * solPrice;
+
+    // ─── Build enriched token list ────────────────────────────
+    const USDC_MINT = config.tokens.USDC;
+    const enrichedTokens = tokenEntries.map(t => {
+      const price = Number(prices[t.mint]?.usdPrice || 0);
+      const usd = price > 0 ? Math.round(t.balance * price * 100) / 100 : null;
+      return {
+        mint: t.mint,
+        symbol: _symbolCache.get(t.mint) || t.mint.slice(0, 8),
+        balance: t.balance,
+        usd,
+      };
+    });
+
+    const usdcEntry = enrichedTokens.find(t => t.mint === USDC_MINT);
+    const totalUsd = solUsd + enrichedTokens.reduce((s, t) => s + (t.usd || 0), 0);
 
     return {
       wallet: walletAddress,
       sol: Math.round(solBalance * 1e6) / 1e6,
       sol_price: Math.round(solPrice * 100) / 100,
       sol_usd: Math.round(solUsd * 100) / 100,
-      usdc: Math.round(usdcBalance * 100) / 100,
+      usdc: Math.round((usdcEntry?.balance || 0) * 100) / 100,
       tokens: enrichedTokens,
-      total_usd: Math.round((data.totalUsdValue || 0) * 100) / 100,
+      total_usd: Math.round(totalUsd * 100) / 100,
     };
   } catch (error) {
     log("wallet_error", error.message);
-    return {
-      wallet: walletAddress,
-      sol: 0,
-      sol_price: 0,
-      sol_usd: 0,
-      usdc: 0,
-      tokens: [],
-      total_usd: 0,
-      error: error.message,
-    };
+    return { wallet: walletAddress, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: error.message };
   }
 }
 
@@ -169,7 +231,7 @@ export async function swapToken({
       const mintInfo = await connection.getParsedAccountInfo(new PublicKey(input_mint));
       decimals = mintInfo.value?.data?.parsed?.info?.decimals ?? 9;
     }
-    const amountStr = Math.floor(amount * Math.pow(10, decimals)).toString();
+    const amountStr = Math.floor(amount * Math.pow(10, decimals)).toFixed(0);
 
     // ─── Get Swap V2 order (unsigned tx + requestId) ───────────
     const search = new URLSearchParams({

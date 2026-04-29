@@ -17,6 +17,7 @@
     "postinstall": "node scripts/patch-anchor.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.91.1",
     "@meteora-ag/dlmm": "1.9.4",
     "@solana/spl-token": "^0.3.11",
     "@solana/web3.js": "^1.95.0",
