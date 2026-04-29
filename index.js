@@ -1992,7 +1992,7 @@ async function telegramHandler(msg) {
 
   // ─── /restart — restart PM2 meridian process ─────────────────────────────
   if (text === "/restart") {
-    _pendingShellCmd = "pm2 restart meridian";
+    _pendingShellCmd = "__restart__";
     await sendMessage("⚠️ Restart meridian PM2 process?\n\nReply yes to confirm or no to cancel.").catch(() => {});
     return;
   }
@@ -2035,6 +2035,14 @@ async function telegramHandler(msg) {
         return;
       }
       try {
+        if (cmd === "__restart__") {
+          // Send confirmation before dying — pm2 restart kills this process
+          await sendMessage("🔄 Restarting...").catch(() => {});
+          setTimeout(() => {
+            try { execSync("pm2 restart meridian --update-env", { stdio: "ignore" }); } catch { process.exit(0); }
+          }, 800);
+          return;
+        }
         await sendMessage(`Running: \`${cmd}\`...`).catch(() => {});
         const out = execSync(cmd, { encoding: "utf8", timeout: 30000, stdio: ["pipe", "pipe", "pipe"] });
         const result = (out || "(no output)").slice(-3800);
