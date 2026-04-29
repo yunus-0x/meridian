@@ -2036,11 +2036,9 @@ async function telegramHandler(msg) {
       }
       try {
         if (cmd === "__restart__") {
-          // Send confirmation before dying — pm2 restart kills this process
+          // Let PM2 auto-restart naturally — preserves env vars loaded by envcrypt.js
           await sendMessage("🔄 Restarting...").catch(() => {});
-          setTimeout(() => {
-            try { execSync("pm2 restart meridian --update-env", { stdio: "ignore" }); } catch { process.exit(0); }
-          }, 800);
+          setTimeout(() => process.exit(0), 800);
           return;
         }
         await sendMessage(`Running: \`${cmd}\`...`).catch(() => {});
