@@ -9,7 +9,7 @@ import {
   closePosition,
   searchPools,
 } from "./dlmm.js";
-import { getWalletBalances, swapToken } from "./wallet.js";
+import { getWalletBalances, swapToken, invalidateAccountCache } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
 import { setPositionInstruction, getTrackedPosition } from "../state.js";
@@ -457,6 +457,10 @@ export async function executeTool(name, args) {
     });
 
     if (success) {
+      // Invalidate token account cache after any on-chain state change
+      if (name === "swap_token" || name === "close_position" || name === "claim_fees") {
+        invalidateAccountCache();
+      }
       if (name === "swap_token" && result.tx) {
         const resolveMintSymbol = (mint) => {
           if (!mint) return "?";

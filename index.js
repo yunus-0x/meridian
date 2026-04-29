@@ -6,7 +6,7 @@ import { execSync } from "child_process";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
-import { getWalletBalances, swapToken } from "./tools/wallet.js";
+import { getWalletBalances, swapToken, invalidateAccountCache } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
@@ -101,7 +101,7 @@ async function swapMintToSol(mint) {
   try {
     log("executor", `Auto-swapping ${token.symbol || mint.slice(0, 8)} (${token.usd != null ? `$${token.usd.toFixed(2)}` : `${token.balance} tokens`}) back to SOL`);
     const swapResult = await swapToken({ input_mint: mint, output_mint: "SOL", amount: token.balance });
-    if (swapResult?.success) return { symbol: token.symbol || mint.slice(0, 8), success: true, sol: swapResult.amount_out };
+    if (swapResult?.success) { invalidateAccountCache(); return { symbol: token.symbol || mint.slice(0, 8), success: true, sol: swapResult.amount_out }; }
     log("executor_warn", `Auto-swap of ${token.symbol || mint.slice(0, 8)} failed: ${swapResult?.error}`);
     return { symbol: token.symbol || mint.slice(0, 8), success: false, error: swapResult?.error };
   } catch (e) {
@@ -134,6 +134,7 @@ async function swapAllTokensToSol() {
       log("executor", `Auto-swapping ${token.symbol || token.mint.slice(0, 8)} (${token.usd != null ? `$${token.usd.toFixed(2)}` : `${token.balance} tokens`}) back to SOL`);
       const swapResult = await swapToken({ input_mint: token.mint, output_mint: "SOL", amount: token.balance });
       if (swapResult?.success) {
+        invalidateAccountCache();
         results.push({ symbol: token.symbol || token.mint.slice(0, 8), success: true, sol: swapResult.amount_out });
       } else {
         log("executor_warn", `Auto-swap of ${token.symbol || token.mint.slice(0, 8)} returned failure: ${swapResult?.error}`);

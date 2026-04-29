@@ -28,9 +28,14 @@ function getWallet() {
 
 const JUPITER_PRICE_API = "https://api.jup.ag/price/v3";
 const DATAPI_ASSETS_URL = "https://datapi.jup.ag/v1/assets/search";
-let _priceCache = null;      // { prices: {}, mints: Set, at: ms }
-const PRICE_CACHE_TTL = 60_000; // reuse prices for 60s across concurrent calls
+let _priceCache = null;        // { prices: {}, mints: Set, at: ms }
+const PRICE_CACHE_TTL = 60_000;  // prices refresh every 60s
+let _accountCache = null;      // { solBalance, tokenEntries, at: ms }
+const ACCOUNT_CACHE_TTL = 120_000; // token accounts only change on-chain — 2 min is safe
 const _symbolCache = new Map(); // mint → symbol, populated lazily, never evicted
+
+/** Call after any swap or close to force a fresh account fetch next time. */
+export function invalidateAccountCache() { _accountCache = null; }
 const JUPITER_SWAP_V2_API = "https://api.jup.ag/swap/v2";
 const DEFAULT_JUPITER_API_KEY = "b15d42e9-e0e4-4f90-a424-ae41ceeaa382";
 
@@ -75,31 +80,39 @@ export async function getWalletBalances() {
   try {
     const connection = getConnection();
 
-    // ─── SOL balance ──────────────────────────────────────────
-    const lamports = await connection.getBalance(walletPubkey);
-    const solBalance = lamports / LAMPORTS_PER_SOL;
+    // ─── SOL + token accounts (cached 2 min — only change on-chain) ──────
+    let solBalance, tokenEntries;
+    const accountCacheHit = _accountCache && (Date.now() - _accountCache.at < ACCOUNT_CACHE_TTL);
+    if (accountCacheHit) {
+      ({ solBalance, tokenEntries } = _accountCache);
+    } else {
+      const lamports = await connection.getBalance(walletPubkey);
+      solBalance = lamports / LAMPORTS_PER_SOL;
 
-    // ─── SPL token balances (Token + Token-2022, parsed JSON) ────
-    const [tokenAccounts, token2022Accounts] = await Promise.all([
-      connection.getParsedTokenAccountsByOwner(walletPubkey, { programId: TOKEN_PROGRAM_ID }),
-      connection.getParsedTokenAccountsByOwner(walletPubkey, { programId: TOKEN_2022_PROGRAM_ID }).catch(() => ({ value: [] })),
-    ]);
+      const [tokenAccounts, token2022Accounts] = await Promise.all([
+        connection.getParsedTokenAccountsByOwner(walletPubkey, { programId: TOKEN_PROGRAM_ID }),
+        connection.getParsedTokenAccountsByOwner(walletPubkey, { programId: TOKEN_2022_PROGRAM_ID }).catch(() => ({ value: [] })),
+      ]);
 
-    const tokenMap = new Map(); // mint → { balance, decimals }
-    for (const { account } of [...tokenAccounts.value, ...token2022Accounts.value]) {
-      const info = account.data?.parsed?.info;
-      if (!info) continue;
-      const mint = info.mint;
-      const uiAmount = info.tokenAmount?.uiAmount ?? 0;
-      const decimals = info.tokenAmount?.decimals ?? 9;
-      if (uiAmount === 0) continue;
-      if (!tokenMap.has(mint)) tokenMap.set(mint, { balance: 0, decimals });
-      tokenMap.get(mint).balance += uiAmount;
+      const tokenMap = new Map(); // mint → { balance, decimals }
+      for (const { account } of [...tokenAccounts.value, ...token2022Accounts.value]) {
+        const info = account.data?.parsed?.info;
+        if (!info) continue;
+        const mint = info.mint;
+        const uiAmount = info.tokenAmount?.uiAmount ?? 0;
+        const decimals = info.tokenAmount?.decimals ?? 9;
+        if (uiAmount === 0) continue;
+        if (!tokenMap.has(mint)) tokenMap.set(mint, { balance: 0, decimals });
+        tokenMap.get(mint).balance += uiAmount;
+      }
+
+      tokenEntries = [...tokenMap.entries()]
+        .map(([mint, { balance, decimals }]) => ({ mint, balance, decimals }))
+        .filter(t => t.balance > 0);
+
+      _accountCache = { solBalance, tokenEntries, at: Date.now() };
+      log("wallet", `Account cache refreshed — ${tokenEntries.length} token(s)`);
     }
-
-    const tokenEntries = [...tokenMap.entries()]
-      .map(([mint, { balance, decimals }]) => ({ mint, balance, decimals }))
-      .filter(t => t.balance > 0);
 
     // ─── Resolve symbols for new mints (cached, parallel, non-blocking) ─────
     const unknownMints = tokenEntries.map(t => t.mint).filter(m => !_symbolCache.has(m));
