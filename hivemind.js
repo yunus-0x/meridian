@@ -152,10 +152,14 @@ function normalizeSharedLesson(lesson) {
 
 export function getSharedLessonsForPrompt({ agentType = "GENERAL", maxLessons = 6 } = {}) {
   const role = String(agentType || "GENERAL").toUpperCase();
+  // Suppress Hivemind lessons that recommend bid_ask — our pinned lessons explicitly
+  // require spot to avoid IL compounding on dumps (AINI -22%, WIZ -10%).
+  const BID_ASK_PATTERN = /\bbid[_-]ask\b/i;
   const shared = (readCache().sharedLessons || [])
     .map(normalizeSharedLesson)
     .filter(Boolean)
     .filter((lesson) => !lesson.role || lesson.role === role || role === "GENERAL")
+    .filter((lesson) => !BID_ASK_PATTERN.test(lesson.rule) || /\bWARNING\b|\bCAUTION\b|\bAVOID\b/i.test(lesson.rule))
     .sort((left, right) => (Number(right.score) || 0) - (Number(left.score) || 0))
     .slice(0, maxLessons);
 

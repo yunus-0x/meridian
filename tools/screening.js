@@ -330,6 +330,44 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     if (pools.length < before) log("blacklist", `GMGN: filtered ${before - pools.length} blacklisted/blocked pool(s)`);
   }
 
+  // Hard-filter by fee/TVL ratio — GMGN pools bypass discoverPools() which applies this filter for
+  // Meteora pools. Apply it here to the combined pool list so GMGN candidates can't slip through.
+  if (config.screening.minFeeActiveTvlRatio > 0) {
+    const before = pools.length;
+    const minFee = config.screening.minFeeActiveTvlRatio;
+    pools = pools.filter((p) => {
+      const feeRatio = Number(p.fee_active_tvl_ratio ?? 0);
+      if (feeRatio < minFee) {
+        log("screening", `fee/TVL filter: dropped ${p.name} — fee/TVL ${feeRatio} < ${minFee}`);
+        pushFilteredReason(filteredOut, p, `fee/TVL ${feeRatio} < minFeeActiveTvlRatio ${minFee}`);
+        return false;
+      }
+      return true;
+    });
+    if (pools.length < before) log("screening", `fee/TVL filter removed ${before - pools.length} pool(s) below ${minFee}`);
+  }
+
+  // Hard-filter by minimum organic score — only applies when organic data is present.
+  // GMGN pools have base.organic=null (no organic data from that pipeline), so skip those.
+  // Meteora pools already had organic enforced at the API query level, but re-check here
+  // as a safety net for any that slipped through with 0 values.
+  if (config.screening.minOrganic > 0) {
+    const before = pools.length;
+    const minOrg = config.screening.minOrganic;
+    pools = pools.filter((p) => {
+      const rawOrganic = p.organic_score ?? p.base?.organic ?? null;
+      if (rawOrganic === null) return true; // no organic data — can't filter (e.g. GMGN pools)
+      const organic = Number(rawOrganic);
+      if (organic < minOrg) {
+        log("screening", `Organic filter: dropped ${p.name} — organic ${organic} < ${minOrg}`);
+        pushFilteredReason(filteredOut, p, `organic ${organic} < minOrganic ${minOrg}`);
+        return false;
+      }
+      return true;
+    });
+    if (pools.length < before) log("screening", `Organic filter removed ${before - pools.length} pool(s) below ${minOrg}`);
+  }
+
   // Hard-filter by minimum pool base fee %
   if (config.screening.minPoolFeePct > 0) {
     const before = pools.length;

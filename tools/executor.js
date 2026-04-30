@@ -206,6 +206,9 @@ const toolMap = {
       gasReserve: ["management", "gasReserve"],
       positionSizePct: ["management", "positionSizePct"],
       minAgeBeforeYieldCheck: ["management", "minAgeBeforeYieldCheck"],
+      feeStallWindowMinutes:  ["management", "feeStallWindowMinutes"],
+      feeStallMinGrowthPct:   ["management", "feeStallMinGrowthPct"],
+      feeStallMinAgeMinutes:  ["management", "feeStallMinAgeMinutes"],
       // risk
       maxPositions: ["risk", "maxPositions"],
       maxDeployAmount: ["risk", "maxDeployAmount"],
@@ -675,6 +678,33 @@ async function runSafetyChecks(name, args) {
             reason: `Insufficient SOL: have ${balance.sol} SOL, need ${minRequired} SOL (${amountY} deploy + ${gasReserve} gas reserve).`,
           };
         }
+      }
+
+      // Hard gate: all 3 primary filters must pass simultaneously — final safety net in case a pool
+      // slipped through the screener (e.g. GMGN pools bypassing Meteora-only filters).
+      const feeTvlRatio = args.fee_tvl_ratio ?? args.fee_active_tvl_ratio ?? null;
+      const organicScore = args.organic_score ?? null;
+      const volatilityVal = args.volatility ?? null;
+      const minFee = config.screening.minFeeActiveTvlRatio ?? 0;
+      const minOrg = config.screening.minOrganic ?? 0;
+      const minVol = config.screening.minVolatility ?? 0;
+      if (feeTvlRatio != null && feeTvlRatio < minFee) {
+        return {
+          pass: false,
+          reason: `Blocked: fee/TVL ratio ${feeTvlRatio} is below minimum ${minFee}. All 3 primary gates must pass simultaneously.`,
+        };
+      }
+      if (organicScore != null && organicScore < minOrg) {
+        return {
+          pass: false,
+          reason: `Blocked: organic score ${organicScore} is below minimum ${minOrg}. All 3 primary gates must pass simultaneously.`,
+        };
+      }
+      if (volatilityVal != null && volatilityVal < minVol) {
+        return {
+          pass: false,
+          reason: `Blocked: volatility ${volatilityVal} is below minimum ${minVol}. All 3 primary gates must pass simultaneously.`,
+        };
       }
 
       return { pass: true };

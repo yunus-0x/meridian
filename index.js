@@ -187,7 +187,7 @@ async function claudeChat(userMessage, priorHistory = []) {
   } catch { /* non-fatal */ }
 
   contextLines.push(
-    `Config: deploy ${config.management.deployAmountSol} SOL | TP ${config.management.takeProfitPct}% | SL ${config.management.stopLossPct}% | max ${config.risk.maxPositions} positions | trailing TP ${config.management.trailingTakeProfit ? "on" : "off"}`
+    `Config: deploy ${config.management.deployAmountSol} SOL | TP ${config.management.takeProfitPct}% | SL ${config.management.stopLossPct}% | max ${config.risk.maxPositions} positions | trailing TP ${config.management.trailingTakeProfit ? `on (trigger ${config.management.trailingTriggerPct}%, drop ${config.management.trailingDropPct}%)` : "off"}`
   );
 
   // Trade history — all-time summary + per-day breakdown + full recent list
@@ -1569,6 +1569,10 @@ function formatHelpText() {
     "/screen — refresh deterministic candidate list",
     "/candidates — show latest cached candidates",
     "/deploy <n> — deploy candidate by cached index",
+    "/learn — study top LPers and save lessons",
+    "/learn <pool> — study top LPers for a specific pool address",
+    "/thresholds — show current screening thresholds + performance",
+    "/evolve — evolve screening thresholds from closed position data",
     "/briefing — morning briefing",
     "/hive — HiveMind sync status",
     "/hive pull — manual HiveMind pull now",
@@ -1880,6 +1884,104 @@ async function telegramHandler(msg) {
       await sendMessage(await runDeterministicScreen(5)).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/thresholds") {
+    try {
+      const s = config.screening;
+      const perf = getPerformanceSummary();
+      const lines = [
+        "📊 Current screening thresholds:",
+        `  minFeeActiveTvlRatio: ${s.minFeeActiveTvlRatio}`,
+        `  minOrganic:           ${s.minOrganic}`,
+        `  minVolatility:        ${s.minVolatility}`,
+        `  maxVolatility:        ${s.maxVolatility ?? "off"}`,
+        `  minHolders:           ${s.minHolders}`,
+        `  minTvl:               ${s.minTvl}`,
+        `  maxTvl:               ${s.maxTvl}`,
+        `  minVolume:            ${s.minVolume}`,
+        `  minTokenFeesSol:      ${s.minTokenFeesSol}`,
+        `  maxBundlePct:         ${s.maxBundlePct}`,
+        `  maxBotHoldersPct:     ${s.maxBotHoldersPct}`,
+        `  maxTop10Pct:          ${s.maxTop10Pct}`,
+        `  timeframe:            ${s.timeframe}`,
+        perf
+          ? `\n📈 Based on ${perf.total_positions_closed} closed positions\n  Win rate: ${perf.win_rate_pct}%  |  Avg PnL: ${perf.avg_pnl_pct}%`
+          : "\nNo closed positions yet — thresholds are preset defaults.",
+      ];
+      await sendMessage(lines.join("\n")).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/evolve") {
+    busy = true;
+    try {
+      const perf = getPerformanceSummary();
+      if (!perf || perf.total_positions_closed < 5) {
+        const needed = 5 - (perf?.total_positions_closed || 0);
+        await sendMessage(`Need at least 5 closed positions to evolve. ${needed} more needed.`).catch(() => {});
+        return;
+      }
+      await sendMessage("⚙️ Evolving thresholds from performance data...").catch(() => {});
+      const fs = await import("fs");
+      const lessonsData = JSON.parse(fs.default.readFileSync("./lessons.json", "utf8"));
+      const result = evolveThresholds(lessonsData.performance, config);
+      if (!result || Object.keys(result.changes).length === 0) {
+        await sendMessage("No threshold changes needed — current settings already match performance data.").catch(() => {});
+      } else {
+        reloadScreeningThresholds();
+        const lines = ["✅ Thresholds evolved:"];
+        for (const [key, val] of Object.entries(result.changes)) {
+          lines.push(`  ${key}: ${result.rationale[key]}`);
+        }
+        lines.push("\nSaved to user-config.json. Applied immediately.");
+        await sendMessage(lines.join("\n")).catch(() => {});
+      }
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    } finally {
+      busy = false;
+      drainTelegramQueue().catch(() => {});
+    }
+    return;
+  }
+
+  const learnMatch = text.match(/^\/learn(?:\s+(\S+))?$/i);
+  if (learnMatch) {
+    const poolArg = learnMatch[1] || null;
+    busy = true;
+    try {
+      let poolsToStudy = [];
+      if (poolArg) {
+        poolsToStudy = [{ pool: poolArg, name: poolArg }];
+      } else {
+        await sendMessage("🔍 Fetching top pool candidates to study...").catch(() => {});
+        const { candidates } = await getTopCandidates({ limit: 10 });
+        if (!candidates.length) {
+          await sendMessage("No eligible pools found to study right now.").catch(() => {});
+          return;
+        }
+        poolsToStudy = candidates.map((c) => ({ pool: c.pool, name: c.name }));
+      }
+      await sendMessage(`📚 Studying top LPers across ${poolsToStudy.length} pool(s):\n${poolsToStudy.map(p => `  • ${p.name || p.pool}`).join("\n")}\n\nThis takes a minute...`).catch(() => {});
+      const poolList = poolsToStudy.map((p, i) => `${i + 1}. ${p.name} (${p.pool})`).join("\n");
+      const { content: reply } = await agentLoop(
+        `Study top LPers across these ${poolsToStudy.length} pools by calling study_top_lpers for each:\n\n${poolList}\n\nFor each pool, call study_top_lpers then move to the next. After studying all pools:\n1. Identify patterns that appear across multiple pools (hold time, scalping vs holding, win rates).\n2. Note pool-specific patterns where behaviour differs significantly.\n3. Derive 4-8 concrete, actionable lessons using add_lesson. Prioritize cross-pool patterns — they're more reliable.\n4. Summarize what you learned.\n\nFocus on: hold duration, entry/exit timing, what win rates look like, whether scalpers or holders dominate.`,
+        config.llm.maxSteps,
+        [],
+        "GENERAL"
+      );
+      await sendMessage(stripThink(reply)).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    } finally {
+      busy = false;
+      drainTelegramQueue().catch(() => {});
     }
     return;
   }

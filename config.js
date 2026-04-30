@@ -168,8 +168,11 @@ export const config = {
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
     stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
-    minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
-    minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
+    minFeePerTvl24h:        u.minFeePerTvl24h        ?? 7,
+    minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60,  // minutes before low yield can trigger close
+    feeStallWindowMinutes:  u.feeStallWindowMinutes  ?? 30,  // window to measure fee growth
+    feeStallMinGrowthPct:   u.feeStallMinGrowthPct   ?? 0.05, // min fee_pnl_pct growth in that window
+    feeStallMinAgeMinutes:  u.feeStallMinAgeMinutes  ?? 45,  // don't check before position is this old
     minSolToOpen:          u.minSolToOpen          ?? 0.55,
     deployAmountSol:       u.deployAmountSol       ?? 0.5,
     gasReserve:            u.gasReserve            ?? 0.2,

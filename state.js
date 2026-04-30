@@ -389,7 +389,7 @@ export function getStateSummary() {
  * Returns { action, reason } or null if no exit needed.
  */
 export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig) {
-  const { pnl_pct: currentPnlPct, pnl_pct_suspicious, in_range, fee_per_tvl_24h } = positionData;
+  const { pnl_pct: currentPnlPct, pnl_pct_suspicious, in_range, fee_per_tvl_24h, fee_pnl_pct, age_minutes } = positionData;
   const state = load();
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return null;
@@ -424,6 +424,20 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     pos.out_of_range_since = null;
     changed = true;
     log("state", `Position ${position_address} back in range`);
+  }
+
+  // ── Fee snapshot (record every 5 min for fee stall detection) ──
+  if (fee_pnl_pct != null) {
+    const now = Date.now();
+    const snaps = pos.fee_snapshots ?? [];
+    const last = snaps[snaps.length - 1];
+    if (!last || now - last.ts >= 5 * 60 * 1000) {
+      snaps.push({ ts: now, fee_pnl_pct });
+      // Keep only last 70 minutes of snapshots
+      const cutoff = now - 70 * 60 * 1000;
+      pos.fee_snapshots = snaps.filter(s => s.ts >= cutoff);
+      changed = true;
+    }
   }
 
   if (changed) save(state);
@@ -463,7 +477,6 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   // ── Low yield (only after position has had time to accumulate fees) ───
-  const { age_minutes } = positionData;
   const minAgeForYieldCheck = mgmtConfig.minAgeBeforeYieldCheck ?? 60;
   if (
     fee_per_tvl_24h != null &&
@@ -475,6 +488,32 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
       action: "LOW_YIELD",
       reason: `Low yield: fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}% (age: ${age_minutes ?? "?"}m)`,
     };
+  }
+
+  // ── Fee stall (pool activity dried up — fees stopped growing) ──
+  // Uses cumulative fee_pnl_pct snapshots taken every 5 min to detect when
+  // a pool that opened with high activity has gone silent.
+  const stallWindowMs  = (mgmtConfig.feeStallWindowMinutes ?? 30) * 60 * 1000;
+  const stallMinAge    = mgmtConfig.feeStallMinAgeMinutes ?? 45;
+  const stallMinGrowth = mgmtConfig.feeStallMinGrowthPct  ?? 0.05;
+  if (
+    fee_pnl_pct != null &&
+    (age_minutes ?? 0) >= stallMinAge &&
+    pos.fee_snapshots?.length >= 2
+  ) {
+    const windowStart = Date.now() - stallWindowMs;
+    // Find the newest snapshot that is at or before the window start — that's our baseline
+    const baseline = [...pos.fee_snapshots].reverse().find(s => s.ts <= windowStart);
+    if (baseline != null) {
+      const growth = fee_pnl_pct - baseline.fee_pnl_pct;
+      const windowMinutes = Math.round((Date.now() - baseline.ts) / 60000);
+      if (growth < stallMinGrowth) {
+        return {
+          action: "FEE_STALL",
+          reason: `Fee stall: earned ${growth.toFixed(3)}% in last ${windowMinutes}m (min: ${stallMinGrowth}%) — pool activity dried up`,
+        };
+      }
+    }
   }
 
   return null;
