@@ -682,7 +682,7 @@ function fmt(lessons) {
   return lessons.map((l) => {
     const date = l.created_at ? l.created_at.slice(0, 16).replace("T", " ") : "unknown";
     const pin  = l.pinned ? "📌 " : "";
-    return `${pin}[${l.outcome.toUpperCase()}] [${date}] ${l.rule}`;
+    return `${pin}[${(l.outcome || "info").toUpperCase()}] [${date}] ${l.rule}`;
   }).join("\n");
 }
 
