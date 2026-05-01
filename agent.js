@@ -219,6 +219,13 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             attempt -= 1;
             continue;
           }
+          // OpenCode Go (and some providers) return 400 for tool_choice=required without mentioning "tool_choice" in message
+          if (toolChoice === "required" && error?.status === 400) {
+            toolChoice = "auto";
+            log("agent", "Provider returned 400 with tool_choice=required — retrying with tool_choice=auto");
+            attempt -= 1;
+            continue;
+          }
           throw error;
         }
         if (response.choices?.length) break;
