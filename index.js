@@ -525,6 +525,10 @@ export async function runManagementCycle({ silent = false } = {}) {
         });
         await liveMessage?.toolFinish("close_position", result, result?.success ?? false);
         mgmtReport += `\n\n✅ Closed ${p.pair}: ${act.reason}`;
+        // Pump-exit cooldown: token just spiked above range — high rug risk on re-entry
+        if (act.rule === 3 && (result?.success || result?.close_txs?.length)) {
+          setManualCloseCooldown(p.pool, result?.base_mint || null, 2);
+        }
       } catch (e) {
         log("cron_error", `Direct close of ${p.pair} failed: ${e.message}`);
         await liveMessage?.toolFinish("close_position", { error: e.message }, false);
