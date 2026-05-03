@@ -2,6 +2,8 @@
 
 **Autonomous Meteora DLMM liquidity management agent for Solana, powered by LLMs.**
 
+**Links:** [Website](https://agentmeridian.xyz) | [Telegram](https://t.me/agentmeridian) | [X](https://x.com/meridian_agent)
+
 Meridian runs continuous screening and management cycles, deploying capital into high-quality Meteora DLMM pools and closing positions based on live PnL, yield, and range data. It learns from every position it closes.
 
 ---
@@ -25,6 +27,12 @@ Meridian runs a **ReAct agent loop** — each cycle the LLM reasons over live da
 |---|---|---|
 | **Screening Agent** | Every 30 min | Pool screening — finds and deploys into the best candidate |
 | **Management Agent** | Every 10 min | Position management — evaluates each open position and acts |
+
+### Agent harness
+
+Meridian's agent harness is the runtime wrapper around every autonomous cycle. It gives both **main** and **experimental** agents the same control loop: load live state, inject relevant memory, expose only role-appropriate tools, execute tool calls, and return a readable cycle report.
+
+The harness also keeps a structured decision log in `decision-log.json` for deployments, closes, skips, and no-deploy outcomes. Each entry records the actor, pool or position, summary, reason, key risks, metrics, and rejected alternatives. Recent decisions are injected back into the system prompt and are available through `get_recent_decisions`, so the agent can answer "why did you deploy?", "why did you close?", or "why did you skip?" without guessing after the fact.
 
 **Data sources:**
 - `@meteora-ag/dlmm` SDK — on-chain position data, active bin, deploy/close transactions
@@ -433,7 +441,6 @@ All fields are optional — defaults shown. Edit `user-config.json`.
 | `screeningModel` | `openai/gpt-oss-20b:free` | LLM for screening cycles |
 | `generalModel` | `openai/gpt-oss-20b:free` | LLM for REPL / chat |
 
-<<<<<<< HEAD
 > Override model at runtime: `node cli.js config set screeningModel anthropic/claude-opus-4-5`
 
 ---
@@ -534,6 +541,7 @@ agent.js            ReAct loop: LLM → tool call → repeat
 config.js           Runtime config from user-config.json + .env
 prompt.js           System prompt builder (SCREENER / MANAGER / GENERAL roles)
 state.js            Position registry (state.json)
+decision-log.js     Structured decision log for deploy, close, skip, and no-deploy rationale
 lessons.js          Learning engine: records performance, derives lessons, evolves thresholds
 pool-memory.js      Per-pool deploy history + snapshots
 strategy-library.js Saved LP strategies
