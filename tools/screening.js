@@ -368,18 +368,22 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     if (pools.length < before) log("screening", `Organic filter removed ${before - pools.length} pool(s) below ${minOrg}`);
   }
 
-  // Hard-filter by minimum pool base fee %
-  if (config.screening.minPoolFeePct > 0) {
+  // Hard-filter by pool base fee % range
+  if (config.screening.minPoolFeePct > 0 || config.screening.maxPoolFeePct != null) {
     const before = pools.length;
     pools = pools.filter((p) => {
       const feePct = Number(p.fee_pct ?? 0);
-      if (feePct < config.screening.minPoolFeePct) {
+      if (config.screening.minPoolFeePct > 0 && feePct < config.screening.minPoolFeePct) {
         pushFilteredReason(filteredOut, p, `fee_pct ${feePct}% < minPoolFeePct ${config.screening.minPoolFeePct}%`);
+        return false;
+      }
+      if (config.screening.maxPoolFeePct != null && feePct > config.screening.maxPoolFeePct) {
+        pushFilteredReason(filteredOut, p, `fee_pct ${feePct}% > maxPoolFeePct ${config.screening.maxPoolFeePct}%`);
         return false;
       }
       return true;
     });
-    if (pools.length < before) log("screening", `minPoolFeePct filter removed ${before - pools.length} pool(s) below ${config.screening.minPoolFeePct}% fee`);
+    if (pools.length < before) log("screening", `poolFeePct filter removed ${before - pools.length} pool(s) outside [${config.screening.minPoolFeePct}%, ${config.screening.maxPoolFeePct ?? "∞"}%]`);
   }
 
   // Exclude pools where the wallet already has an open position
@@ -451,11 +455,12 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   }
 
   // Enrich with OKX data — advanced info (risk/bundle/sniper) + ATH price (no API key required)
-  // Skipped for GMGN: bundler/bot/wash data already sourced from GMGN pipeline
-  if (source === "meteora" && eligible.length > 0) {
+  // Skipped for GMGN pools (p.gmgn=true): bundler/bot/wash data already sourced from GMGN pipeline
+  if ((source === "meteora" || source === "both") && eligible.length > 0) {
     const { getAdvancedInfo, getPriceInfo, getClusterList, getRiskFlags } = await import("./okx.js");
     const okxResults = await Promise.allSettled(
       eligible.map(async (p) => {
+        if (p.gmgn) return { adv: null, price: null, clusters: [], risk: null };
         if (!p.base?.mint) return { adv: null, price: null, clusters: [], risk: null };
         const [adv, price, clusters, risk] = await Promise.allSettled([
           getAdvancedInfo(p.base.mint),
@@ -517,6 +522,31 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       }
       return true;
     }));
+
+    // OKX rugpull hard filter
+    eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+      if (p.is_rugpull) {
+        log("screening", `Rugpull filter: dropped ${p.name} — OKX flagged as rugpull`);
+        pushFilteredReason(filteredOut, p, "OKX rugpull flag");
+        return false;
+      }
+      return true;
+    }));
+
+    // OKX risk level hard filter
+    const maxOkxRiskLevel = config.screening.maxOkxRiskLevel;
+    if (maxOkxRiskLevel != null) {
+      const before = eligible.length;
+      eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+        if (p.risk_level != null && p.risk_level > maxOkxRiskLevel) {
+          log("screening", `OKX risk filter: dropped ${p.name} — risk level ${p.risk_level} > ${maxOkxRiskLevel}`);
+          pushFilteredReason(filteredOut, p, `OKX risk level ${p.risk_level} > ${maxOkxRiskLevel}`);
+          return false;
+        }
+        return true;
+      }));
+      if (eligible.length < before) log("screening", `OKX risk filter removed ${before - eligible.length} pool(s)`);
+    }
 
     // ATH filter — drop pools where price is too close to ATH
     const athFilter = config.screening.athFilterPct;

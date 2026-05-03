@@ -28,7 +28,7 @@ import {
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
-import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
+import { recordPositionSnapshot, recallForPool, addPoolNote, setManualCloseCooldown } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 import { stageSignals } from "./signal-tracker.js";
@@ -392,6 +392,7 @@ async function maybeRunMissedBriefing() {
 function stopCronJobs() {
   for (const task of _cronTasks) task.stop();
   if (_cronTasks._pnlPollInterval) clearInterval(_cronTasks._pnlPollInterval);
+  if (_cronTasks._heartbeatInterval) clearInterval(_cronTasks._heartbeatInterval);
   _cronTasks = [];
 }
 
@@ -1023,9 +1024,27 @@ Summarize the current portfolio health, total fees earned, and performance of al
     }
   }, 30_000);
 
+  // Heartbeat watchdog — alert if cycles have been silent too long
+  let _lastHeartbeatAlert = 0;
+  const HEARTBEAT_CHECK_MS = 5 * 60 * 1000;
+  const HEARTBEAT_ALERT_COOLDOWN_MS = 60 * 60 * 1000; // max 1 alert per hour
+  const heartbeatInterval = setInterval(async () => {
+    if (!telegramEnabled()) return;
+    const now = Date.now();
+    if (now - _lastHeartbeatAlert < HEARTBEAT_ALERT_COOLDOWN_MS) return;
+    const mgmtSilentMs = timers.managementLastRun ? now - timers.managementLastRun : null;
+    const mgmtThresholdMs = (config.schedule.managementIntervalMin + 10) * 60 * 1000;
+    if (mgmtSilentMs !== null && mgmtSilentMs > mgmtThresholdMs && !_managementBusy && !_screeningBusy) {
+      _lastHeartbeatAlert = now;
+      const silentMin = Math.round(mgmtSilentMs / 60_000);
+      sendMessage(`⚠️ Heartbeat alert: no management cycle in ${silentMin}m (expected every ${config.schedule.managementIntervalMin}m). Bot may be stalled.`).catch(() => {});
+    }
+  }, HEARTBEAT_CHECK_MS);
+
   _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog];
-  // Store interval ref so stopCronJobs can clear it
+  // Store interval refs so stopCronJobs can clear them
   _cronTasks._pnlPollInterval = pnlPollInterval;
+  _cronTasks._heartbeatInterval = heartbeatInterval;
   log("cron", `Cycles started — management every ${config.schedule.managementIntervalMin}m, screening every ${config.schedule.screeningIntervalMin}m`);
 }
 
@@ -1834,7 +1853,10 @@ async function telegramHandler(msg) {
         try {
           const result = await closePosition({ position_address: pos.position });
           results.push(`${pos.pair}: ${result.success ? "closed" : `failed (${result.error || "unknown"})`}`);
-          if (result.success && result.base_mint) baseMints.push({ mint: result.base_mint, pair: pos.pair });
+          if (result.success) {
+            if (result.base_mint) baseMints.push({ mint: result.base_mint, pair: pos.pair });
+            setManualCloseCooldown(pos.pool, result.base_mint || null, 2);
+          }
         } catch (error) {
           results.push(`${pos.pair}: failed (${error.message})`);
         }

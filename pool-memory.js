@@ -233,6 +233,20 @@ export function recordPoolDeploy(poolAddress, deployData) {
   log("pool-memory", `Recorded deploy for ${entry.name} (${poolAddress.slice(0, 8)}): PnL ${deploy.pnl_pct}%`);
 }
 
+export function setManualCloseCooldown(poolAddress, baseMint, hours = 2) {
+  if (!poolAddress) return;
+  const db = load();
+  if (!db[poolAddress]) {
+    db[poolAddress] = { name: poolAddress.slice(0, 8), base_mint: baseMint || null, deploys: [], total_deploys: 0, avg_pnl_pct: 0, win_rate: 0, adjusted_win_rate: 0, adjusted_win_rate_sample_count: 0, last_deployed_at: null, last_outcome: null, notes: [] };
+  }
+  const entry = db[poolAddress];
+  if (baseMint && !entry.base_mint) entry.base_mint = baseMint;
+  const cooldownUntil = setPoolCooldown(entry, hours, "manual close");
+  if (baseMint) setBaseMintCooldown(db, baseMint, hours, "manual close");
+  save(db);
+  log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (manual close)`);
+}
+
 export function isPoolOnCooldown(poolAddress) {
   if (!poolAddress) return false;
   const db = load();

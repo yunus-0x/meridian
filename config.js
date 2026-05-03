@@ -91,7 +91,9 @@ export const config = {
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
     athFilterPct:       u.athFilterPct       ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
     maxPhishingPct:     u.maxPhishingPct     ?? null, // max suspicious/phishing holder % (OKX suspiciousHoldingPercent)
-    minPoolFeePct:      u.minPoolFeePct      ?? 0,    // minimum pool base fee % (e.g. 10 = 10%). 0 = disabled
+    maxOkxRiskLevel:    u.maxOkxRiskLevel    ?? null, // null = no limit; 1-5 scale, 4 = block high+very-high risk
+    minPoolFeePct:      u.minPoolFeePct      ?? 0,    // minimum pool base fee % (e.g. 1 = 1%). 0 = disabled
+    maxPoolFeePct:      u.maxPoolFeePct      ?? null, // null = no ceiling
     minVolatility:      u.minVolatility      ?? null, // null = no minimum; set to require price movement
     maxVolatility:      u.maxVolatility      ?? null, // null = no ceiling; evolved automatically by lessons.js
   },
@@ -327,6 +329,8 @@ export function reloadScreeningThresholds() {
     if (fresh.blockPvpSymbols   !== undefined) s.blockPvpSymbols = fresh.blockPvpSymbols;
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
     if (fresh.maxPhishingPct    !== undefined) s.maxPhishingPct = fresh.maxPhishingPct;
+    if (fresh.maxOkxRiskLevel   !== undefined) s.maxOkxRiskLevel = fresh.maxOkxRiskLevel;
+    if (fresh.maxPoolFeePct     !== undefined) s.maxPoolFeePct   = fresh.maxPoolFeePct;
     if (fresh.allowedLaunchpads !== undefined) s.allowedLaunchpads = fresh.allowedLaunchpads;
     if (fresh.blockedLaunchpads !== undefined) s.blockedLaunchpads = fresh.blockedLaunchpads;
   } catch { /* ignore */ }
