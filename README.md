@@ -2,6 +2,8 @@
 
 **Autonomous Meteora DLMM liquidity management agent for Solana, powered by LLMs.**
 
+**Links:** [Website](https://agentmeridian.xyz) | [Telegram](https://t.me/agentmeridian) | [X](https://x.com/meridian_agent)
+
 ---
 
 ## What it does
@@ -25,6 +27,12 @@ Meridian runs a **ReAct agent loop** — each cycle the LLM reasons over live da
 | **Healer Alpha** | Every 10 min | Position management — evaluates each open position and acts |
 
 A third **health check** runs hourly to summarize portfolio state.
+
+### Agent harness
+
+Meridian's agent harness is the runtime wrapper around every autonomous cycle. It gives both **main** and **experimental** agents the same control loop: load live state, inject relevant memory, expose only role-appropriate tools, execute tool calls, and return a readable cycle report.
+
+The harness also keeps a structured decision log in `decision-log.json` for deployments, closes, skips, and no-deploy outcomes. Each entry records the actor, pool or position, summary, reason, key risks, metrics, and rejected alternatives. Recent decisions are injected back into the system prompt and are available through `get_recent_decisions`, so the agent can answer "why did you deploy?", "why did you close?", or "why did you skip?" without guessing after the fact.
 
 **Data sources used by the agents:**
 - `@meteora-ag/dlmm` SDK — on-chain position data, active bin, deploy/close transactions
