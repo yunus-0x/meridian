@@ -214,53 +214,45 @@ Use `/thresholds` to see current values alongside performance stats.
 
 ---
 
-## Hive Mind (optional)
+## HiveMind
 
-Meridian includes an **opt-in** collective intelligence system called **Hive Mind**. When enabled, your agent anonymously shares what it learns (lessons, deploy outcomes, screening thresholds) with other meridian agents and receives crowd wisdom in return.
+Meridian includes a collective intelligence layer called **HiveMind**. By default it uses Agent Meridian at `https://api.agentmeridian.xyz` with the built-in public key, so agents can register, pull shared lessons/presets, and push learning events without a separate registration flow.
 
 **What you get:**
-- Pool consensus from other agents — "8 agents deployed here, 72% win rate"
-- Strategy rankings — which strategies actually work across all agents
-- Pattern consensus — what works at different volatility levels
-- Threshold medians — what screening settings other agents have evolved to
+- Shared lessons from other Meridian agents
+- Strategy presets and crowd performance context
+- Role-aware lessons injected into future screener/manager prompts when `hiveMindPullMode` is `auto`
 
 **What you share:**
 - Lessons from `lessons.json`
-- Deploy outcomes from `pool-memory.json` (pool address, strategy, PnL, hold time)
-- Screening thresholds from `user-config.json`
-- **NO wallet addresses, private keys, or SOL balances are ever sent**
+- Closed-position performance events: pool, pool name, base mint, strategy, close reason, PnL, fees, and hold time
+- Agent heartbeat metadata: agent ID, version, timestamp, and basic capability flags
+- **Private keys and wallet balances are never sent**
 
-**Impact:** 1 non-blocking API call per screening cycle (~200ms), 1 fire-and-forget POST on position close. If the hive is down, your agent doesn't notice.
+HiveMind failures are non-blocking. If Agent Meridian is unavailable, the agent logs a warning and keeps running.
 
 ### Setup
 
-**1. Get the registration token** from the private Telegram discussion.
+No manual HiveMind registration command is required for the shared Agent Meridian setup. `agentId` is generated automatically on startup if it is missing.
 
-**2. Register your agent**
+To use a private HiveMind API key, check the Telegram announcement channel and set it as `hiveMindApiKey`.
 
-```bash
-node -e "import('./hive-mind.js').then(m => m.register('https://meridian-hive-api-production.up.railway.app', 'YOUR_TOKEN'))"
-```
+Relevant config fields:
 
-Replace `YOUR_TOKEN` with the registration token from Telegram.
-
-This automatically saves your credentials to `user-config.json`. **Save the API key printed in the terminal** — it will not be shown again.
-
-**3. Done.** No restart needed. Your agent will sync on every position close and query the hive during screening.
-
-### Disable
-
-Clear both fields in `user-config.json`:
 ```json
 {
+  "agentId": "",
   "hiveMindUrl": "",
-  "hiveMindApiKey": ""
+  "hiveMindApiKey": "",
+  "hiveMindPullMode": "auto"
 }
 ```
 
-### Self-hosting
+Blank `hiveMindUrl` and `hiveMindApiKey` values intentionally fall back to the Agent Meridian defaults. Set `hiveMindPullMode` to `manual` if you do not want shared lessons and presets pulled automatically.
 
-You can run your own hive server instead of using the public one. See [meridian-hive](https://github.com/fciaf420/meridian-hive) for the server source code.
+### Disable
+
+There is currently no empty-string disable path for HiveMind; blank values fall back to the built-in Agent Meridian defaults. A true off switch should be implemented as an explicit config flag before documenting HiveMind as disabled by clearing fields.
 
 ---
 
