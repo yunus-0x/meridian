@@ -110,6 +110,12 @@ Updates a config key. Parses value as JSON when possible.
 Valid keys: minTvl, maxTvl, minVolume, maxPositions, deployAmountSol, managementIntervalMin, screeningIntervalMin, managementModel, screeningModel, generalModel, autoSwapAfterClaim, minClaimAmount, outOfRangeWaitMinutes
 \`\`\`
 
+### meridian evolve
+Runs evolveThresholds() against all closed-position performance data and applies any threshold changes to config.
+\`\`\`
+Output: { evolved, performance_records, changes?, rationale? }
+\`\`\`
+
 ### meridian start [--dry-run]
 Starts the autonomous agent with cron jobs (management + screening).
 
@@ -337,6 +343,25 @@ switch (subcommand) {
       out(await executeTool("update_config", { changes: { [key]: value }, reason: "CLI config set" }));
     } else {
       die(`Unknown config subcommand: ${sub2}. Use: get, set`);
+    }
+    break;
+  }
+
+  // ── evolve ───────────────────────────────────────────────────────
+  case "evolve": {
+    const { evolveThresholds } = await import("./lessons.js");
+    const { config, reloadScreeningThresholds } = await import("./config.js");
+    const lessonsPath = fs.existsSync(path.join(meridianDir, "lessons.json"))
+      ? path.join(meridianDir, "lessons.json")
+      : new URL("./lessons.json", import.meta.url).pathname;
+    const lessonsData = JSON.parse(fs.readFileSync(lessonsPath, "utf8"));
+    const perf = lessonsData.performance || [];
+    const result = evolveThresholds(perf, config);
+    if (!result || Object.keys(result.changes).length === 0) {
+      out({ evolved: false, performance_records: perf.length, message: "No threshold changes — insufficient signal in performance data." });
+    } else {
+      reloadScreeningThresholds();
+      out({ evolved: true, performance_records: perf.length, changes: result.changes, rationale: result.rationale });
     }
     break;
   }

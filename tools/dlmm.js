@@ -25,7 +25,7 @@ import {
 } from "../state.js";
 import { recordPerformance } from "../lessons.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
-import { normalizeMint } from "./wallet.js";
+import { normalizeMint, getWalletBalances } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
@@ -780,6 +780,7 @@ export async function deployPosition({
           amount_x: finalAmountX,
           active_bin: activeBin.binId,
           initial_value_usd,
+          signal_snapshot: { organic_score, fee_tvl_ratio: resolvedFeeTvlRatio, volatility },
         });
       }
 
@@ -914,6 +915,7 @@ export async function deployPosition({
       amount_x: finalAmountX,
       active_bin: activeBin.binId,
       initial_value_usd,
+      signal_snapshot: { organic_score, fee_tvl_ratio: resolvedFeeTvlRatio, volatility },
     });
 
     appendDecision({
@@ -971,36 +973,6 @@ const POSITIONS_CACHE_TTL = 5 * 60_000; // 5 minutes
 let _positionsCache = null;
 let _positionsCacheAt = 0;
 let _positionsInflight = null; // deduplicates concurrent calls
-const LPAGENT_API = "https://api.lpagent.io/open-api/v1";
-
-async function fetchLpAgentOpenPositions(walletAddress) {
-  if (!process.env.LPAGENT_API_KEY) return {};
-
-  const url = `${LPAGENT_API}/lp-positions/opening?owner=${walletAddress}`;
-  try {
-    const res = await fetch(url, {
-      headers: {
-        "x-api-key": process.env.LPAGENT_API_KEY,
-      },
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      log("lpagent_api", `HTTP ${res.status} for owner ${walletAddress.slice(0, 8)}: ${body.slice(0, 160)}`);
-      return {};
-    }
-    const data = await res.json();
-    const positions = data?.data || [];
-    const byAddress = {};
-    for (const p of positions) {
-      const addr = p.position || p.id || p.tokenId;
-      if (addr) byAddress[addr] = p;
-    }
-    return byAddress;
-  } catch (e) {
-    log("lpagent_api", `Fetch error for owner ${walletAddress.slice(0, 8)}: ${e.message}`);
-    return {};
-  }
-}
 
 // ─── Fetch DLMM PnL API for all positions in a pool ────────────
 async function fetchDlmmPnlForPool(poolAddress, walletAddress) {
@@ -1210,7 +1182,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
     // Detailed range data stays on Meteora PnL API; value/PnL can be overridden by LPAgent below.
     if (!silent) log("positions", "Fetching portfolio via Meteora portfolio API...");
     const portfolioUrl = `https://dlmm.datapi.meteora.ag/portfolio/open?user=${walletAddress}`;
-    const res = await fetch(portfolioUrl);
+    const res = await fetch(portfolioUrl, { signal: AbortSignal.timeout(20_000) });
     if (!res.ok) throw new Error(`Portfolio API ${res.status}: ${await res.text().catch(() => "")}`);
     const portfolio = await res.json();
 
@@ -1611,8 +1583,8 @@ export async function closePosition({ position_address, reason }) {
         recordClose(position_address, reason || "agent decision");
 
         if (tracked) {
-          const deployedAt = new Date(tracked.deployed_at).getTime();
-          const minutesHeld = Math.floor((Date.now() - deployedAt) / 60000);
+          const deployedAt = tracked.deployed_at ? new Date(tracked.deployed_at).getTime() : Date.now();
+          const minutesHeld = Math.max(0, Math.floor((Date.now() - deployedAt) / 60000));
           let minutesOOR = 0;
           if (tracked.out_of_range_since) {
             minutesOOR = Math.floor((Date.now() - new Date(tracked.out_of_range_since).getTime()) / 60000);
@@ -1663,6 +1635,7 @@ export async function closePosition({ position_address, reason }) {
             minutes_in_range: minutesHeld - minutesOOR,
             minutes_held: minutesHeld,
             close_reason: reason || "agent decision",
+            signal_snapshot: tracked.signal_snapshot || null,
           });
 
           appendDecision({
@@ -1843,8 +1816,8 @@ export async function closePosition({ position_address, reason }) {
 
     // Record performance for learning
     if (tracked) {
-      const deployedAt = new Date(tracked.deployed_at).getTime();
-      const minutesHeld = Math.floor((Date.now() - deployedAt) / 60000);
+      const deployedAt = tracked.deployed_at ? new Date(tracked.deployed_at).getTime() : Date.now();
+      const minutesHeld = Math.max(0, Math.floor((Date.now() - deployedAt) / 60000));
 
       let minutesOOR = 0;
       if (tracked.out_of_range_since) {
@@ -1938,6 +1911,7 @@ export async function closePosition({ position_address, reason }) {
         minutes_in_range: minutesHeld - minutesOOR,
         minutes_held: minutesHeld,
         close_reason: reason || "agent decision",
+        signal_snapshot: tracked.signal_snapshot || null,
       });
 
       appendDecision({

@@ -32,18 +32,6 @@ function loadChatId() {
   } catch { /**/ }
 }
 
-function saveChatId(id) {
-  try {
-    let cfg = fs.existsSync(USER_CONFIG_PATH)
-      ? JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"))
-      : {};
-    cfg.telegramChatId = id;
-    fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(cfg, null, 2));
-  } catch (e) {
-    log("telegram_error", `Failed to persist chatId: ${e.message}`);
-  }
-}
-
 loadChatId();
 
 function isAuthorizedIncomingMessage(msg) {
@@ -421,8 +409,8 @@ export function stopPolling() {
 // ─── Notification helpers ────────────────────────────────────────
 export async function notifyDeploy({ pair, poolAddress, amountSol, strategy, binsBelow, binsAbove, position, tx, priceRange, rangeCoverage, binStep, baseFee, activeBin, feeTvlRatio, organicScore, volatility, tvl, entryReason }) {
   const lines = [];
-  lines.push(`🚀 <b>DEPLOYED — ${pair}</b>`);
-  if (poolAddress) lines.push(`Pool: <code>${poolAddress}</code>`);
+  lines.push(`🚀 <b>DEPLOYED — ${esc(pair)}</b>`);
+  if (poolAddress) lines.push(`Pool: <code>${esc(poolAddress)}</code>`);
   lines.push("");
 
   // Position details
@@ -444,33 +432,53 @@ export async function notifyDeploy({ pair, poolAddress, amountSol, strategy, bin
     lines.push(`Bin step: ${binStep ?? "?"} | Base fee: ${baseFee != null ? baseFee + "%" : "?"}`);
   }
 
-  // Market data
-  const marketParts = [
-    feeTvlRatio != null ? `Fee/TVL: ${feeTvlRatio}%` : null,
-    tvl != null ? `TVL: $${Number(tvl).toLocaleString()}` : null,
-    organicScore != null ? `Organic: ${organicScore}` : null,
-    volatility != null ? `Volatility: ${volatility}` : null,
-  ].filter(Boolean);
-  if (marketParts.length) {
-    lines.push("");
-    lines.push("<b>MARKET</b>");
-    lines.push(marketParts.join(" | "));
+  // Parse all sections from entry_reason, falling back to individual fields
+  if (entryReason) {
+    const sectionRegex = /^(MARKET|AUDIT|RISK|WHY THIS WON)\s*\n([\s\S]+?)(?=\n(?:MARKET|AUDIT|RISK|WHY THIS WON)\s*\n|$)/gim;
+    const sections = {};
+    let m;
+    while ((m = sectionRegex.exec(entryReason)) !== null) {
+      sections[m[1].toUpperCase()] = m[2].trim();
+    }
+
+    if (sections["MARKET"]) {
+      lines.push("");
+      lines.push("<b>MARKET</b>");
+      lines.push(esc(sections["MARKET"]));
+    }
+    if (sections["AUDIT"]) {
+      lines.push("");
+      lines.push("<b>AUDIT</b>");
+      lines.push(esc(sections["AUDIT"]));
+    }
+    if (sections["RISK"]) {
+      lines.push("");
+      lines.push("<b>RISK</b>");
+      lines.push(esc(sections["RISK"]));
+    }
+    if (sections["WHY THIS WON"]) {
+      lines.push("");
+      lines.push("<b>WHY THIS WON</b>");
+      lines.push(esc(sections["WHY THIS WON"]));
+    }
+  } else {
+    // Fallback: build market section from individual fields
+    const marketParts = [
+      feeTvlRatio != null ? `Fee/TVL: ${feeTvlRatio}%` : null,
+      tvl != null ? `TVL: $${Number(tvl).toLocaleString()}` : null,
+      organicScore != null ? `Organic: ${organicScore}` : null,
+      volatility != null ? `Volatility: ${volatility}` : null,
+    ].filter(Boolean);
+    if (marketParts.length) {
+      lines.push("");
+      lines.push("<b>MARKET</b>");
+      lines.push(marketParts.join(" | "));
+    }
   }
 
   lines.push("");
   if (position) lines.push(`Position: <code>${position}</code>`);
   if (tx) lines.push(`Tx: <code>${tx}</code>`);
-
-  // Extract just the WHY THIS WON section from the full entry_reason text
-  if (entryReason) {
-    const whyMatch = entryReason.match(/WHY THIS WON\s*\n([\s\S]+?)(?:\n\n[A-Z]+\n|$)/i);
-    const whyText = whyMatch ? whyMatch[1].trim() : null;
-    if (whyText) {
-      lines.push("");
-      lines.push("<b>WHY THIS WON</b>");
-      lines.push(whyText);
-    }
-  }
 
   await sendHTML(lines.join("\n"));
 }
@@ -480,8 +488,8 @@ export async function notifyClose({ pair, pnlUsd, pnlPct, reason, minutesHeld, a
   const pnlIcon = (pnlUsd ?? 0) >= 0 ? "🟢" : "🔴";
 
   const lines = [];
-  lines.push(`🔒 <b>CLOSED — ${pair}</b>`);
-  if (reason) lines.push(`Reason: ${reason}`);
+  lines.push(`🔒 <b>CLOSED — ${esc(pair)}</b>`);
+  if (reason) lines.push(`Reason: ${esc(reason)}`);
   lines.push("");
   lines.push(`${pnlIcon} PnL: <b>${sign}$${(pnlUsd ?? 0).toFixed(2)}</b> (${sign}${(pnlPct ?? 0).toFixed(2)}%)`);
 
@@ -512,22 +520,27 @@ export async function notifyClose({ pair, pnlUsd, pnlPct, reason, minutesHeld, a
 export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx }) {
   if (hasActiveLiveMessage()) return;
   await sendHTML(
-    `🔄 <b>Swapped</b> ${inputSymbol} → ${outputSymbol}\n` +
+    `🔄 <b>Swapped</b> ${esc(inputSymbol)} → ${esc(outputSymbol)}\n` +
     `In: ${amountIn ?? "?"} | Out: ${amountOut ?? "?"}\n` +
-    `Tx: <code>${tx?.slice(0, 16)}...</code>`
+    `Tx: <code>${esc(tx?.slice(0, 16))}...</code>`
   );
 }
 
 export async function notifyOutOfRange({ pair, minutesOOR }) {
   if (hasActiveLiveMessage()) return;
   await sendHTML(
-    `⚠️ <b>Out of Range</b> ${pair}\n` +
+    `⚠️ <b>Out of Range</b> ${esc(pair)}\n` +
     `Been OOR for ${minutesOOR} minutes`
   );
 }
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function esc(str) {
+  if (str == null) return "";
+  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function fmtPct(value) {

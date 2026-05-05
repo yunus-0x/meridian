@@ -20,7 +20,7 @@ import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-bla
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
-import { config, reloadScreeningThresholds } from "../config.js";
+import { config } from "../config.js";
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import path from "path";
@@ -180,6 +180,7 @@ const toolMap = {
       minVolatility:    ["screening", "minVolatility"],
       minPoolFeePct:    ["screening", "minPoolFeePct"],
       maxPoolFeePct:    ["screening", "maxPoolFeePct"],
+      maxFeeActiveTvlRatio: ["screening", "maxFeeActiveTvlRatio"],
       maxOkxRiskLevel:  ["screening", "maxOkxRiskLevel"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
       // management
@@ -212,6 +213,10 @@ const toolMap = {
       feeStallWindowMinutes:  ["management", "feeStallWindowMinutes"],
       feeStallMinGrowthPct:   ["management", "feeStallMinGrowthPct"],
       feeStallMinAgeMinutes:  ["management", "feeStallMinAgeMinutes"],
+      oorReentryCooldownHours: ["management", "oorReentryCooldownHours"],
+      slReentryCooldownHours:  ["management", "slReentryCooldownHours"],
+      maxInRangeHours:        ["management", "maxInRangeHours"],
+      minRollingFeeGrowthPct: ["management", "minRollingFeeGrowthPct"],
       // risk
       maxPositions: ["risk", "maxPositions"],
       maxDeployAmount: ["risk", "maxDeployAmount"],
@@ -476,26 +481,31 @@ export async function executeTool(name, args) {
         };
         notifySwap({ inputSymbol: resolveMintSymbol(args.input_mint), outputSymbol: resolveMintSymbol(args.output_mint), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
       } else if (name === "deploy_position") {
-        notifyDeploy({
-          pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8),
-          poolAddress: args.pool_address,
-          amountSol: args.amount_y ?? args.amount_sol ?? 0,
-          strategy: result.strategy || args.strategy,
-          binsBelow: args.bins_below,
-          binsAbove: args.bins_above,
-          position: result.position,
-          tx: result.txs?.[0] ?? result.tx,
-          priceRange: result.price_range,
-          rangeCoverage: result.range_coverage,
-          binStep: result.bin_step ?? args.bin_step,
-          baseFee: result.base_fee ?? args.base_fee,
-          activeBin: result.bin_range?.active,
-          feeTvlRatio: args.fee_tvl_ratio ?? args.fee_active_tvl_ratio,
-          organicScore: args.organic_score,
-          volatility: args.volatility,
-          tvl: args.initial_value_usd,
-          entryReason: args.entry_reason || null,
-        }).catch(() => {});
+        // Only send notifyDeploy when the agent didn't include entry_reason.
+        // When entry_reason is present the agent's own text output (live message) carries
+        // the full formatted report — firing notifyDeploy too would produce a duplicate.
+        if (!args.entry_reason) {
+          notifyDeploy({
+            pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8),
+            poolAddress: args.pool_address,
+            amountSol: args.amount_y ?? args.amount_sol ?? 0,
+            strategy: result.strategy || args.strategy,
+            binsBelow: args.bins_below,
+            binsAbove: args.bins_above,
+            position: result.position,
+            tx: result.txs?.[0] ?? result.tx,
+            priceRange: result.price_range,
+            rangeCoverage: result.range_coverage,
+            binStep: result.bin_step ?? args.bin_step,
+            baseFee: result.base_fee ?? args.base_fee,
+            activeBin: result.bin_range?.active,
+            feeTvlRatio: args.fee_tvl_ratio ?? args.fee_active_tvl_ratio,
+            organicScore: args.organic_score,
+            volatility: args.volatility,
+            tvl: args.initial_value_usd,
+            entryReason: null,
+          }).catch(() => {});
+        }
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
         try {
           let token = null;
@@ -712,6 +722,31 @@ async function runSafetyChecks(name, args) {
         return {
           pass: false,
           reason: `Blocked: volatility ${volatilityVal} is below minimum ${minVol}. All 3 primary gates must pass simultaneously.`,
+        };
+      }
+
+      // Fee/TVL ceiling — above 3% = extraction signal, not genuine activity
+      const maxFee = config.screening.maxFeeActiveTvlRatio ?? null;
+      if (maxFee != null && feeTvlRatio != null && feeTvlRatio > maxFee) {
+        return {
+          pass: false,
+          reason: `Blocked: fee/TVL ratio ${feeTvlRatio} exceeds ceiling ${maxFee}. Abnormally high fee/TVL is an extraction signal.`,
+        };
+      }
+
+      // OKX rugpull hard gate
+      if (args.okx_rugpull === true) {
+        return {
+          pass: false,
+          reason: "Blocked: OKX flagged this token as a rugpull risk.",
+        };
+      }
+
+      // Dev sold all hard gate — dev exiting is an abandonment signal
+      if (args.dev_sold_all === true) {
+        return {
+          pass: false,
+          reason: "Blocked: dev has sold their entire position. Abandonment signal.",
         };
       }
 

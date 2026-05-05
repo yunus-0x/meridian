@@ -184,7 +184,7 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
             type: "number",
             description: "Optional human-friendly upside range in percent above the current active price. Do not use this for single-side SOL deploys."
           },
-          pool_name: { type: "string", description: "Human-readable pool name for record-keeping" },
+          pool_name: { type: "string", description: "Human-readable pool name (e.g. 'MUSHU-SOL'). ALWAYS include — used in Telegram notifications." },
           base_mint: { type: "string", description: "Base token mint address — used to prevent duplicate token exposure across pools" },
           bin_step: { type: "number", description: "Pool bin step (from discover_pools)" },
           base_fee: { type: "number", description: "Pool base fee percentage (from discover_pools)" },
@@ -192,7 +192,9 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           fee_tvl_ratio: { type: "number", description: "fee/TVL ratio at deploy time" },
           organic_score: { type: "number", description: "Base token organic score at deploy time" },
           initial_value_usd: { type: "number", description: "Estimated USD value being deployed" },
-          entry_reason: { type: "string", description: "Full deploy report. Use this exact format (plain text, no markdown):\n\nMARKET\nFee/TVL: X%\nVolume: $X\nTVL: $X\nVolatility: X\nOrganic: X\nMcap: $X\nAge: Xh\n\nAUDIT\nTop10: X%\nBots: X%\nFees paid: X SOL\nSmart wallets: names or none\n\nRISK\nOKX: Risk level X, Bundle X%, Sniper X%, Rugpull YES/NO, Wash YES/NO\n\nWHY THIS WON\n3-5 sentences referencing specific thresholds cleared, standout metrics, pool memory, and primary risk." }
+          entry_reason: { type: "string", description: "Full deploy report. Use this exact format (plain text, no markdown):\n\nMARKET\nFee/TVL: X%\nVolume: $X\nTVL: $X\nVolatility: X\nOrganic: X\nMcap: $X\nAge: Xh\n\nAUDIT\nTop10: X%\nBots: X%\nFees paid: X SOL\nSmart wallets: names or none\n\nRISK\nOKX: Risk level X, Bundle X%, Sniper X%, Rugpull YES/NO, Wash YES/NO\n\nWHY THIS WON\n3-5 sentences referencing specific thresholds cleared, standout metrics, pool memory, and primary risk." },
+          okx_rugpull: { type: "boolean", description: "Set true if OKX flagged this token as a rugpull risk. Position will be blocked by safety checks." },
+          dev_sold_all: { type: "boolean", description: "Set true if OKX reports the dev has sold their entire position. Position will be blocked by safety checks." }
         },
         required: ["pool_address"]
       }

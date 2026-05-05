@@ -266,9 +266,8 @@ function computeCategoricalLift(signal, wins, losses, minSamples) {
 function extractNumeric(signal, entries) {
   const vals = [];
   for (const entry of entries) {
-    const snap = entry.signal_snapshot;
-    if (!snap) continue;
-    const v = snap[signal];
+    // Prefer dedicated snapshot; fall back to top-level field (organic_score, fee_tvl_ratio, volatility)
+    const v = entry.signal_snapshot?.[signal] ?? entry[signal];
     if (v != null && typeof v === "number" && isFinite(v)) vals.push(v);
   }
   return vals;

@@ -183,7 +183,6 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   let sawToolCall = false;
   let noToolRetryCount = 0;
 
-  let emptyStreak = 0;
   for (let step = 0; step < maxSteps; step++) {
     log("agent", `Step ${step + 1}/${maxSteps}`);
 
@@ -356,9 +355,10 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           step,
         });
 
-        // Lock deploy_position after first attempt regardless of outcome — retrying is never right
+        // Lock deploy_position after first attempt — but NOT if it was blocked before execution
+        // (safety check rejection = never ran, so retry with corrected args is fine)
         // For close/swap: only lock on success so genuine failures can be retried
-        if (NO_RETRY_TOOLS.has(functionName)) firedOnce.add(functionName);
+        if (NO_RETRY_TOOLS.has(functionName) && !result?.blocked) firedOnce.add(functionName);
         else if (ONCE_PER_SESSION.has(functionName) && result.success === true) firedOnce.add(functionName);
 
         return {

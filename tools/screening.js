@@ -533,6 +533,16 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       return true;
     }));
 
+    // Dev sold all hard filter — dev exiting their position is an abandonment signal
+    eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+      if (p.dev_sold_all === true) {
+        log("screening", `Dev filter: dropped ${p.name} — dev sold entire position`);
+        pushFilteredReason(filteredOut, p, "dev sold all tokens");
+        return false;
+      }
+      return true;
+    }));
+
     // OKX risk level hard filter
     const maxOkxRiskLevel = config.screening.maxOkxRiskLevel;
     if (maxOkxRiskLevel != null) {
@@ -579,6 +589,22 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         return true;
       }));
       if (eligible.length < before) log("screening", `Phishing filter removed ${before - eligible.length} pool(s)`);
+    }
+
+    // Bundle % hard filter — OKX bundle_pct enriched above
+    if (config.screening.maxBundlePct != null) {
+      const before = eligible.length;
+      const maxBundle = config.screening.maxBundlePct;
+      eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+        if (p.bundle_pct == null) return true; // no OKX data — can't filter
+        if (p.bundle_pct > maxBundle) {
+          log("screening", `Bundle filter: dropped ${p.name} — bundle ${p.bundle_pct.toFixed(1)}% > ${maxBundle}%`);
+          pushFilteredReason(filteredOut, p, `bundle ${p.bundle_pct.toFixed(1)}% > maxBundlePct ${maxBundle}%`);
+          return false;
+        }
+        return true;
+      }));
+      if (eligible.length < before) log("screening", `Bundle filter removed ${before - eligible.length} pool(s) above ${maxBundle}%`);
     }
 
     // Drop any pools whose creator is on the dev blocklist (caught via advanced-info)

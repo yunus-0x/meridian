@@ -96,6 +96,7 @@ export const config = {
     maxPoolFeePct:      u.maxPoolFeePct      ?? null, // null = no ceiling
     minVolatility:      u.minVolatility      ?? null, // null = no minimum; set to require price movement
     maxVolatility:      u.maxVolatility      ?? null, // null = no ceiling; evolved automatically by lessons.js
+    maxFeeActiveTvlRatio: u.maxFeeActiveTvlRatio ?? null, // null = no ceiling; >3 = extraction signal (rug canary)
   },
 
   gmgn: {
@@ -175,6 +176,10 @@ export const config = {
     feeStallWindowMinutes:  u.feeStallWindowMinutes  ?? 30,  // window to measure fee growth
     feeStallMinGrowthPct:   u.feeStallMinGrowthPct   ?? 0.05, // min fee_pnl_pct growth in that window
     feeStallMinAgeMinutes:  u.feeStallMinAgeMinutes  ?? 45,  // don't check before position is this old
+    oorReentryCooldownHours: u.oorReentryCooldownHours ?? 6,  // cooldown after upside OOR exit
+    slReentryCooldownHours:  u.slReentryCooldownHours  ?? 24, // cooldown after stop-loss exit
+    maxInRangeHours:        u.maxInRangeHours        ?? null, // null = disabled; hours before long-hold decay check
+    minRollingFeeGrowthPct: u.minRollingFeeGrowthPct ?? null, // null = disabled; min fee_pnl_pct growth in last 60m
     minSolToOpen:          u.minSolToOpen          ?? 0.55,
     deployAmountSol:       u.deployAmountSol       ?? 0.5,
     gasReserve:            u.gasReserve            ?? 0.2,
@@ -306,6 +311,7 @@ export function reloadScreeningThresholds() {
     if (fresh.screeningSource != null) s.source = fresh.screeningSource;
     if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
     if (fresh.maxVolatility !== undefined) s.maxVolatility = fresh.maxVolatility;
+    if (fresh.maxFeeActiveTvlRatio !== undefined) s.maxFeeActiveTvlRatio = fresh.maxFeeActiveTvlRatio;
     if (fresh.useDiscordSignals !== undefined) s.useDiscordSignals = fresh.useDiscordSignals;
     if (fresh.discordSignalMode != null) s.discordSignalMode = fresh.discordSignalMode;
     if (fresh.excludeHighSupplyConcentration !== undefined) s.excludeHighSupplyConcentration = fresh.excludeHighSupplyConcentration;
@@ -328,6 +334,7 @@ export function reloadScreeningThresholds() {
     if (fresh.avoidPvpSymbols   !== undefined) s.avoidPvpSymbols = fresh.avoidPvpSymbols;
     if (fresh.blockPvpSymbols   !== undefined) s.blockPvpSymbols = fresh.blockPvpSymbols;
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
+    if (fresh.maxTop10Pct       != null) s.maxTop10Pct      = fresh.maxTop10Pct;
     if (fresh.maxPhishingPct    !== undefined) s.maxPhishingPct = fresh.maxPhishingPct;
     if (fresh.maxOkxRiskLevel   !== undefined) s.maxOkxRiskLevel = fresh.maxOkxRiskLevel;
     if (fresh.maxPoolFeePct     !== undefined) s.maxPoolFeePct   = fresh.maxPoolFeePct;

@@ -28,11 +28,11 @@ import {
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
-import { recordPositionSnapshot, recallForPool, addPoolNote, setManualCloseCooldown } from "./pool-memory.js";
+import { recordPositionSnapshot, recallForPool, setManualCloseCooldown } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 import { stageSignals } from "./signal-tracker.js";
-import { getWeightsSummary } from "./signal-weights.js";
+import { recalculateWeights } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
 
@@ -43,7 +43,6 @@ ensureAgentId();
 bootstrapHiveMind().catch((error) => log("hivemind_warn", `Bootstrap failed: ${error.message}`));
 startHiveMindBackgroundSync();
 
-const TP_PCT = config.management.takeProfitPct;
 const DEPLOY = config.management.deployAmountSol;
 
 // ═══════════════════════════════════════════
@@ -223,8 +222,8 @@ async function claudeChat(userMessage, priorHistory = []) {
         tradeHistoryLines.push(`Daily breakdown (last 7 days):\n${dayLines.join("\n")}`);
       }
 
-      // Full individual trade list (most recent first, up to 100)
-      const recent = [...allHistory.positions].reverse().slice(0, 100);
+      // Full individual trade list (most recent first, up to 30)
+      const recent = [...allHistory.positions].reverse().slice(0, 30);
       const tradeLines = recent.map((t) => {
         const sign = t.pnl_usd >= 0 ? "+" : "";
         const date = (t.closed_at || "").slice(0, 10);
@@ -525,9 +524,19 @@ export async function runManagementCycle({ silent = false } = {}) {
         });
         await liveMessage?.toolFinish("close_position", result, result?.success ?? false);
         mgmtReport += `\n\n✅ Closed ${p.pair}: ${act.reason}`;
-        // Pump-exit cooldown: token just spiked above range — high rug risk on re-entry
-        if (act.rule === 3 && (result?.success || result?.close_txs?.length)) {
-          setManualCloseCooldown(p.pool, result?.base_mint || null, 2);
+        const closedOk = result?.success || result?.close_txs?.length;
+        if (closedOk) {
+          // SL cooldown: block re-entry for 24h after stop-loss
+          if (act.rule === 1 || act.rule === "STOP_LOSS") {
+            setManualCloseCooldown(p.pool, result?.base_mint || null, config.management.slReentryCooldownHours ?? 24);
+          }
+          // OOR upside cooldown: block re-entry after pump-above-range or above-range OOR
+          const isUpsideOOR = act.rule === 3 ||
+            ((act.rule === 4 || act.rule === "OUT_OF_RANGE") &&
+              p.active_bin != null && p.upper_bin != null && p.active_bin > p.upper_bin);
+          if (isUpsideOOR) {
+            setManualCloseCooldown(p.pool, result?.base_mint || null, config.management.oorReentryCooldownHours ?? 6);
+          }
         }
       } catch (e) {
         log("cron_error", `Direct close of ${p.pair} failed: ${e.message}`);
@@ -672,6 +681,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const topCandidates = await getTopCandidates({ limit: 10 }).catch((e) => ({ _error: e.message }));
     if (topCandidates?._error) {
       screenReport = `Screening failed: ${topCandidates._error}`;
+      _screeningBusy = false;
       return screenReport;
     }
     const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);
@@ -718,6 +728,13 @@ export async function runScreeningCycle({ silent = false } = {}) {
       if (botPct != null && maxBotHoldersPct != null && botPct > maxBotHoldersPct) {
         log("screening", `Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > ${maxBotHoldersPct}%`);
         filteredOut.push({ name: pool.name, reason: `bot holders ${botPct}% > ${maxBotHoldersPct}%` });
+        return false;
+      }
+      const top10Pct = ti?.audit?.top_holders_pct;
+      const maxTop10Pct = config.screening.maxTop10Pct;
+      if (top10Pct != null && maxTop10Pct != null && top10Pct > maxTop10Pct) {
+        log("screening", `Top10 filter: dropped ${pool.name} — top10 ${top10Pct}% > ${maxTop10Pct}%`);
+        filteredOut.push({ name: pool.name, reason: `top10 ${top10Pct}% > ${maxTop10Pct}%` });
         return false;
       }
       return true;
@@ -835,8 +852,6 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
       return block;
     });
-
-    const weightsSummary = config.darwin?.enabled ? getWeightsSummary() : null;
 
     const { content } = await agentLoop(`
 SCREENING CYCLE
@@ -1135,6 +1150,28 @@ function getDeterministicCloseRule(position, managementConfig) {
   ) {
     return { action: "CLOSE", rule: 5, reason: "low yield" };
   }
+
+  // Long-hold decay: close when fees dried up after extended in-range hold
+  const maxInRangeHours = managementConfig.maxInRangeHours ?? null;
+  const minRollingFeeGrowth = managementConfig.minRollingFeeGrowthPct ?? null;
+  if (maxInRangeHours != null && minRollingFeeGrowth != null && position.in_range) {
+    const ageMinutes = position.age_minutes ?? 0;
+    if (ageMinutes >= maxInRangeHours * 60 && tracked?.fee_snapshots?.length >= 2) {
+      const lookbackMs = 60 * 60 * 1000;
+      const baseline = [...tracked.fee_snapshots].reverse().find(s => s.ts <= Date.now() - lookbackMs);
+      if (baseline != null && position.fee_pnl_pct != null) {
+        const growth60m = position.fee_pnl_pct - baseline.fee_pnl_pct;
+        if (growth60m < minRollingFeeGrowth) {
+          return {
+            action: "CLOSE",
+            rule: 6,
+            reason: `Long-hold decay: earned ${growth60m.toFixed(3)}% fees in last 60m (min: ${minRollingFeeGrowth}%) after ${ageMinutes}m in range`,
+          };
+        }
+      }
+    }
+  }
+
   return null;
 }
 
@@ -1315,16 +1352,6 @@ function settingButton(label, data) {
 
 function toggleButton(key, label) {
   return settingButton(`${label}: ${fmtSettingValue(settingValue(key))}`, `cfg:toggle:${key}`);
-}
-
-function stepButtons(key, label, step, { digits = 2 } = {}) {
-  const value = Number(settingValue(key));
-  const shown = Number.isFinite(value) ? value.toFixed(digits).replace(/\.?0+$/, "") : "?";
-  return [
-    settingButton(`- ${label}`, `cfg:step:${key}:${-step}`),
-    settingButton(`${label}: ${shown}`, `cfg:noop`),
-    settingButton(`+ ${label}`, `cfg:step:${key}:${step}`),
-  ];
 }
 
 function inputButton(key, label, { digits = 0 } = {}) {
@@ -1737,6 +1764,74 @@ async function telegramHandler(msg) {
     await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => {}));
     return;
   }
+
+  // Read-only commands — bypass busy gate so they always respond instantly
+  if (text === "/help") {
+    await sendMessage(formatHelpText()).catch(() => {});
+    return;
+  }
+  if (text === "/wallet" || text === "/status") {
+    try {
+      const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
+      const suffix = text === "/status" && positions.total_positions
+        ? `\n\nUse /positions for the numbered list.`
+        : "";
+      await sendMessage(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+  if (text === "/config") {
+    await sendMessage(formatConfigSnapshot()).catch(() => {});
+    return;
+  }
+  if (text === "/positions") {
+    try {
+      const { positions, total_positions } = await getMyPositions({ force: true });
+      if (total_positions === 0) { await sendMessage("No open positions."); return; }
+      const cur = config.management.solMode ? "◎" : "$";
+      const lines = positions.map((p, i) => {
+        const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
+        const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
+        const oor = !p.in_range ? " ⚠️OOR" : "";
+        const strat = p.strategy ? ` [${p.strategy}]` : "";
+        return `${i + 1}. ${p.pair}${strat} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
+      });
+      await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
+    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+    return;
+  }
+  if (text === "/thresholds") {
+    try {
+      const s = config.screening;
+      const perf = getPerformanceSummary();
+      const lines = [
+        "📊 Current screening thresholds:",
+        `  minFeeActiveTvlRatio: ${s.minFeeActiveTvlRatio}`,
+        `  minOrganic:           ${s.minOrganic}`,
+        `  minVolatility:        ${s.minVolatility}`,
+        `  maxVolatility:        ${s.maxVolatility ?? "off"}`,
+        `  minHolders:           ${s.minHolders}`,
+        `  minTvl:               ${s.minTvl}`,
+        `  maxTvl:               ${s.maxTvl}`,
+        `  minVolume:            ${s.minVolume}`,
+        `  minTokenFeesSol:      ${s.minTokenFeesSol}`,
+        `  maxBundlePct:         ${s.maxBundlePct}`,
+        `  maxBotHoldersPct:     ${s.maxBotHoldersPct}`,
+        `  maxTop10Pct:          ${s.maxTop10Pct}`,
+        `  timeframe:            ${s.timeframe}`,
+        perf
+          ? `\n📈 Based on ${perf.total_positions_closed} closed positions\n  Win rate: ${perf.win_rate_pct}%  |  Avg PnL: ${perf.avg_pnl_pct}%`
+          : "\nNo closed positions yet — thresholds are preset defaults.",
+      ];
+      await sendMessage(lines.join("\n")).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
   if (_managementBusy || _screeningBusy || busy) {
     if (_telegramQueue.length < 5) {
       _telegramQueue.push(msg);
@@ -1754,46 +1849,6 @@ async function telegramHandler(msg) {
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
-    return;
-  }
-
-  if (text === "/help") {
-    await sendMessage(formatHelpText()).catch(() => {});
-    return;
-  }
-
-  if (text === "/wallet" || text === "/status") {
-    try {
-      const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
-      const suffix = text === "/status" && positions.total_positions
-        ? `\n\nUse /positions for the numbered list.`
-        : "";
-      await sendMessage(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => {});
-    } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
-    }
-    return;
-  }
-
-  if (text === "/config") {
-    await sendMessage(formatConfigSnapshot()).catch(() => {});
-    return;
-  }
-
-  if (text === "/positions") {
-    try {
-      const { positions, total_positions } = await getMyPositions({ force: true });
-      if (total_positions === 0) { await sendMessage("No open positions."); return; }
-      const cur = config.management.solMode ? "◎" : "$";
-      const lines = positions.map((p, i) => {
-        const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
-        const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
-        const oor = !p.in_range ? " ⚠️OOR" : "";
-        const strat = p.strategy ? ` [${p.strategy}]` : "";
-        return `${i + 1}. ${p.pair}${strat} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
-      });
-      await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
-    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
 
@@ -1822,6 +1877,7 @@ async function telegramHandler(msg) {
 
   const closeMatch = text.match(/^\/close\s+(\d+)$/i);
   if (closeMatch) {
+    busy = true;
     try {
       const idx = parseInt(closeMatch[1]) - 1;
       const posResult = await getMyPositions({ force: true });
@@ -1842,10 +1898,12 @@ async function telegramHandler(msg) {
         await sendMessage(`❌ Close failed: ${JSON.stringify(result)}`);
       }
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+    finally { busy = false; drainTelegramQueue().catch(() => {}); }
     return;
   }
 
   if (text === "/closeall") {
+    busy = true;
     try {
       const posResult = await getMyPositions({ force: true });
       const positions = posResult?.positions || [];
@@ -1867,14 +1925,14 @@ async function telegramHandler(msg) {
       }
       await sendMessage(`Close-all finished.\n\n${results.join("\n")}`).catch(() => {});
       const swapLines = [];
-      for (const { mint, pair } of baseMints) {
+      for (const { mint } of baseMints) {
         const swap = await swapMintToSol(mint).catch(() => null);
         if (swap) swapLines.push(swap.success ? `✅ ${swap.symbol} → ${swap.sol ? swap.sol.toFixed(4) + " SOL" : "SOL"}` : `❌ ${swap.symbol}: ${swap.error}`);
       }
       if (swapLines.length) await sendMessage(`🔄 Auto-swapped:\n${swapLines.join("\n")}`).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
-    }
+    } finally { busy = false; drainTelegramQueue().catch(() => {}); }
     return;
   }
 
@@ -1934,36 +1992,6 @@ async function telegramHandler(msg) {
     return;
   }
 
-  if (text === "/thresholds") {
-    try {
-      const s = config.screening;
-      const perf = getPerformanceSummary();
-      const lines = [
-        "📊 Current screening thresholds:",
-        `  minFeeActiveTvlRatio: ${s.minFeeActiveTvlRatio}`,
-        `  minOrganic:           ${s.minOrganic}`,
-        `  minVolatility:        ${s.minVolatility}`,
-        `  maxVolatility:        ${s.maxVolatility ?? "off"}`,
-        `  minHolders:           ${s.minHolders}`,
-        `  minTvl:               ${s.minTvl}`,
-        `  maxTvl:               ${s.maxTvl}`,
-        `  minVolume:            ${s.minVolume}`,
-        `  minTokenFeesSol:      ${s.minTokenFeesSol}`,
-        `  maxBundlePct:         ${s.maxBundlePct}`,
-        `  maxBotHoldersPct:     ${s.maxBotHoldersPct}`,
-        `  maxTop10Pct:          ${s.maxTop10Pct}`,
-        `  timeframe:            ${s.timeframe}`,
-        perf
-          ? `\n📈 Based on ${perf.total_positions_closed} closed positions\n  Win rate: ${perf.win_rate_pct}%  |  Avg PnL: ${perf.avg_pnl_pct}%`
-          : "\nNo closed positions yet — thresholds are preset defaults.",
-      ];
-      await sendMessage(lines.join("\n")).catch(() => {});
-    } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
-    }
-    return;
-  }
-
   if (text === "/evolve") {
     busy = true;
     try {
@@ -1973,21 +2001,34 @@ async function telegramHandler(msg) {
         await sendMessage(`Need at least 5 closed positions to evolve. ${needed} more needed.`).catch(() => {});
         return;
       }
-      await sendMessage("⚙️ Evolving thresholds from performance data...").catch(() => {});
+      await sendMessage("⚙️ Evolving thresholds and signal weights from performance data...").catch(() => {});
       const fs = await import("fs");
       const lessonsData = JSON.parse(fs.default.readFileSync("./lessons.json", "utf8"));
+      const lines = [];
+
       const result = evolveThresholds(lessonsData.performance, config);
-      if (!result || Object.keys(result.changes).length === 0) {
-        await sendMessage("No threshold changes needed — current settings already match performance data.").catch(() => {});
-      } else {
+      if (result && Object.keys(result.changes).length > 0) {
         reloadScreeningThresholds();
-        const lines = ["✅ Thresholds evolved:"];
-        for (const [key, val] of Object.entries(result.changes)) {
+        lines.push("✅ Thresholds evolved:");
+        for (const [key] of Object.entries(result.changes)) {
           lines.push(`  ${key}: ${result.rationale[key]}`);
         }
-        lines.push("\nSaved to user-config.json. Applied immediately.");
-        await sendMessage(lines.join("\n")).catch(() => {});
+      } else {
+        lines.push("Thresholds: no changes needed.");
       }
+
+      const wResult = recalculateWeights(lessonsData.performance, config);
+      if (wResult.changes.length > 0) {
+        lines.push("\n📊 Signal weights updated:");
+        for (const c of wResult.changes) {
+          lines.push(`  ${c.signal}: ${c.from.toFixed(3)} → ${c.to.toFixed(3)} (${c.action}, lift=${c.lift})`);
+        }
+      } else {
+        lines.push("Signal weights: no changes needed.");
+      }
+
+      lines.push("\nSaved to disk. Applied immediately.");
+      await sendMessage(lines.join("\n")).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     } finally {
@@ -2023,6 +2064,36 @@ async function telegramHandler(msg) {
         "GENERAL"
       );
       await sendMessage(stripThink(reply)).catch(() => {});
+
+      // After learning, auto-evolve thresholds and weights if we have enough data
+      const perf = getPerformanceSummary();
+      if (perf && perf.total_positions_closed >= 5) {
+        try {
+          const fs = await import("fs");
+          const lessonsData = JSON.parse(fs.default.readFileSync("./lessons.json", "utf8"));
+          const evolveResult = evolveThresholds(lessonsData.performance, config);
+          const wResult = recalculateWeights(lessonsData.performance, config);
+          const evolveChanged = evolveResult && Object.keys(evolveResult.changes).length > 0;
+          const weightsChanged = wResult.changes.length > 0;
+          if (evolveChanged) reloadScreeningThresholds();
+          if (evolveChanged || weightsChanged) {
+            const lines = ["⚙️ Auto-evolved from study:"];
+            if (evolveChanged) {
+              for (const [key] of Object.entries(evolveResult.changes)) {
+                lines.push(`  threshold ${key}: ${evolveResult.rationale[key]}`);
+              }
+            }
+            if (weightsChanged) {
+              for (const c of wResult.changes) {
+                lines.push(`  weight ${c.signal}: ${c.from.toFixed(3)} → ${c.to.toFixed(3)} (${c.action})`);
+              }
+            }
+            await sendMessage(lines.join("\n")).catch(() => {});
+          }
+        } catch (e) {
+          log("evolve_warn", `Post-learn evolve failed: ${e.message}`);
+        }
+      }
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     } finally {
@@ -2145,6 +2216,12 @@ async function telegramHandler(msg) {
     return;
   }
 
+  if (text === "/stop") {
+    _pendingShellCmd = "__stop__";
+    await sendMessage("⚠️ Graceful shutdown — this will stop the agent. PM2 will restart it unless you run `pm2 stop meridian`.\n\nReply yes to confirm or no to cancel.").catch(() => {});
+    return;
+  }
+
   // ─── /run <command> — execute arbitrary shell command ────────────────────
   const runMatch = text.match(/^\/run\s+(.+)$/i);
   if (runMatch) {
@@ -2187,6 +2264,11 @@ async function telegramHandler(msg) {
           // Let PM2 auto-restart naturally — preserves env vars loaded by envcrypt.js
           await sendMessage("🔄 Restarting...").catch(() => {});
           setTimeout(() => process.exit(0), 800);
+          return;
+        }
+        if (cmd === "__stop__") {
+          await sendMessage("🛑 Shutting down...").catch(() => {});
+          await shutdown("telegram /stop");
           return;
         }
         await sendMessage(`Running: \`${cmd}\`...`).catch(() => {});
@@ -2544,6 +2626,31 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
           "GENERAL"
         );
         console.log(`\n${reply}\n`);
+
+        // Auto-evolve after learning
+        const perf = getPerformanceSummary();
+        if (perf && perf.total_positions_closed >= 5) {
+          const fs = await import("fs");
+          const lessonsData = JSON.parse(fs.default.readFileSync("./lessons.json", "utf8"));
+          const evolveResult = evolveThresholds(lessonsData.performance, config);
+          const wResult = recalculateWeights(lessonsData.performance, config);
+          if (evolveResult && Object.keys(evolveResult.changes).length > 0) {
+            reloadScreeningThresholds();
+            console.log("Thresholds evolved:");
+            for (const [key] of Object.entries(evolveResult.changes)) {
+              console.log(`  ${key}: ${evolveResult.rationale[key]}`);
+            }
+          }
+          if (wResult.changes.length > 0) {
+            console.log("Signal weights updated:");
+            for (const c of wResult.changes) {
+              console.log(`  ${c.signal}: ${c.from.toFixed(3)} → ${c.to.toFixed(3)} (${c.action})`);
+            }
+          }
+          if ((evolveResult && Object.keys(evolveResult.changes).length > 0) || wResult.changes.length > 0) {
+            console.log("Saved to disk.\n");
+          }
+        }
       });
       return;
     }
@@ -2558,17 +2665,28 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
         }
         const fs = await import("fs");
         const lessonsData = JSON.parse(fs.default.readFileSync("./lessons.json", "utf8"));
+
         const result = evolveThresholds(lessonsData.performance, config);
         if (!result || Object.keys(result.changes).length === 0) {
-          console.log("\nNo threshold changes needed — current settings already match performance data.\n");
+          console.log("\nThresholds: no changes needed.");
         } else {
           reloadScreeningThresholds();
           console.log("\nThresholds evolved:");
-          for (const [key, val] of Object.entries(result.changes)) {
+          for (const [key] of Object.entries(result.changes)) {
             console.log(`  ${key}: ${result.rationale[key]}`);
           }
-          console.log("\nSaved to user-config.json. Applied immediately.\n");
         }
+
+        const wResult = recalculateWeights(lessonsData.performance, config);
+        if (wResult.changes.length === 0) {
+          console.log("Signal weights: no changes needed.");
+        } else {
+          console.log("\nSignal weights updated:");
+          for (const c of wResult.changes) {
+            console.log(`  ${c.signal}: ${c.from.toFixed(3)} → ${c.to.toFixed(3)} (${c.action}, lift=${c.lift})`);
+          }
+        }
+        console.log("\nSaved to disk. Applied immediately.\n");
       });
       return;
     }
