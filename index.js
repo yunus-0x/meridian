@@ -289,6 +289,38 @@ export async function runManagementCycle({ silent = false } = {}) {
       actionMap.set(p.position, { action: "STAY" });
     }
 
+    // ── Position range bar helper ───────────────────────────────────
+    function buildRangeBar(p) {
+      if (p.lower_bin == null || p.upper_bin == null || p.active_bin == null) return null;
+      const range = p.upper_bin - p.lower_bin;
+      if (range <= 0) return null;
+
+      const width = 10;
+      const ratio = (p.active_bin - p.lower_bin) / range;
+
+      // Build the visual bar
+      let bar;
+      if (p.in_range) {
+        const filled = Math.max(0, Math.min(width, Math.round(ratio * width)));
+        const empty = width - filled;
+        bar = `[${'▓'.repeat(filled)}${'░'.repeat(empty)}]`;
+      } else if (ratio < 0) {
+        bar = `◀[${'░'.repeat(width)}]`;
+      } else {
+        bar = `[${'▓'.repeat(width)}]▶`;
+      }
+
+      // Range percentage (requires bin_step)
+      if (p.bin_step != null) {
+        const stepMul = 1 + p.bin_step / 10000;
+        const pctToLower = (stepMul ** (p.lower_bin - p.active_bin) - 1) * 100;
+        const pctToUpper = (stepMul ** (p.upper_bin - p.active_bin) - 1) * 100;
+        bar += ` ${pctToLower >= 0 ? "+" : ""}${pctToLower.toFixed(1)}% / ${pctToUpper >= 0 ? "+" : ""}${pctToUpper.toFixed(1)}%`;
+      }
+
+      return bar;
+    }
+
     // ── Build JS report ──────────────────────────────────────────────
     const totalValue = positionData.reduce((s, p) => s + (p.total_value_usd ?? 0), 0);
     const totalUnclaimed = positionData.reduce((s, p) => s + (p.unclaimed_fees_usd ?? 0), 0);
@@ -299,7 +331,13 @@ export async function runManagementCycle({ silent = false } = {}) {
       const val = config.management.solMode ? `◎${p.total_value_usd ?? "?"}` : `$${p.total_value_usd ?? "?"}`;
       const unclaimed = config.management.solMode ? `◎${p.unclaimed_fees_usd ?? "?"}` : `$${p.unclaimed_fees_usd ?? "?"}`;
       const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
-      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
+      const cur = config.management.solMode ? "◎" : "$";
+      const pnlStr = p.pnl_usd != null
+        ? `${p.pnl_usd >= 0 ? "+" : ""}${cur}${p.pnl_usd.toFixed(2)}`
+        : "?";
+      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${pnlStr} (${p.pnl_pct ?? "?"}%) | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
+      const bar = buildRangeBar(p);
+      if (bar) line += `\n${bar}`;
       if (p.instruction) line += `\nNote: "${p.instruction}"`;
       if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
