@@ -1,0 +1,495 @@
+{
+  "total_count": 5,
+  "jobs": [
+    {
+      "id": 88832302640,
+      "run_id": 29891366035,
+      "workflow_name": "Release Desktop App",
+      "head_branch": "fix/desktop-builds",
+      "run_url": "https://api.github.com/repos/romankurnovskii/etemaro/actions/runs/29891366035",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTV29Y88AAAAUrtFeMA",
+      "head_sha": "8242dfa11f8f69f424c9840e434a4a5ecb895531",
+      "url": "https://api.github.com/repos/romankurnovskii/etemaro/actions/jobs/88832302640",
+      "html_url": "https://github.com/romankurnovskii/etemaro/actions/runs/29891366035/job/88832302640",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-07-22T04:33:14Z",
+      "started_at": "2026-07-22T04:33:15Z",
+      "completed_at": "2026-07-22T04:33:18Z",
+      "name": "create_release",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-07-22T04:33:16Z",
+          "completed_at": "2026-07-22T04:33:17Z"
+        },
+        {
+          "name": "Create Release",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-07-22T04:33:17Z",
+          "completed_at": "2026-07-22T04:33:17Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-07-22T04:33:17Z",
+          "completed_at": "2026-07-22T04:33:17Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/romankurnovskii/etemaro/check-runs/88832302640",
+      "labels": ["ubuntu-latest"],
+      "runner_id": 1000021163,
+      "runner_name": "GitHub Actions 1000021163",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 88832313870,
+      "run_id": 29891366035,
+      "workflow_name": "Release Desktop App",
+      "head_branch": "fix/desktop-builds",
+      "run_url": "https://api.github.com/repos/romankurnovskii/etemaro/actions/runs/29891366035",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTV29Y88AAAAUrtGKDg",
+      "head_sha": "8242dfa11f8f69f424c9840e434a4a5ecb895531",
+      "url": "https://api.github.com/repos/romankurnovskii/etemaro/actions/jobs/88832313870",
+      "html_url": "https://github.com/romankurnovskii/etemaro/actions/runs/29891366035/job/88832313870",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-07-22T04:33:19Z",
+      "started_at": "2026-07-22T04:33:21Z",
+      "completed_at": "2026-07-22T04:40:14Z",
+      "name": "build_linux",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-07-22T04:33:22Z",
+          "completed_at": "2026-07-22T04:33:24Z"
+        },
+        {
+          "name": "Checkout repository",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-07-22T04:33:24Z",
+          "completed_at": "2026-07-22T04:33:26Z"
+        },
+        {
+          "name": "Setup Node.js",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-07-22T04:33:26Z",
+          "completed_at": "2026-07-22T04:33:27Z"
+        },
+        {
+          "name": "Install pnpm",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-07-22T04:33:27Z",
+          "completed_at": "2026-07-22T04:33:28Z"
+        },
+        {
+          "name": "Install Rust toolchain",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-07-22T04:33:28Z",
+          "completed_at": "2026-07-22T04:33:37Z"
+        },
+        {
+          "name": "Install Linux dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-07-22T04:33:37Z",
+          "completed_at": "2026-07-22T04:34:12Z"
+        },
+        {
+          "name": "Install frontend dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-07-22T04:34:12Z",
+          "completed_at": "2026-07-22T04:34:21Z"
+        },
+        {
+          "name": "Build frontend",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-07-22T04:34:21Z",
+          "completed_at": "2026-07-22T04:34:25Z"
+        },
+        {
+          "name": "Build Tauri App",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-07-22T04:34:25Z",
+          "completed_at": "2026-07-22T04:40:10Z"
+        },
+        {
+          "name": "Post Install pnpm",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16,
+          "started_at": "2026-07-22T04:40:10Z",
+          "completed_at": "2026-07-22T04:40:10Z"
+        },
+        {
+          "name": "Post Setup Node.js",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 17,
+          "started_at": "2026-07-22T04:40:10Z",
+          "completed_at": "2026-07-22T04:40:11Z"
+        },
+        {
+          "name": "Post Checkout repository",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 18,
+          "started_at": "2026-07-22T04:40:11Z",
+          "completed_at": "2026-07-22T04:40:11Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-07-22T04:40:11Z",
+          "completed_at": "2026-07-22T04:40:11Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/romankurnovskii/etemaro/check-runs/88832313870",
+      "labels": ["ubuntu-22.04"],
+      "runner_id": 1000021164,
+      "runner_name": "GitHub Actions 1000021164",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 88832313876,
+      "run_id": 29891366035,
+      "workflow_name": "Release Desktop App",
+      "head_branch": "fix/desktop-builds",
+      "run_url": "https://api.github.com/repos/romankurnovskii/etemaro/actions/runs/29891366035",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTV29Y88AAAAUrtGKFA",
+      "head_sha": "8242dfa11f8f69f424c9840e434a4a5ecb895531",
+      "url": "https://api.github.com/repos/romankurnovskii/etemaro/actions/jobs/88832313876",
+      "html_url": "https://github.com/romankurnovskii/etemaro/actions/runs/29891366035/job/88832313876",
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-07-22T04:33:19Z",
+      "started_at": "2026-07-22T04:33:21Z",
+      "completed_at": "2026-07-22T04:40:03Z",
+      "name": "build_windows",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-07-22T04:33:22Z",
+          "completed_at": "2026-07-22T04:33:24Z"
+        },
+        {
+          "name": "Checkout repository",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-07-22T04:33:24Z",
+          "completed_at": "2026-07-22T04:33:35Z"
+        },
+        {
+          "name": "Setup Node.js",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-07-22T04:33:35Z",
+          "completed_at": "2026-07-22T04:33:50Z"
+        },
+        {
+          "name": "Install pnpm",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-07-22T04:33:50Z",
+          "completed_at": "2026-07-22T04:33:53Z"
+        },
+        {
+          "name": "Install Rust toolchain",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-07-22T04:33:53Z",
+          "completed_at": "2026-07-22T04:34:13Z"
+        },
+        {
+          "name": "Install frontend dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-07-22T04:34:13Z",
+          "completed_at": "2026-07-22T04:35:48Z"
+        },
+        {
+          "name": "Build frontend",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-07-22T04:35:48Z",
+          "completed_at": "2026-07-22T04:35:53Z"
+        },
+        {
+          "name": "Build Tauri App",
+          "status": "completed",
+          "conclusion": "failure",
+          "number": 8,
+          "started_at": "2026-07-22T04:35:53Z",
+          "completed_at": "2026-07-22T04:39:59Z"
+        },
+        {
+          "name": "Post Install pnpm",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-07-22T04:39:59Z",
+          "completed_at": "2026-07-22T04:39:59Z"
+        },
+        {
+          "name": "Post Setup Node.js",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 15,
+          "started_at": "2026-07-22T04:39:59Z",
+          "completed_at": "2026-07-22T04:39:59Z"
+        },
+        {
+          "name": "Post Checkout repository",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16,
+          "started_at": "2026-07-22T04:39:59Z",
+          "completed_at": "2026-07-22T04:40:01Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 17,
+          "started_at": "2026-07-22T04:40:01Z",
+          "completed_at": "2026-07-22T04:40:01Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/romankurnovskii/etemaro/check-runs/88832313876",
+      "labels": ["windows-latest"],
+      "runner_id": 1000021165,
+      "runner_name": "GitHub Actions 1000021165",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 88832313902,
+      "run_id": 29891366035,
+      "workflow_name": "Release Desktop App",
+      "head_branch": "fix/desktop-builds",
+      "run_url": "https://api.github.com/repos/romankurnovskii/etemaro/actions/runs/29891366035",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTV29Y88AAAAUrtGKLg",
+      "head_sha": "8242dfa11f8f69f424c9840e434a4a5ecb895531",
+      "url": "https://api.github.com/repos/romankurnovskii/etemaro/actions/jobs/88832313902",
+      "html_url": "https://github.com/romankurnovskii/etemaro/actions/runs/29891366035/job/88832313902",
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-07-22T04:33:19Z",
+      "started_at": "2026-07-22T04:33:21Z",
+      "completed_at": "2026-07-22T04:38:01Z",
+      "name": "build_macos",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-07-22T04:33:21Z",
+          "completed_at": "2026-07-22T04:33:25Z"
+        },
+        {
+          "name": "Checkout repository",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-07-22T04:33:25Z",
+          "completed_at": "2026-07-22T04:33:29Z"
+        },
+        {
+          "name": "Setup Node.js",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-07-22T04:33:29Z",
+          "completed_at": "2026-07-22T04:33:30Z"
+        },
+        {
+          "name": "Install pnpm",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-07-22T04:33:30Z",
+          "completed_at": "2026-07-22T04:33:31Z"
+        },
+        {
+          "name": "Install Rust toolchain",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-07-22T04:33:31Z",
+          "completed_at": "2026-07-22T04:33:40Z"
+        },
+        {
+          "name": "Install frontend dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-07-22T04:33:40Z",
+          "completed_at": "2026-07-22T04:33:53Z"
+        },
+        {
+          "name": "Build frontend",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-07-22T04:33:53Z",
+          "completed_at": "2026-07-22T04:33:55Z"
+        },
+        {
+          "name": "Build Tauri App",
+          "status": "completed",
+          "conclusion": "failure",
+          "number": 8,
+          "started_at": "2026-07-22T04:33:55Z",
+          "completed_at": "2026-07-22T04:37:58Z"
+        },
+        {
+          "name": "Post Install pnpm",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-07-22T04:37:58Z",
+          "completed_at": "2026-07-22T04:37:59Z"
+        },
+        {
+          "name": "Post Setup Node.js",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 15,
+          "started_at": "2026-07-22T04:37:59Z",
+          "completed_at": "2026-07-22T04:37:59Z"
+        },
+        {
+          "name": "Post Checkout repository",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16,
+          "started_at": "2026-07-22T04:37:59Z",
+          "completed_at": "2026-07-22T04:38:00Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 17,
+          "started_at": "2026-07-22T04:38:00Z",
+          "completed_at": "2026-07-22T04:38:00Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/romankurnovskii/etemaro/check-runs/88832313902",
+      "labels": ["macos-latest"],
+      "runner_id": 1000021166,
+      "runner_name": "GitHub Actions 1000021166",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 88833182635,
+      "run_id": 29891366035,
+      "workflow_name": "Release Desktop App",
+      "head_branch": "fix/desktop-builds",
+      "run_url": "https://api.github.com/repos/romankurnovskii/etemaro/actions/runs/29891366035",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTV29Y88AAAAUrt7Lqw",
+      "head_sha": "8242dfa11f8f69f424c9840e434a4a5ecb895531",
+      "url": "https://api.github.com/repos/romankurnovskii/etemaro/actions/jobs/88833182635",
+      "html_url": "https://github.com/romankurnovskii/etemaro/actions/runs/29891366035/job/88833182635",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-07-22T04:40:14Z",
+      "started_at": "2026-07-22T04:40:16Z",
+      "completed_at": "2026-07-22T04:40:19Z",
+      "name": "aggregate_results",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-07-22T04:40:17Z",
+          "completed_at": "2026-07-22T04:40:17Z"
+        },
+        {
+          "name": "Evaluate workflow result",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-07-22T04:40:17Z",
+          "completed_at": "2026-07-22T04:40:18Z"
+        },
+        {
+          "name": "Update release body",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-07-22T04:40:18Z",
+          "completed_at": "2026-07-22T04:40:18Z"
+        },
+        {
+          "name": "Publish release update",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-07-22T04:40:18Z",
+          "completed_at": "2026-07-22T04:40:18Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-07-22T04:40:18Z",
+          "completed_at": "2026-07-22T04:40:18Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/romankurnovskii/etemaro/check-runs/88833182635",
+      "labels": ["ubuntu-latest"],
+      "runner_id": 1000021167,
+      "runner_name": "GitHub Actions 1000021167",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    }
+  ]
+}
