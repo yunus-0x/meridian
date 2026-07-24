@@ -9,7 +9,6 @@ Welcome to the Etemaro project documentation. This index lists all architectural
 - [FULL_FLOW.md](FULL_FLOW.md) — Canonical flow reference: architecture, startup, screening/management flows, learning, integrations.
 - [USAGE_GUIDE.md](USAGE_GUIDE.md) — Operational guide: how to run, REPL/Telegram/CLI commands, and decision flows.
 - [HIVEMIND.md](HIVEMIND.md) — HiveMind collective-learning sync: shared-lesson pull on startup + every 15 min, push, and prompt injection.
-- [DESKTOP_RELEASE_WORKFLOW.md](DESKTOP_RELEASE_WORKFLOW.md) — Build and release desktop application via GitHub Actions.
 
 ## Apps
 
