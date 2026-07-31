@@ -22,6 +22,7 @@ import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsO
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
 import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW } from "../config.js";
 import { getRecentDecisions } from "../decision-log.js";
+import { clampConfigChange, getDeployCircuitBreaker } from "../risk.js";
 import fs from "fs";
 import { execSync, spawn } from "child_process";
 import { REPO_ROOT, repoPath } from "../repo-root.js";
@@ -213,6 +214,11 @@ function normalizeConfigValue(key, value) {
     "blockPvpSymbols",
     "autoSwapAfterClaim",
     "trailingTakeProfit",
+    "hardTakeProfitWhileTrailing",
+    "breakevenAfterTrailing",
+    "dailyLossLimitEnabled",
+    "volatilitySizeDamping",
+    "skipLowMemoryWinRate",
     "solMode",
     "darwinEnabled",
     "lpAgentRelayEnabled",
@@ -389,10 +395,29 @@ const toolMap = {
       stopLossPct: ["management", "stopLossPct"],
       takeProfitPct: ["management", "takeProfitPct"],
       takeProfitFeePct: ["management", "takeProfitPct"],
+      hardTakeProfitWhileTrailing: ["management", "hardTakeProfitWhileTrailing"],
       trailingTakeProfit: ["management", "trailingTakeProfit"],
       trailingTriggerPct: ["management", "trailingTriggerPct"],
       trailingDropPct: ["management", "trailingDropPct"],
+      trailingDropWidenPerPeakPct: ["management", "trailingDropWidenPerPeakPct"],
+      trailingMaxDropPct: ["management", "trailingMaxDropPct"],
+      breakevenAfterTrailing: ["management", "breakevenAfterTrailing"],
+      breakevenFloorPct: ["management", "breakevenFloorPct"],
+      maxHoldMinutes: ["management", "maxHoldMinutes"],
+      feeDecayExitRatio: ["management", "feeDecayExitRatio"],
+      feeDecayMinAgeMinutes: ["management", "feeDecayMinAgeMinutes"],
+      dailyLossLimitEnabled: ["management", "dailyLossLimitEnabled"],
+      dailyLossWindowHours: ["management", "dailyLossWindowHours"],
+      dailyLossLimitUsd: ["management", "dailyLossLimitUsd"],
+      dailyLossLimitSol: ["management", "dailyLossLimitSol"],
+      consecutiveLossLimit: ["management", "consecutiveLossLimit"],
+      volatilitySizeDamping: ["management", "volatilitySizeDamping"],
+      volSizeRef: ["management", "volSizeRef"],
+      minVolSizeMultiplier: ["management", "minVolSizeMultiplier"],
       pnlSanityMaxDiffPct: ["management", "pnlSanityMaxDiffPct"],
+      skipLowMemoryWinRate: ["risk", "skipLowMemoryWinRate"],
+      lowMemoryWinRateMax: ["risk", "lowMemoryWinRateMax"],
+      lowMemoryMinSamples: ["risk", "lowMemoryMinSamples"],
       // pnl poller
       pnlConfirmTicks: ["pnl", "confirmTicks"],
       // opportunity poller (interval/enabled changes apply on next restart)
@@ -486,6 +511,14 @@ const toolMap = {
           normalizedVal = Math.max(MIN_SAFE_BINS_BELOW, Math.round(numericVal));
         } else {
           normalizedVal = normalizeConfigValue(match[0], val);
+        }
+        // Clamp dangerous risk/sizing keys so LLM self-tune cannot nuke risk controls.
+        if (typeof normalizedVal === "number" || (normalizedVal != null && Number.isFinite(Number(normalizedVal)))) {
+          const clamped = clampConfigChange(match[0], normalizedVal);
+          if (!clamped.ok) {
+            return { success: false, error: clamped.error, key: match[0], reason };
+          }
+          normalizedVal = clamped.value;
         }
         applied[match[0]] = normalizedVal;
       } catch (error) {
@@ -727,6 +760,12 @@ export async function executeTool(name, args) {
 async function runSafetyChecks(name, args) {
   switch (name) {
     case "deploy_position": {
+      // Session risk circuit breaker (daily / consecutive losses)
+      const breaker = getDeployCircuitBreaker(config.management);
+      if (breaker.blocked) {
+        return { pass: false, reason: breaker.reason };
+      }
+
       const poolThresholds = await validateDeployPoolThresholds(args);
       if (!poolThresholds.pass) return poolThresholds;
       if (poolThresholds.entryMarketData) Object.assign(args, poolThresholds.entryMarketData);
@@ -840,7 +879,9 @@ async function runSafetyChecks(name, args) {
         };
       }
 
-      const minDeploy = Math.max(0.1, config.management.deployAmountSol);
+      // Absolute dust floor only — configured deployAmountSol is the real floor (supports micro wallets).
+      const configuredMin = Number(config.management.deployAmountSol);
+      const minDeploy = Math.max(0.005, Number.isFinite(configuredMin) ? configuredMin : 0.005);
       if (amountY < minDeploy) {
         return {
           pass: false,
@@ -871,8 +912,50 @@ async function runSafetyChecks(name, args) {
     }
 
     case "swap_token": {
-      // Basic check — prevent swapping when DRY_RUN is true
-      // (handled inside swapToken itself, but belt-and-suspenders)
+      // Security: LLM must not open long memecoin bags. Only allow:
+      //   - any held token → SOL (exit / auto-swap path)
+      //   - SOL → USDC/USDT (stable park)
+      // Block SOL → arbitrary mints and exotic routes.
+      const SOL = config.tokens.SOL;
+      const USDC = config.tokens.USDC;
+      const USDT = config.tokens.USDT;
+      const { normalizeMint } = await import("./wallet.js");
+      const inMint = normalizeMint(args.input_mint);
+      const outMint = normalizeMint(args.output_mint);
+      const amount = Number(args.amount);
+      if (!inMint || !outMint) {
+        return { pass: false, reason: "swap_token requires input_mint and output_mint" };
+      }
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return { pass: false, reason: "swap_token amount must be a positive number" };
+      }
+      const outIsSol = outMint === SOL || outMint === "SOL";
+      const outIsStable = outMint === USDC || outMint === USDT;
+      const inIsSol = inMint === SOL || inMint === "SOL";
+      if (!outIsSol && !(inIsSol && outIsStable)) {
+        return {
+          pass: false,
+          reason: "swap_token restricted: only token→SOL or SOL→USDC/USDT allowed (no memecoin buys).",
+        };
+      }
+      // Cap SOL outflows to protect gas reserve
+      if (inIsSol && process.env.DRY_RUN !== "true") {
+        const bal = await getWalletBalances();
+        const gas = Number(config.management.gasReserve ?? 0.2);
+        if (Number.isFinite(bal.sol) && amount > Math.max(0, bal.sol - gas)) {
+          return {
+            pass: false,
+            reason: `swap would leave wallet below gas reserve (${gas} SOL). Have ${bal.sol} SOL, tried to swap ${amount}.`,
+          };
+        }
+      }
+      // Cap single swap by maxDeployAmount * 2 in SOL terms for SOL inputs
+      if (inIsSol && amount > config.risk.maxDeployAmount * 2) {
+        return {
+          pass: false,
+          reason: `SOL swap amount ${amount} exceeds 2× maxDeployAmount (${config.risk.maxDeployAmount * 2}).`,
+        };
+      }
       return { pass: true };
     }
 

@@ -8,6 +8,7 @@ import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
+import { getDeployCircuitBreaker } from "./risk.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
@@ -393,6 +394,21 @@ export async function runScreeningCycle({ silent = false } = {}) {
         actor: "SCREENER",
         summary: "Screening skipped",
         reason: `Insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired})`,
+      });
+      _screeningBusy = false;
+      return screenReport;
+    }
+    // Daily / consecutive-loss circuit breaker — preserve capital, still manage opens.
+    const breaker = getDeployCircuitBreaker(config.management);
+    if (breaker.blocked) {
+      log("cron", `Screening skipped — ${breaker.reason}`);
+      screenReport = `Screening skipped — risk circuit breaker: ${breaker.reason}`;
+      appendDecision({
+        type: "skip",
+        actor: "SCREENER",
+        summary: "Screening skipped",
+        reason: breaker.reason,
+        metrics: breaker.stats || {},
       });
       _screeningBusy = false;
       return screenReport;
@@ -785,6 +801,8 @@ Summarize the current portfolio health, total fees earned, and performance of al
         if (!positions || (positions.total_positions ?? 0) >= config.risk.maxPositions) return;
         const minRequired = config.management.deployAmountSol + config.management.gasReserve;
         if (process.env.DRY_RUN !== "true" && (!balance || balance.sol < minRequired)) return;
+        const oppBreaker = getDeployCircuitBreaker(config.management);
+        if (oppBreaker.blocked) return;
 
         const top = await getTopCandidates({ limit: config.opportunity.limit }).catch(() => null);
         const candidates = (top?.candidates || []).slice().sort((a, b) => degenScore(b, config.opportunity) - degenScore(a, config.opportunity));
@@ -914,7 +932,15 @@ function getDeterministicCloseRule(position, managementConfig) {
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
     return { action: "CLOSE", rule: 1, reason: "stop loss" };
   }
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
+  // Hard fixed TP only when trailing is off (or explicitly allowed while trailing).
+  // With trailing on, clipping at takeProfitPct kills runners and hurts expectancy.
+  const hardTpAllowed = !(managementConfig.trailingTakeProfit && managementConfig.hardTakeProfitWhileTrailing !== true);
+  if (
+    hardTpAllowed &&
+    !pnlSuspect &&
+    position.pnl_pct != null &&
+    position.pnl_pct >= managementConfig.takeProfitPct
+  ) {
     return { action: "CLOSE", rule: 2, reason: "take profit" };
   }
   if (
@@ -932,12 +958,49 @@ function getDeterministicCloseRule(position, managementConfig) {
   ) {
     return { action: "CLOSE", rule: 4, reason: "OOR" };
   }
+  const minAgeYield = managementConfig.minAgeBeforeYieldCheck ?? 60;
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
-    (position.age_minutes ?? 0) >= 60
+    (position.age_minutes ?? 0) >= minAgeYield
   ) {
     return { action: "CLOSE", rule: 5, reason: "low yield" };
+  }
+  // Fee decay vs entry snapshot
+  const feeDecayRatio = Number(managementConfig.feeDecayExitRatio ?? 0);
+  const feeDecayMinAge = Number(managementConfig.feeDecayMinAgeMinutes ?? 20);
+  const entryFee = Number(tracked?.initial_fee_tvl_24h ?? tracked?.fee_tvl_ratio);
+  if (
+    feeDecayRatio > 0 &&
+    Number.isFinite(entryFee) &&
+    entryFee > 0 &&
+    position.fee_per_tvl_24h != null &&
+    (position.age_minutes ?? 0) >= feeDecayMinAge &&
+    position.fee_per_tvl_24h < entryFee * feeDecayRatio
+  ) {
+    return { action: "CLOSE", rule: 6, reason: "fee decay" };
+  }
+  // Capital rotation
+  const maxHold = Number(managementConfig.maxHoldMinutes ?? 0);
+  if (maxHold > 0 && (position.age_minutes ?? 0) >= maxHold) {
+    const trigger = Number(managementConfig.trailingTriggerPct ?? 3);
+    const trailingOn = Boolean(tracked?.trailing_active);
+    const strongRunner = trailingOn && !pnlSuspect && position.pnl_pct != null && position.pnl_pct >= trigger;
+    if (!strongRunner) {
+      return { action: "CLOSE", rule: 7, reason: "max hold / capital rotation" };
+    }
+  }
+  // Breakeven after trailing (deterministic path mirrors state.js)
+  if (
+    tracked?.trailing_active &&
+    managementConfig.breakevenAfterTrailing !== false &&
+    !pnlSuspect &&
+    position.pnl_pct != null
+  ) {
+    const floor = Number(managementConfig.breakevenFloorPct ?? 0.2);
+    if (position.pnl_pct <= floor) {
+      return { action: "CLOSE", rule: 8, reason: "breakeven after trailing" };
+    }
   }
   return null;
 }

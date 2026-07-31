@@ -2,7 +2,8 @@ import { config } from "../config.js";
 import { isBlacklisted } from "../token-blacklist.js";
 import { isDevBlocked, getBlockedDevs } from "../dev-blocklist.js";
 import { log } from "../logger.js";
-import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
+import { isBaseMintOnCooldown, isPoolOnCooldown, getPoolMemory } from "../pool-memory.js";
+import { compositeCandidateScore } from "../risk.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { getAgentMeridianBase, getAgentMeridianHeaders } from "./agent-meridian.js";
 
@@ -32,12 +33,18 @@ function normalizeSymbol(symbol) {
   return String(symbol || "").trim().toUpperCase();
 }
 
-export function scoreCandidate(pool) {
-  const feeTvl = Number(pool.fee_active_tvl_ratio || 0);
-  const organic = Number(pool.organic_score || 0);
-  const volume = Number(pool.volume_window || 0);
-  const holders = Number(pool.holders || 0);
-  return feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100;
+/**
+ * Rank score for screening shortlist. Uses fee/vol edge, degen efficiency,
+ * momentum, and personal pool-memory track record (via compositeCandidateScore).
+ */
+export function scoreCandidate(pool, memory = null) {
+  // Attach degen for composite scorer (avoids circular import of degenScore into risk).
+  if (pool._degen_score == null) {
+    pool._degen_score = degenScore(pool, config.opportunity);
+  }
+  const mem = memory ?? (pool.pool ? getPoolMemory({ pool_address: pool.pool }) : null);
+  const knownMem = mem?.known ? mem : null;
+  return compositeCandidateScore(pool, knownMem, config.opportunity);
 }
 
 /**
@@ -645,9 +652,28 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         pushFilteredReason(filteredOut, p, "token cooldown active");
         return false;
       }
+      // Skip pools with proven poor personal track record
+      if (config.risk.skipLowMemoryWinRate !== false && p.pool) {
+        const mem = getPoolMemory({ pool_address: p.pool });
+        const samples = Number(mem?.adjusted_win_rate_sample_count ?? mem?.total_deploys ?? 0);
+        const minSamples = Number(config.risk.lowMemoryMinSamples ?? 3);
+        const wr = Number(mem?.adjusted_win_rate ?? mem?.win_rate);
+        const maxWr = Number(config.risk.lowMemoryWinRateMax ?? 30);
+        if (mem?.known && samples >= minSamples && Number.isFinite(wr) && wr <= maxWr) {
+          log("screening", `Filtered low-memory pool ${p.name} — adj WR ${wr}% over ${samples} samples`);
+          pushFilteredReason(filteredOut, p, `poor pool memory win rate ${wr}% (${samples} samples)`);
+          return false;
+        }
+      }
       return true;
     })
-    .sort((a, b) => scoreCandidate(b) - scoreCandidate(a))
+    .map((p) => {
+      p._degen_score = degenScore(p, config.opportunity);
+      p.rank_score = scoreCandidate(p);
+      p.degen_score = Math.round(p._degen_score * 10) / 10;
+      return p;
+    })
+    .sort((a, b) => (b.rank_score ?? 0) - (a.rank_score ?? 0))
     .slice(0, limit);
 
   if (config.screening.avoidPvpSymbols && eligible.length > 0) {

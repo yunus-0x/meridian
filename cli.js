@@ -674,3 +674,6 @@ switch (subcommand) {
   default:
     die(`Unknown command: ${subcommand}. Run 'meridian help' for usage.`);
 }
+
+// One-shot CLI: force exit so setInterval cache cleaners / poller ticks don't keep the process alive.
+process.exit(0);

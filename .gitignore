@@ -1,6 +1,6 @@
 # Dependencies
 node_modules/
-
+*package-lock.json
 # Environment & secrets
 .env
 .env.*
@@ -9,6 +9,7 @@ node_modules/
 
 # User config (contains RPC URL, wallet key, API keys)
 user-config.json
+user-config*.json
 
 # GMGN fee-source config (contains API key)
 gmgn-config.json

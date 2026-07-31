@@ -392,17 +392,44 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     };
   }
 
-  // ── Trailing TP ────────────────────────────────────────────────
-  if (!pnl_pct_suspicious && pos.trailing_active) {
-    const dropFromPeak = pos.peak_pnl_pct - currentPnlPct;
-    if (dropFromPeak >= mgmtConfig.trailingDropPct) {
+  // ── Breakeven floor after trailing activates (never give back into red) ──
+  if (
+    !pnl_pct_suspicious &&
+    pos.trailing_active &&
+    mgmtConfig.breakevenAfterTrailing !== false &&
+    currentPnlPct != null
+  ) {
+    const floor = Number(mgmtConfig.breakevenFloorPct ?? 0.2);
+    if (Number.isFinite(floor) && currentPnlPct <= floor) {
       return {
-        action: "TRAILING_TP",
-        reason: `Trailing TP: peak ${pos.peak_pnl_pct.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${dropFromPeak.toFixed(2)}% >= ${mgmtConfig.trailingDropPct}%)`,
-        needs_confirmation: true,
+        action: "BREAKEVEN",
+        reason: `Breakeven after trailing: PnL ${currentPnlPct.toFixed(2)}% <= floor ${floor}% (peak was ${Number(pos.peak_pnl_pct ?? 0).toFixed(2)}%)`,
         peak_pnl_pct: pos.peak_pnl_pct,
         current_pnl_pct: currentPnlPct,
+      };
+    }
+  }
+
+  // ── Trailing TP (dynamic drop widens as peak rises) ────────────
+  if (!pnl_pct_suspicious && pos.trailing_active && currentPnlPct != null) {
+    const peak = Number(pos.peak_pnl_pct ?? 0);
+    const baseDrop = Number(mgmtConfig.trailingDropPct ?? 1.5);
+    const trigger = Number(mgmtConfig.trailingTriggerPct ?? 3);
+    const widen = Number(mgmtConfig.trailingDropWidenPerPeakPct ?? 0.12);
+    const maxDrop = Number(mgmtConfig.trailingMaxDropPct ?? 5);
+    const effectiveDrop = Number.isFinite(widen) && widen > 0
+      ? Math.min(maxDrop, baseDrop + Math.max(0, peak - trigger) * widen)
+      : baseDrop;
+    const dropFromPeak = peak - currentPnlPct;
+    if (dropFromPeak >= effectiveDrop) {
+      return {
+        action: "TRAILING_TP",
+        reason: `Trailing TP: peak ${peak.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${dropFromPeak.toFixed(2)}% >= dynamic ${effectiveDrop.toFixed(2)}%)`,
+        needs_confirmation: true,
+        peak_pnl_pct: peak,
+        current_pnl_pct: currentPnlPct,
         drop_from_peak_pct: dropFromPeak,
+        effective_drop_pct: effectiveDrop,
       };
     }
   }
@@ -418,8 +445,42 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     }
   }
 
-  // ── Low yield (only after position has had time to accumulate fees) ───
   const { age_minutes } = positionData;
+
+  // ── Fee decay: live fee/TVL collapsed vs entry (farm died) ─────
+  const feeDecayRatio = Number(mgmtConfig.feeDecayExitRatio ?? 0);
+  const feeDecayMinAge = Number(mgmtConfig.feeDecayMinAgeMinutes ?? 20);
+  const entryFee = Number(pos.initial_fee_tvl_24h ?? pos.fee_tvl_ratio);
+  if (
+    feeDecayRatio > 0 &&
+    Number.isFinite(entryFee) &&
+    entryFee > 0 &&
+    fee_per_tvl_24h != null &&
+    Number.isFinite(Number(fee_per_tvl_24h)) &&
+    (age_minutes == null || age_minutes >= feeDecayMinAge) &&
+    Number(fee_per_tvl_24h) < entryFee * feeDecayRatio
+  ) {
+    return {
+      action: "FEE_DECAY",
+      reason: `Fee decay: live fee/TVL ${Number(fee_per_tvl_24h).toFixed(3)}% < ${Math.round(feeDecayRatio * 100)}% of entry ${entryFee.toFixed(3)}% (age: ${age_minutes ?? "?"}m)`,
+    };
+  }
+
+  // ── Max hold / capital rotation ────────────────────────────────
+  const maxHold = Number(mgmtConfig.maxHoldMinutes ?? 0);
+  if (maxHold > 0 && age_minutes != null && age_minutes >= maxHold) {
+    // Let strong runners with active trailing continue; rotate stagnant capital.
+    const trigger = Number(mgmtConfig.trailingTriggerPct ?? 3);
+    const strongRunner = pos.trailing_active && currentPnlPct != null && currentPnlPct >= trigger;
+    if (!strongRunner) {
+      return {
+        action: "MAX_HOLD",
+        reason: `Max hold ${maxHold}m reached (age ${age_minutes}m, PnL ${currentPnlPct ?? "?"}%) — capital rotation`,
+      };
+    }
+  }
+
+  // ── Low yield (only after position has had time to accumulate fees) ───
   const minAgeForYieldCheck = mgmtConfig.minAgeBeforeYieldCheck ?? 60;
   if (
     fee_per_tvl_24h != null &&

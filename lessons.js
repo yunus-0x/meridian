@@ -704,6 +704,7 @@ export function getPerformanceHistory({ hours = 24, limit = 50 } = {}) {
       pool_name: r.pool_name,
       pool: r.pool,
       strategy: r.strategy,
+      amount_sol: r.amount_sol ?? null,
       pnl_usd: r.pnl_usd,
       pnl_pct: r.pnl_pct,
       fees_earned_usd: r.fees_earned_usd,

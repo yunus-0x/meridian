@@ -68,6 +68,10 @@ export const config = {
   risk: {
     maxPositions:    u.maxPositions    ?? 3,
     maxDeployAmount: u.maxDeployAmount ?? 50,
+    // When true, refuse deploys into pools with poor personal track record
+    skipLowMemoryWinRate: u.skipLowMemoryWinRate ?? true,
+    lowMemoryWinRateMax: u.lowMemoryWinRateMax ?? 30, // adjusted_win_rate % below this + enough samples → skip
+    lowMemoryMinSamples: u.lowMemoryMinSamples ?? 3,
   },
 
   // ─── Pool Screening Thresholds ───────────
@@ -116,8 +120,11 @@ export const config = {
     repeatDeployCooldownScope: u.repeatDeployCooldownScope ?? "token", // pool | token | both
     repeatDeployCooldownMinFeeEarnedPct: u.repeatDeployCooldownMinFeeEarnedPct ?? u.repeatDeployCooldownMinFeeYieldPct ?? 0,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
-    stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
+    // Tighter default stop than classic -50%: LP IL + dumps rarely recover from deep drawdowns
+    stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -25,
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
+    // When trailing is on, hard TP is OFF by default so winners run (see risk.shouldApplyHardTakeProfit)
+    hardTakeProfitWhileTrailing: u.hardTakeProfitWhileTrailing ?? false,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
     minSolToOpen:          u.minSolToOpen          ?? 0.55,
@@ -127,7 +134,28 @@ export const config = {
     // Trailing take-profit
     trailingTakeProfit:    u.trailingTakeProfit    ?? true,
     trailingTriggerPct:    u.trailingTriggerPct    ?? 3,    // activate trailing at X% PnL
-    trailingDropPct:       u.trailingDropPct       ?? 1.5,  // close when drops X% from peak
+    trailingDropPct:       u.trailingDropPct       ?? 1.5,  // base close drop from peak
+    // Dynamic trailing: widen allowed drop as peak rises (let runners run)
+    trailingDropWidenPerPeakPct: u.trailingDropWidenPerPeakPct ?? 0.12,
+    trailingMaxDropPct:    u.trailingMaxDropPct    ?? 5,
+    // Once trailing is active, never give back into red (breakeven floor)
+    breakevenAfterTrailing: u.breakevenAfterTrailing ?? true,
+    breakevenFloorPct:     u.breakevenFloorPct     ?? 0.2,
+    // Capital rotation — free stuck capital on stagnant fee farms
+    maxHoldMinutes:        u.maxHoldMinutes        ?? 360,
+    // Exit if live fee/TVL collapses vs entry (fee farm died)
+    feeDecayExitRatio:     u.feeDecayExitRatio     ?? 0.35,
+    feeDecayMinAgeMinutes: u.feeDecayMinAgeMinutes ?? 20,
+    // Session risk — pause new deploys after a bad day (management still runs)
+    dailyLossLimitEnabled: u.dailyLossLimitEnabled ?? true,
+    dailyLossWindowHours:  u.dailyLossWindowHours  ?? 24,
+    dailyLossLimitUsd:     u.dailyLossLimitUsd     ?? null,  // e.g. 40
+    dailyLossLimitSol:     u.dailyLossLimitSol     ?? 0.5,
+    consecutiveLossLimit:  u.consecutiveLossLimit  ?? 4,
+    // Volatility-aware sizing (smaller size in high-vol pools)
+    volatilitySizeDamping: u.volatilitySizeDamping ?? true,
+    volSizeRef:            u.volSizeRef            ?? 5,
+    minVolSizeMultiplier:  u.minVolSizeMultiplier  ?? 0.4,
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
@@ -276,15 +304,26 @@ export const config = {
  *   3.0 SOL wallet → 0.98 SOL deploy
  *   4.0 SOL wallet → 1.33 SOL deploy
  */
-export function computeDeployAmount(walletSol) {
+export function computeDeployAmount(walletSol, volatility = null) {
   const reserve  = config.management.gasReserve      ?? 0.2;
   const pct      = config.management.positionSizePct ?? 0.35;
   const floor    = config.management.deployAmountSol;
   const ceil     = config.risk.maxDeployAmount;
   const deployable = Math.max(0, walletSol - reserve);
-  const dynamic    = deployable * pct;
-  const result     = Math.min(ceil, Math.max(floor, dynamic));
-  return parseFloat(result.toFixed(2));
+  let dynamic    = deployable * pct;
+  // Volatility damping: high-vol pools get smaller size (IL risk).
+  if (volatility != null && config.management.volatilitySizeDamping !== false) {
+    const vol = Number(volatility);
+    const ref = Number(config.management.volSizeRef ?? 5);
+    const minMult = Number(config.management.minVolSizeMultiplier ?? 0.4);
+    if (Number.isFinite(vol) && vol > 0 && Number.isFinite(ref) && ref > 0) {
+      const mult = Math.min(1, Math.max(minMult, ref / vol));
+      dynamic *= mult;
+    }
+  }
+  const result = Math.min(ceil, Math.max(floor, dynamic));
+  // 4 decimals so micro wallets (e.g. 0.015 SOL) don't round to 0.02 / 0.00.
+  return parseFloat(result.toFixed(4));
 }
 
 /**
