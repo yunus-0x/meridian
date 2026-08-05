@@ -580,6 +580,13 @@ const LLM_PROVIDERS = [
     modelDefault: "gpt-4o",
   },
   {
+    label:   "Novita       (api.novita.ai — open-source models)",
+    key:     "novita",
+    baseUrl: "https://api.novita.ai/openai/v1",
+    keyHint: "your Novita API key",
+    modelDefault: "deepseek/deepseek-v3-0324",
+  },
+  {
     label:   "Local / LM Studio / Ollama (OpenAI-compatible)",
     key:     "local",
     baseUrl: "http://localhost:1234/v1",
