@@ -1,5 +1,5 @@
 import { Connection, PublicKey } from "@solana/web3.js";
-import { config } from "../config.js";
+import { config, getHeader } from "../config.js";
 import { log } from "../logger.js";
 import {
   getTrackedPosition,
@@ -87,7 +87,7 @@ async function getJupiterPrices(mints) {
   const list = unique(mints.map((m) => String(m).trim()));
   if (!list.length) return {};
   try {
-    const res = await fetch(`${JUP_SEARCH}?query=${list.join(",")}`, { headers: { accept: "application/json" } });
+    const res = await fetch(`${JUP_SEARCH}?query=${list.join(",")}`, { headers: getHeader() });
     if (!res.ok) throw new Error(`Jupiter ${res.status}`);
     const assets = await res.json();
     const out = {};
@@ -211,30 +211,30 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
   const ageMinutes = meteora?.createdAt ? Math.floor((Date.now() - meteora.createdAt * 1000) / 60000) : ageFromState;
 
   return {
-    position:           f.position,
-    pool:               f.pool,
-    pair:               tracked?.pool_name || (meteora ? `${meteora.tokenX ?? "?"}/${meteora.tokenY ?? "SOL"}` : "?/SOL"),
-    base_mint:          f.baseMint,
-    lower_bin:          f.lower ?? tracked?.bin_range?.min ?? null,
-    upper_bin:          f.upper ?? tracked?.bin_range?.max ?? null,
-    active_bin:         f.active ?? tracked?.bin_range?.active ?? null,
-    in_range:           inRange,
+    position: f.position,
+    pool: f.pool,
+    pair: tracked?.pool_name || (meteora ? `${meteora.tokenX ?? "?"}/${meteora.tokenY ?? "SOL"}` : "?/SOL"),
+    base_mint: f.baseMint,
+    lower_bin: f.lower ?? tracked?.bin_range?.min ?? null,
+    upper_bin: f.upper ?? tracked?.bin_range?.max ?? null,
+    active_bin: f.active ?? tracked?.bin_range?.active ?? null,
+    in_range: inRange,
     unclaimed_fees_usd: round(solMode ? claimableSol : claimableUsd),
     unclaimed_fees_true_usd: round(claimableUsd),
-    total_value_usd:    round(solMode ? balancesSol : balancesUsd),
+    total_value_usd: round(solMode ? balancesSol : balancesUsd),
     total_value_true_usd: round(balancesUsd),
     collected_fees_usd: round(solMode ? claimedSol : claimedUsd),
     collected_fees_true_usd: round(claimedUsd),
-    pnl_usd:            round(solMode ? pnlSol : pnlUsd),
-    pnl_true_usd:       round(pnlUsd),
-    pnl_pct:            round(ourPct, 2),
-    pnl_pct_derived:    round(ourPct, 2),
-    pnl_pct_diff:       pnlPctDiff != null ? round(pnlPctDiff, 2) : null,
+    pnl_usd: round(solMode ? pnlSol : pnlUsd),
+    pnl_true_usd: round(pnlUsd),
+    pnl_pct: round(ourPct, 2),
+    pnl_pct_derived: round(ourPct, 2),
+    pnl_pct_diff: pnlPctDiff != null ? round(pnlPctDiff, 2) : null,
     pnl_pct_suspicious: !!pnlPctSuspicious,
-    fee_per_tvl_24h:    meteora ? Math.round(safeNum(meteora.feePerTvl24h) * 100) / 100 : null,
-    age_minutes:        ageMinutes,
+    fee_per_tvl_24h: meteora ? Math.round(safeNum(meteora.feePerTvl24h) * 100) / 100 : null,
+    age_minutes: ageMinutes,
     minutes_out_of_range: minutesOutOfRange(f.position),
-    instruction:        tracked?.instruction ?? null,
+    instruction: tracked?.instruction ?? null,
   };
 }
 
