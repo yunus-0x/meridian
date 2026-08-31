@@ -7,7 +7,7 @@ import {
 } from "@solana/web3.js";
 import bs58 from "bs58";
 import { log } from "../logger.js";
-import { config } from "../config.js";
+import { config, getHeader } from "../config.js";
 
 let _connection = null;
 let _wallet = null;
@@ -52,18 +52,148 @@ function getJupiterReferralParams() {
   return { referralAccount, referralFee: Math.round(referralFee) };
 }
 
-/**
- * Get current wallet balances: SOL, USDC, and all SPL tokens using Helius Wallet API.
- * Returns USD-denominated values provided by Helius.
- */
-export async function getWalletBalances() {
-  let walletAddress;
+async function fetchJupiterPrices(mints) {
+  const uniqueMints = [...new Set(mints.filter(Boolean))];
+  if (!uniqueMints.length) return {};
   try {
-    walletAddress = getWallet().publicKey.toString();
-  } catch {
-    return { wallet: null, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Wallet not configured" };
+    const res = await fetch(`https://datapi.jup.ag/v1/assets/search?query=${uniqueMints.join(",")}`, {
+      headers: getHeader(),
+    });
+    if (!res.ok) return {};
+    const assets = await res.json();
+    const prices = {};
+    for (const a of assets) {
+      if (a.id && a.usdPrice != null) {
+        prices[a.id] = parseFloat(a.usdPrice);
+      }
+    }
+    return prices;
+  } catch (e) {
+    log("wallet_error", `Jupiter price lookup failed: ${e.message}`);
+    return {};
+  }
+}
+
+/**
+ * Get single token balance using Shyft Wallet API (GET /sol/v1/wallet/token_balance).
+ */
+export async function getShyftTokenBalance(walletAddress, tokenMint) {
+  const SHYFT_KEY = process.env.SHYFT_API_KEY;
+  if (!SHYFT_KEY) {
+    throw new Error("SHYFT_API_KEY not set in .env");
+  }
+  const url = `https://api.shyft.to/sol/v1/wallet/token_balance?network=mainnet-beta&wallet=${walletAddress}&token=${tokenMint}`;
+  const res = await fetch(url, {
+    headers: {
+      "x-api-key": SHYFT_KEY,
+      "Content-Type": "application/json",
+    },
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`Shyft token_balance API error: ${res.status} ${errText}`);
+  }
+  const data = await res.json();
+  return data.result;
+}
+
+/**
+ * Fetch wallet balances using Shyft Wallet API (GET /sol/v1/wallet/balance & GET /sol/v1/wallet/all_tokens).
+ */
+async function getWalletBalancesFromShyft(walletAddress) {
+  const SHYFT_KEY = process.env.SHYFT_API_KEY;
+  if (!SHYFT_KEY) {
+    log("wallet_error", "SHYFT_API_KEY not set in .env");
+    return { wallet: walletAddress, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Shyft API key missing" };
   }
 
+  const headers = {
+    "x-api-key": SHYFT_KEY,
+    "Content-Type": "application/json",
+  };
+
+  try {
+    const [solRes, tokensRes] = await Promise.all([
+      fetch(`https://api.shyft.to/sol/v1/wallet/balance?network=mainnet-beta&wallet=${walletAddress}`, { headers }),
+      fetch(`https://api.shyft.to/sol/v1/wallet/all_tokens?network=mainnet-beta&wallet=${walletAddress}`, { headers }),
+    ]);
+
+    if (!solRes.ok) {
+      const errText = await solRes.text().catch(() => "");
+      throw new Error(`Shyft balance API error: ${solRes.status} ${errText}`);
+    }
+    if (!tokensRes.ok) {
+      const errText = await tokensRes.text().catch(() => "");
+      throw new Error(`Shyft all_tokens API error: ${tokensRes.status} ${errText}`);
+    }
+
+    const solData = await solRes.json();
+    const tokensData = await tokensRes.json();
+
+    const solBalance = solData.result?.balance || 0;
+    const rawTokens = tokensData.result || [];
+
+    const mintsToPrice = [config.tokens.SOL, ...rawTokens.map(t => t.address)];
+    const prices = await fetchJupiterPrices(mintsToPrice);
+
+    const solPrice = prices[config.tokens.SOL] || 0;
+    const solUsd = solBalance * solPrice;
+
+    let usdcBalance = 0;
+    let tokensUsdSum = 0;
+
+    const enrichedTokens = rawTokens.map(t => {
+      const mint = t.address;
+      const symbol = t.info?.symbol || mint.slice(0, 8);
+      const balance = t.balance || 0;
+      const price = prices[mint] || 0;
+      const usd = (balance > 0 && price > 0) ? Math.round(balance * price * 100) / 100 : null;
+
+      if (mint === config.tokens.USDC || symbol === "USDC") {
+        usdcBalance = balance;
+      }
+      if (usd != null) {
+        tokensUsdSum += usd;
+      }
+
+      return {
+        mint,
+        symbol,
+        balance,
+        usd,
+      };
+    });
+
+    const totalUsd = solUsd + tokensUsdSum;
+
+    return {
+      wallet: walletAddress,
+      sol: Math.round(solBalance * 1e6) / 1e6,
+      sol_price: Math.round(solPrice * 100) / 100,
+      sol_usd: Math.round(solUsd * 100) / 100,
+      usdc: Math.round(usdcBalance * 100) / 100,
+      tokens: enrichedTokens,
+      total_usd: Math.round(totalUsd * 100) / 100,
+    };
+  } catch (error) {
+    log("wallet_error", error.message);
+    return {
+      wallet: walletAddress,
+      sol: 0,
+      sol_price: 0,
+      sol_usd: 0,
+      usdc: 0,
+      tokens: [],
+      total_usd: 0,
+      error: error.message,
+    };
+  }
+}
+
+/**
+ * Fetch wallet balances using Helius Wallet API.
+ */
+async function getWalletBalancesFromHelius(walletAddress) {
   const HELIUS_KEY = process.env.HELIUS_API_KEY;
   if (!HELIUS_KEY) {
     log("wallet_error", "HELIUS_API_KEY not set in .env");
@@ -73,7 +203,7 @@ export async function getWalletBalances() {
   try {
     const url = `https://api.helius.xyz/v1/wallet/${walletAddress}/balances?api-key=${HELIUS_KEY}`;
     const res = await fetch(url);
-    
+
     if (!res.ok) {
       throw new Error(`Helius API error: ${res.status} ${res.statusText}`);
     }
@@ -123,6 +253,114 @@ export async function getWalletBalances() {
 }
 
 /**
+ * Fetch wallet balances using native Solana web3 RPC (connection.getBalance / getParsedTokenAccountsByOwner).
+ */
+async function getWalletBalancesFromSolana(walletAddress) {
+  try {
+    const connection = getConnection();
+    const pubKey = new PublicKey(walletAddress);
+
+    const [solLamports, tokenAccountsResult] = await Promise.all([
+      connection.getBalance(pubKey),
+      connection.getParsedTokenAccountsByOwner(pubKey, {
+        programId: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
+      }),
+    ]);
+
+    const solBalance = solLamports / LAMPORTS_PER_SOL;
+
+    const rawTokens = [];
+    if (tokenAccountsResult?.value) {
+      for (const item of tokenAccountsResult.value) {
+        const parsedInfo = item.account?.data?.parsed?.info;
+        if (!parsedInfo) continue;
+        const mint = parsedInfo.mint;
+        const balance = parsedInfo.tokenAmount?.uiAmount || 0;
+        if (balance > 0) {
+          rawTokens.push({ mint, balance });
+        }
+      }
+    }
+
+    const mintsToPrice = [config.tokens.SOL, ...rawTokens.map(t => t.mint)];
+    const prices = await fetchJupiterPrices(mintsToPrice);
+
+    const solPrice = prices[config.tokens.SOL] || 0;
+    const solUsd = solBalance * solPrice;
+
+    let usdcBalance = 0;
+    let tokensUsdSum = 0;
+
+    const enrichedTokens = rawTokens.map(t => {
+      const mint = t.mint;
+      const balance = t.balance;
+      const price = prices[mint] || 0;
+      const usd = (balance > 0 && price > 0) ? Math.round(balance * price * 100) / 100 : null;
+
+      if (mint === config.tokens.USDC) {
+        usdcBalance = balance;
+      }
+      if (usd != null) {
+        tokensUsdSum += usd;
+      }
+
+      return {
+        mint,
+        symbol: mint.slice(0, 8),
+        balance,
+        usd,
+      };
+    });
+
+    const totalUsd = solUsd + tokensUsdSum;
+
+    return {
+      wallet: walletAddress,
+      provider: "solana",
+      sol: Math.round(solBalance * 1e6) / 1e6,
+      sol_price: Math.round(solPrice * 100) / 100,
+      sol_usd: Math.round(solUsd * 100) / 100,
+      usdc: Math.round(usdcBalance * 100) / 100,
+      tokens: enrichedTokens,
+      total_usd: Math.round(totalUsd * 100) / 100,
+    };
+  } catch (error) {
+    log("wallet_error", error.message);
+    return {
+      wallet: walletAddress,
+      sol: 0,
+      sol_price: 0,
+      sol_usd: 0,
+      usdc: 0,
+      tokens: [],
+      total_usd: 0,
+      error: error.message,
+    };
+  }
+}
+
+/**
+ * Get current wallet balances: SOL, USDC, and all SPL tokens using configured API provider (Helius, Shyft, or Solana RPC).
+ */
+export async function getWalletBalances() {
+  let walletAddress;
+  try {
+    walletAddress = getWallet().publicKey.toString();
+  } catch {
+    return { wallet: null, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Wallet not configured" };
+  }
+
+  const provider = (config.walletApi || process.env.WALLET_API || "helius").toLowerCase();
+  if (provider === "shyft") {
+    return getWalletBalancesFromShyft(walletAddress);
+  }
+  if (provider === "solana" || provider === "rpc" || provider === "web3") {
+    return getWalletBalancesFromSolana(walletAddress);
+  }
+  return getWalletBalancesFromHelius(walletAddress);
+}
+
+/**
  * Swap tokens via Jupiter Swap API V2 (order → sign → execute).
  */
 const SOL_MINT = "So11111111111111111111111111111111111111112";
@@ -132,9 +370,9 @@ export function normalizeMint(mint) {
   if (!mint) return mint;
   const SOL_MINT = "So11111111111111111111111111111111111111112";
   if (
-    mint === "SOL" || 
-    mint === "native" || 
-    /^So1+$/.test(mint) || 
+    mint === "SOL" ||
+    mint === "native" ||
+    /^So1+$/.test(mint) ||
     (mint.length >= 32 && mint.length <= 44 && mint.startsWith("So1") && mint !== SOL_MINT)
   ) {
     return SOL_MINT;
@@ -147,7 +385,7 @@ export async function swapToken({
   output_mint,
   amount,
 }) {
-  input_mint  = normalizeMint(input_mint);
+  input_mint = normalizeMint(input_mint);
   output_mint = normalizeMint(output_mint);
 
   if (process.env.DRY_RUN === "true") {

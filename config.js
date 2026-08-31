@@ -42,6 +42,7 @@ if (u.dryRun !== undefined) process.env.DRY_RUN ||= String(u.dryRun);
 if (u.publicApiKey) process.env.PUBLIC_API_KEY ||= u.publicApiKey;
 if (u.agentMeridianApiUrl) process.env.AGENT_MERIDIAN_API_URL ||= u.agentMeridianApiUrl;
 if (u.telegramChatId) process.env.TELEGRAM_CHAT_ID ||= String(u.telegramChatId);
+if (u.walletApi) process.env.WALLET_API ||= u.walletApi;
 
 const indicatorUserConfig = u.chartIndicators ?? {};
 
@@ -262,6 +263,7 @@ export const config = {
     rsiOverbought: indicatorUserConfig.rsiOverbought ?? 80,
     requireAllIntervals: indicatorUserConfig.requireAllIntervals ?? false,
   },
+  walletApi: (u.walletApi || process.env.WALLET_API || "helius").toLowerCase(),
 };
 
 /**
