@@ -16,6 +16,21 @@ const STATE_FILE = repoPath("state.json");
 
 const MAX_RECENT_EVENTS = 20;
 const MAX_INSTRUCTION_LENGTH = 280;
+// Post-claim Meteora /pnl API indexer settlement window (60s).
+// Immediately after claimSwapFee, Meteora's /pnl API can temporarily double-count
+// claimed fees in both allTimeFees and unclaimedFee (or zero unclaimedFee before
+// indexing allTimeFees), causing a phantom PnL spike/drop that would falsely arm
+// or fire Trailing TP / Stop Loss.
+export const POST_CLAIM_SETTLE_MS = 60_000;
+
+export function isPostClaimSettling(posOrAddress, nowMs = Date.now()) {
+  const pos = typeof posOrAddress === "string"
+    ? getTrackedPosition(posOrAddress)
+    : posOrAddress;
+  if (!pos?.last_claim_at) return false;
+  const claimMs = new Date(pos.last_claim_at).getTime();
+  return Number.isFinite(claimMs) && nowMs - claimMs >= 0 && nowMs - claimMs < POST_CLAIM_SETTLE_MS;
+}
 
 function sanitizeStoredText(text, maxLen = MAX_INSTRUCTION_LENGTH) {
   if (text == null) return null;
@@ -166,6 +181,14 @@ export function recordClaim(position_address, fees_usd) {
   if (!pos) return;
   pos.last_claim_at = new Date().toISOString();
   pos.total_fees_claimed_usd = (pos.total_fees_claimed_usd || 0) + (fees_usd || 0);
+  // Clear any in-flight peak or exit confirmation streak so post-claim indexer lag
+  // cannot combine with a pre-claim tick to falsely confirm a peak or exit.
+  pos.pending_peak_pnl_pct = null;
+  pos.pending_peak_confirm_count = 0;
+  pos.pending_peak_started_at = null;
+  pos.pending_exit_action = null;
+  pos.pending_exit_count = 0;
+  pos.pending_exit_started_at = null;
   pos.notes.push(`Claimed ~$${fees_usd?.toFixed(2) || "?"} fees at ${pos.last_claim_at}`);
   save(state);
 }
@@ -222,6 +245,19 @@ export function confirmPeak(position_address, candidatePnlPct, confirmTicks = 2)
   const state = load();
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return false;
+
+  // Never confirm or raise peak_pnl_pct during the 60s post-claim settlement window,
+  // because Meteora's /pnl API can double-count claimed fees in both allTimeFees and
+  // unclaimedFee for ~6-15s right after claimSwapFee.
+  if (isPostClaimSettling(pos)) {
+    if (pos.pending_peak_pnl_pct != null) {
+      pos.pending_peak_pnl_pct = null;
+      pos.pending_peak_confirm_count = 0;
+      pos.pending_peak_started_at = null;
+      save(state);
+    }
+    return false;
+  }
 
   const currentPeak = pos.peak_pnl_pct ?? 0;
   // No new high — drop any pending peak candidate.
@@ -362,6 +398,8 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return null;
 
+  const postClaimSettling = isPostClaimSettling(pos);
+  const effectiveSuspicious = Boolean(pnl_pct_suspicious || postClaimSettling);
   let changed = false;
 
   // Touchpoint 2: Chronos-Adaptive Trailing Take-Profit (Sniper Lock vs Let Winners Run)
@@ -376,7 +414,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
       : (mgmtConfig.trailingDropPct ?? 1.2);
 
   // Persist trailing_active permanently only when peak reaches the standard baseTriggerPct
-  if (mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= baseTriggerPct) {
+  if (!effectiveSuspicious && mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= baseTriggerPct) {
     pos.trailing_active = true;
     changed = true;
     log("state", `Position ${position_address} trailing TP activated (confirmed peak: ${pos.peak_pnl_pct}%, trigger: ${baseTriggerPct}%)`);
@@ -401,7 +439,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   if (changed) save(state);
 
   // ── Stop loss ──────────────────────────────────────────────────
-  if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
+  if (!effectiveSuspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
     return {
       action: "STOP_LOSS",
       reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%`,
@@ -409,7 +447,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   // ── Trailing TP (never close at a loss: currentPnlPct must be > 0) ─────────
-  if (!pnl_pct_suspicious && isTrailingActiveThisTick && currentPnlPct != null && currentPnlPct > 0) {
+  if (!effectiveSuspicious && isTrailingActiveThisTick && currentPnlPct != null && currentPnlPct > 0) {
     const dropFromPeak = pos.peak_pnl_pct - currentPnlPct;
     if (dropFromPeak >= effectiveDropPct) {
       return {
@@ -456,7 +494,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   const { age_minutes } = positionData;
   const minAgeForYieldCheck = mgmtConfig.minAgeBeforeYieldCheck ?? 60;
   if (
-    !pnl_pct_suspicious &&
+    !effectiveSuspicious &&
     currentPnlPct != null &&
     currentPnlPct >= 0 &&
     fee_per_tvl_24h != null &&

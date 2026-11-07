@@ -3,6 +3,7 @@ import { config } from "../config.js";
 import { log } from "../logger.js";
 import {
   getTrackedPosition,
+  isPostClaimSettling,
   markOutOfRange,
   markInRange,
   minutesOutOfRange,
@@ -226,11 +227,15 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
   // only when we couldn't price it. Guards against:
   //  - Jupiter outage → solUsd/priceX missing → balances collapse → false STOP_LOSS
   //  - missing Meteora deposits → 0 cost basis → garbage pnl / inflated value
+  const tracked = getTrackedPosition(f.position);
+  const postClaimSettling = isPostClaimSettling(tracked);
   const holdsTokenX = xHuman > 0 || feeXHuman > 0;
   const priceMissing = !(solUsd > 0) || (holdsTokenX && !!f.baseMint && !(priceX > 0));
   const depositsMissing = (solMode ? depositsSol : depositsUsd) <= 0;
-  const pnlPctSuspicious = priceMissing || depositsMissing;
-  if (pnlPctSuspicious) {
+  const pnlPctSuspicious = priceMissing || depositsMissing || postClaimSettling;
+  if (postClaimSettling) {
+    log("pnl_warn", `${f.position.slice(0, 8)} post-claim settlement window active (last_claim_at=${tracked?.last_claim_at}) — pausing PnL exit/peak rules for 60s`);
+  } else if (pnlPctSuspicious) {
     log("pnl_warn", `${f.position.slice(0, 8)} suspicious tick — priceMissing=${priceMissing} depositsMissing=${depositsMissing} (solUsd=${solUsd}, priceX=${priceX})`);
   }
 
@@ -241,7 +246,6 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
   if (inRange) markInRange(f.position);
   else markOutOfRange(f.position);
 
-  const tracked = getTrackedPosition(f.position);
   const ageFromState = tracked?.deployed_at
     ? Math.floor((Date.now() - new Date(tracked.deployed_at).getTime()) / 60000)
     : null;

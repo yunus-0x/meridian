@@ -2,7 +2,7 @@
 
 import { config } from "./config.js";
 import { log } from "./logger.js";
-import { getTrackedPosition } from "./state.js";
+import { getTrackedPosition, isPostClaimSettling } from "./state.js";
 
 /**
  * Rule-based close decision for a position (stop loss, take profit, range
@@ -11,8 +11,8 @@ import { getTrackedPosition } from "./state.js";
 export function getDeterministicCloseRule(position, managementConfig, chronosCtx = null) {
   const tracked = getTrackedPosition(position.position);
   const pnlSuspect = (() => {
-    // Couldn't-price-this-tick flag (e.g. Jupiter outage) — never act on PnL rules.
-    if (position.pnl_pct_suspicious) return true;
+    // Couldn't-price-this-tick flag (e.g. Jupiter outage) or 60s post-claim settlement window — never act on PnL rules.
+    if (position.pnl_pct_suspicious || isPostClaimSettling(tracked)) return true;
     if (position.pnl_pct == null) return false;
     if (position.pnl_pct > -90) return false;
     // Only treat <= -90% PnL as a pricing glitch when remaining value still exceeds 25% of initial deposit

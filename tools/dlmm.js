@@ -15,6 +15,7 @@ import {
   recordClaim,
   recordClose,
   getTrackedPosition,
+  isPostClaimSettling,
   minutesOutOfRange,
   syncOpenPositions,
 } from "../state.js";
@@ -897,8 +898,11 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
         // from either method — e.g. missing deposits / data outage). Reported-vs-derived
         // divergence is normal noise on volatile pools, so it is logged but NOT gated —
         // gating on it froze all exits (stop-loss/trailing/close) and stranded positions.
-        const pnlPctSuspicious = reportedPnlPct == null && derivedPnlPct == null;
-        if (pnlPctSuspicious) {
+        const postClaimSettling = isPostClaimSettling(tracked);
+        const pnlPctSuspicious = (reportedPnlPct == null && derivedPnlPct == null) || postClaimSettling;
+        if (postClaimSettling) {
+          log("positions_warn", `Post-claim settlement window active for ${positionAddress.slice(0, 8)} (last_claim_at=${tracked?.last_claim_at}) — PnL exit/peak rules paused for 60s to prevent Meteora double-count`);
+        } else if (pnlPctSuspicious) {
           log("positions_warn", `Unpriceable pnl_pct for ${positionAddress.slice(0, 8)}: no valid reported/derived value this tick — PnL rules paused`);
         } else if (pnlPctDiff != null && pnlPctDiff > (config.management.pnlSanityMaxDiffPct ?? 5)) {
           // Informational only — does not gate rules.
