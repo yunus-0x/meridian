@@ -1,5 +1,6 @@
 // Outbound notifications used by the standalone runtime and transaction executor.
 import fs from "node:fs";
+import { config } from "./config.js";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
 const USER_CONFIG_PATH = repoPath("user-config.json");
@@ -179,11 +180,18 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
   );
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlPct }) {
-  const sign = pnlUsd >= 0 ? "+" : "";
+export async function notifyClose({ pair, pnlUsd, pnlPct, solMode }) {
+  const useSolMode = solMode != null ? Boolean(solMode) : Boolean(config.management?.solMode);
+  const val = Number(pnlUsd ?? 0);
+  const pct = Number(pnlPct ?? 0);
+  const valSign = val >= 0 ? "+" : "-";
+  const pctSign = pct >= 0 ? "+" : "";
+  const pnlText = useSolMode
+    ? `${valSign}◎${Math.abs(val).toFixed(4)} SOL`
+    : `${valSign}$${Math.abs(val).toFixed(2)}`;
   await sendHTML(
     `🔒 <b>Closed</b> ${pair}\n` +
-    `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)`
+    `PnL: ${pnlText} (${pctSign}${pct.toFixed(2)}%)`
   );
 }
 

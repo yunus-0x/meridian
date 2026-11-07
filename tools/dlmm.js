@@ -261,6 +261,7 @@ export async function deployPosition({
   }
 
   const { StrategyType, getBinIdFromPrice, getPriceOfBinByBinId } = await getDLMM();
+  poolCache.delete(pool_address.toString());
   const pool = await getPool(pool_address);
   const baseMint = pool.lbPair.tokenXMint.toString();
   if (pool.lbPair.tokenYMint.toString() !== config.tokens.SOL) throw new Error("Execution requires SOL as token Y");
@@ -357,6 +358,7 @@ export async function deployPosition({
 
   const txHashes = [];
   let preSwapTxHash = null;
+  let spentSwapSol = 0;
   let preSwapRaw = 0n;
   let swappedRawDeltaX = 0n;
   let swappedDeltaXUi = 0;
@@ -418,6 +420,7 @@ export async function deployPosition({
           throw new Error(`Dual-sided pre-deploy swap failed: ${swapRes?.error || "unknown error"}`);
         }
         if (swapRes.tx) preSwapTxHash = swapRes.tx;
+        spentSwapSol = swapSolAmount;
         finalAmountY = parseFloat((finalAmountY - swapSolAmount).toFixed(6));
         let tok = null;
         for (let attempt = 0; attempt < 6; attempt++) {
@@ -434,6 +437,7 @@ export async function deployPosition({
         const tokDecimals = Number(tok.decimals ?? 9);
         swappedDeltaXUi = Number(swappedRawDeltaX) / Math.pow(10, tokDecimals);
         finalAmountX = swappedDeltaXUi;
+        if (typeof pool.refetchStates === "function") await pool.refetchStates();
         activeBin = await pool.getActiveBin();
         activePrice = Number(getPriceOfBinByBinId(activeBin.binId, actualBinStep).toString());
       } else {
@@ -498,7 +502,7 @@ export async function deployPosition({
       const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
       for (let i = 0; i < createTxArray.length; i++) {
         const signers = i === 0 ? [wallet, newPosition] : [wallet];
-        await before_submit?.();
+        await before_submit?.("lp", spentSwapSol);
         const txHash = await sendAndConfirmTransaction(getConnection(), createTxArray[i], signers);
         txHashes.push(txHash);
         log("deploy", `Create tx ${i + 1}/${createTxArray.length}: ${txHash}`);
@@ -515,7 +519,7 @@ export async function deployPosition({
       });
       const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
       for (let i = 0; i < addTxArray.length; i++) {
-        await before_submit?.();
+        await before_submit?.("lp", spentSwapSol);
         const txHash = await sendAndConfirmTransaction(getConnection(), addTxArray[i], [wallet]);
         txHashes.push(txHash);
         log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
@@ -530,7 +534,7 @@ export async function deployPosition({
         strategy: { maxBinId, minBinId, strategyType },
         slippage: 1, // SDK expects percent, not bps
       });
-      await before_submit?.();
+      await before_submit?.("lp", spentSwapSol);
       const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet, newPosition]);
       txHashes.push(txHash);
     }
@@ -1079,6 +1083,11 @@ export async function closePosition({ position_address, reason }) {
             claimTxHashes.push(claimHash);
           }
           log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
+          const step1ClaimedUsd = preCloseCachedPos?.unclaimed_fees_true_usd ?? preCloseCachedPos?.unclaimed_fees_usd ?? 0;
+          recordClaim(position_address, step1ClaimedUsd);
+          if (tracked && step1ClaimedUsd > 0) {
+            tracked.total_fees_claimed_usd = (tracked.total_fees_claimed_usd || 0) + step1ClaimedUsd;
+          }
         }
       }
     } catch (e) {
@@ -1233,14 +1242,12 @@ export async function closePosition({ position_address, reason }) {
           pnlTrueUsd    = cachedPos.pnl_true_usd ?? (config.management.solMode ? 0 : cachedPos.pnl_usd) ?? 0;
           pnlUsd        = config.management.solMode ? (cachedPos.pnl_usd ?? 0) : pnlTrueUsd;
           pnlPct        = cachedPos.pnl_pct   ?? 0;
-          feesUsd       = (cachedPos.collected_fees_true_usd || 0) + (cachedPos.unclaimed_fees_true_usd || 0);
+          feesUsd       = Math.max(feesUsd, (cachedPos.collected_fees_true_usd || 0) + (cachedPos.unclaimed_fees_true_usd || 0));
           initialUsd    = tracked.initial_value_usd || 0;
+          finalValueUsd = cachedPos.total_value_true_usd ?? cachedPos.total_value_usd ?? Math.max(0, initialUsd + pnlTrueUsd - feesUsd);
           if (initialUsd > 0) {
-            // Keep fallback internally consistent using USD-only cached metrics.
-            finalValueUsd = Math.max(0, initialUsd + pnlTrueUsd - feesUsd);
-            if (!config.management.solMode) pnlPct = (pnlTrueUsd / initialUsd) * 100;
+            if (!config.management.solMode && cachedPos.pnl_pct == null) pnlPct = (pnlTrueUsd / initialUsd) * 100;
           } else {
-            finalValueUsd = cachedPos.total_value_true_usd ?? cachedPos.total_value_usd ?? 0;
             initialUsd = Math.max(0, finalValueUsd + feesUsd - pnlTrueUsd);
           }
           log("close_warn", `Using cached pnl fallback because closed API has not settled yet`);

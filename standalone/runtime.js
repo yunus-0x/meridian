@@ -206,11 +206,11 @@ async function attemptEntry(signal) {
     bins_below: binsBelow,
     bins_above: binsAbove,
     x_ratio_mult: xRatioMult,
-    before_submit: async (stage = "lp") => {
+    before_submit: async (stage = "lp", spentSol = 0) => {
       // Always recheck before the pre-deploy swap AND before the first LP creation tx.
       // Subsequent chunks of a multi-tx LP creation skip recheck so a half-built position completes.
       if (stage !== "swap" && submitted++ > 0) return;
-      const fresh = await finalRecheck(signal, screened);
+      const fresh = await finalRecheck(signal, screened, spentSol);
       if (fresh) throw new Error(`Pre-submit recheck failed: ${fresh}`);
     },
     on_prepared: position => {
@@ -248,7 +248,7 @@ async function attemptEntry(signal) {
 // Immediate pre-entry conditions: the triggering wallets still hold their
 // exposure, the market has not run away since screening, and spendable funds
 // cover the entry. Returns null when everything holds, else the reason.
-async function finalRecheck(signal, screened) {
+async function finalRecheck(signal, screened, spentSol = 0) {
   let present = 0;
   for (const e of signal.events) {
     try { if (await exposureStillPresent(e)) present++; } catch { /* unreadable position = not confirmed */ }
@@ -262,13 +262,17 @@ async function finalRecheck(signal, screened) {
     const now = Number(fresh.pool_price);
     if (!(base > 0) || !(now > 0)) return "price unavailable for move check";
     const movePct = Math.abs(now - base) / base * 100;
-    if (movePct > config.standalone.maxPriceMovePct) return `price moved ${movePct.toFixed(1)}% since screening`;
+    const maxMovePct = spentSol > 0 && now >= base
+      ? config.standalone.maxPriceMovePct * 2
+      : config.standalone.maxPriceMovePct;
+    if (movePct > maxMovePct) return `price moved ${movePct.toFixed(1)}% since screening`;
   } catch (e) {
     return `fresh pool read failed (${e.message})`;
   }
   const balances = await getWalletBalances({ force: true, nativeOnly: true });
   if (balances.error || !Number.isFinite(balances.sol)) return "balance read unavailable";
-  if (balances.sol < config.management.minSolToOpen + config.management.gasReserve) return "insufficient spendable SOL";
+  const priorSwapSol = Number.isFinite(Number(spentSol)) && Number(spentSol) > 0 ? Number(spentSol) : 0;
+  if (balances.sol + priorSwapSol < config.management.minSolToOpen + config.management.gasReserve) return "insufficient spendable SOL";
   return null;
 }
 
@@ -276,7 +280,7 @@ async function finalRecheck(signal, screened) {
 
 // One management pass: trailing/rule exits and fee claims. Never triggers
 // screening — an empty portfolio just waits for the next convergence signal.
-export async function manageOnce() {
+export async function manageOnce({ confirmTicksOverride = 1 } = {}) {
   if (manageBusy || shuttingDown) return null;
   manageBusy = true;
   try {
@@ -288,6 +292,7 @@ export async function manageOnce() {
     syncOpenPositions(live.positions.map(p => p.position));
     if (live.positions.length === 0) return "No open positions";
     const confirmTicks = Math.max(1, Number(config.pnl.confirmTicks ?? 2));
+    const exitConfirmTicks = Math.max(1, Number(confirmTicksOverride ?? 1));
     for (const p of live.positions) {
       recordPositionSnapshot(p.pool, p);
       const tracked = getTrackedPosition(p.position);
@@ -304,7 +309,7 @@ export async function manageOnce() {
         ? { action: "CLOSE", rule: "exit", reason: exit.reason }
         : getDeterministicCloseRule(p, config.management, chronosCtx);
       const exitSignalName = exit ? (exit.action ?? "EXIT") : closeRule ? `RULE_${closeRule.rule}` : null;
-      const { fire: exitConfirmed } = registerExitSignal(p.position, exitSignalName, confirmTicks);
+      const { fire: exitConfirmed } = registerExitSignal(p.position, exitSignalName, exitConfirmTicks);
       let action = null;
       if (closeRule?.action === "CLOSE" && exitConfirmed) {
         action = { tool: "close_position", args: { position_address: p.position, reason: closeRule.reason }, label: `close (${closeRule.reason})` };

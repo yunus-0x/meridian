@@ -226,7 +226,21 @@ function applySetting(setting, value) {
     writeEnvValue(setting.k.slice(4), value);
     return setting.restart;
   }
-  writeUserConfig({ [setting.k]: value });
+  const existingCfg = readUserConfig();
+  const prevWait = config.management?.outOfRangeWaitMinutes;
+  const patch = { [setting.k]: value };
+  if (
+    setting.k === "outOfRangeWaitMinutes" &&
+    (existingCfg.outOfRangeAboveWaitMinutes === undefined ||
+      existingCfg.outOfRangeAboveWaitMinutes === existingCfg.outOfRangeWaitMinutes ||
+      config.management.outOfRangeAboveWaitMinutes === prevWait)
+  ) {
+    if (existingCfg.outOfRangeAboveWaitMinutes !== undefined) {
+      patch.outOfRangeAboveWaitMinutes = value;
+    }
+    config.management.outOfRangeAboveWaitMinutes = value;
+  }
+  writeUserConfig(patch);
   // Hot-apply where the runtime reads config live; restart-flagged values say so.
   let target = config;
   for (let i = 0; i < setting.path.length - 1; i++) target = target[setting.path[i]];
@@ -280,7 +294,7 @@ function sectionMenu(section) {
   }]);
   const explainers = {
     strategy:
-      "Range: bins below the active bin scale with pool volatility, clamped to min–max (bins above = 0). " +
+      "Range: bins below the active bin scale with pool volatility, clamped to min–max; bins above follow defaultBinsAbove (0 = single-sided SOL, >0 = dual-sided). " +
       "Shape: spot = flat, curve = bell, bid_ask = concentrated at the center. Applied per entry, no restart.",
     rpc: "Endpoints live in .env — edit, then ♻️ Restart.",
   };

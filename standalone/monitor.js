@@ -11,13 +11,13 @@ export class WalletMonitor {
     this.subscriptions = new Map(); this.running = false; this.reconciling = false; this.draining = false;
     this.stats = { transactions: 0, entries: 0, lastLagMs: null, errors: 0 };
   }
-  enqueue(wallet, signature, slot) {
+  enqueue(wallet, signature, slot, { save = true } = {}) {
     const key = `${wallet}:${signature}`;
     if (!this.running || !this.store.data.wallets[wallet] || slot <= this.store.data.wallets[wallet].baselineSlot) return;
     if (this.store.data.seen[key] || this.store.data.pending[key]) return;
     if (Object.keys(this.store.data.pending).length >= this.options.maxPendingTransactions) throw new Error('Wallet queue is full; entry monitoring is degraded');
     this.store.data.pending[key] = { wallet, signature, slot, queuedAt: Date.now(), retryAt: 0, failures: 0 };
-    this.store.save();
+    if (save) this.store.save();
   }
   healthy() {
     const wallets = this.wallets().wallets.filter(w => !w.type || w.type === 'lp');
@@ -80,7 +80,7 @@ export class WalletMonitor {
             before = signatures.at(-1).signature;
           }
           if (!complete) throw new Error('Signature backfill limit reached; entries paused until history catches up');
-          for (const s of found.reverse()) this.enqueue(w.address, s.signature, s.slot);
+          for (const s of found.reverse()) this.enqueue(w.address, s.signature, s.slot, { save: false });
           state.cursor = newest || state.cursor;
           state.error = null; state.reconciledAt = Date.now();
           this.store.save();

@@ -19,6 +19,7 @@ import {
 // precomputed live pnl/balances are intentionally ignored here. Token USD
 // prices come from Jupiter. No LPAgent / agentmeridian dependency.
 
+const JUP_PRICE_V3 = "https://api.jup.ag/price/v3";
 const JUP_SEARCH = "https://datapi.jup.ag/v1/assets/search";
 const METEORA_PNL = "https://dlmm.datapi.meteora.ag/positions";
 
@@ -85,21 +86,54 @@ export async function fetchDlmmPnlForPool(poolAddress, walletAddress) {
   }
 }
 
-// ─── Jupiter prices (never cached) ──────────────────────────────
-async function getJupiterPrices(mints) {
+// ─── Jupiter prices (multi-ID Price V3 with per-mint search fallback) ────────
+export async function getJupiterPrices(mints) {
   const list = unique(mints.map((m) => String(m).trim()));
   if (!list.length) return {};
-  try {
-    const res = await fetch(`${JUP_SEARCH}?query=${list.join(",")}`, { headers: { accept: "application/json" } });
-    if (!res.ok) throw new Error(`Jupiter ${res.status}`);
-    const assets = await res.json();
-    const out = {};
-    for (const a of assets) out[a.id] = maybeNum(a.usdPrice);
-    return out;
-  } catch (e) {
-    log("pnl_price", `Jupiter price fetch failed: ${e.message}`);
-    return {};
+  const out = {};
+  const headers = {
+    accept: "application/json",
+    ...(config.jupiter?.apiKey ? { "x-api-key": config.jupiter.apiKey } : {}),
+  };
+
+  for (let i = 0; i < list.length; i += 50) {
+    const chunk = list.slice(i, i + 50);
+    try {
+      const res = await fetch(`${JUP_PRICE_V3}?ids=${chunk.join(",")}`, { headers });
+      if (!res.ok) throw new Error(`Jupiter Price V3 ${res.status}`);
+      const data = await res.json();
+      const map = data?.data && typeof data.data === "object" ? data.data : data;
+      for (const mint of chunk) {
+        const p = maybeNum(map?.[mint]?.usdPrice ?? map?.[mint]?.price);
+        if (p != null && p > 0) out[mint] = p;
+      }
+    } catch (e) {
+      log("pnl_price", `Jupiter Price V3 fetch failed: ${e.message}`);
+    }
   }
+
+  const missing = list.filter((m) => !(out[m] > 0));
+  if (missing.length > 0) {
+    await Promise.all(
+      missing.map(async (mint) => {
+        try {
+          const res = await fetch(`${JUP_SEARCH}?query=${encodeURIComponent(mint)}`, {
+            headers: { accept: "application/json" },
+          });
+          if (!res.ok) throw new Error(`Jupiter search ${res.status}`);
+          const assets = await res.json();
+          const listAssets = Array.isArray(assets) ? assets : [];
+          const match = listAssets.find((a) => a?.id === mint) ?? listAssets[0];
+          const p = maybeNum(match?.usdPrice);
+          if (p != null && p > 0) out[mint] = p;
+        } catch (e) {
+          log("pnl_price", `Jupiter search fallback failed for ${mint.slice(0, 8)}: ${e.message}`);
+        }
+      }),
+    );
+  }
+
+  return out;
 }
 
 // ─── Deposit-history cache (sig-invalidated + TTL) ──────────────
