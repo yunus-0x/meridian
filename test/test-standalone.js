@@ -16,6 +16,7 @@ import { withWalletLock } from "../standalone/transactions.js";
 import { getDeterministicCloseRule, computeBinsBelow } from "../exit-rules.js";
 import { localQuantizedForecast, buildTacticalSignals } from "../standalone/chronos.js";
 import { envryptEncrypt, envryptDecrypt } from "../envcrypt.js";
+import { _test as adminTest } from "../standalone/telegram-admin.js";
 
 const options = {
   walletThreshold: 2,
@@ -314,6 +315,61 @@ console.log("\n[8] deterministic rules");
   const secretVal = "sec_key_12345_!@#_\u00e9";
   check("Bug #10 envcrypt roundtrips high-byte XOR cleanly", envryptDecrypt(envryptEncrypt(secretVal, highByteKey), highByteKey) === secretVal);
   check("Bug #9 real -92% crash triggers stop loss (not masked by >0.01 value)", getDeterministicCloseRule(pos({ pnl_pct: -92, total_value_usd: 0.02 }), mgmt)?.rule === 1);
+  check("minAgeBeforeYieldCheck respected in getDeterministicCloseRule",
+    getDeterministicCloseRule(pos({ fee_per_tvl_24h: 1, age_minutes: 75 }), { ...mgmt, minAgeBeforeYieldCheck: 90, minFeePerTvl24h: 5 }) === null &&
+    getDeterministicCloseRule(pos({ fee_per_tvl_24h: 1, age_minutes: 95 }), { ...mgmt, minAgeBeforeYieldCheck: 90, minFeePerTvl24h: 5 })?.rule === 5
+  );
+  check("admin rootText renders status/error note", adminTest.rootText("Cancelled.").includes("Cancelled."));
+
+  // Full-Power Chronos Phase 2: Dynamic Strategy, Bin-Step Scaling, Knife-Rescue & Dead-Capital Velocity tests
+  const curveSignals = buildTacticalSignals({
+    p10Pct: -5.0, p50Pct: 0.4, p90Pct: 6.5,
+    rsi14: 51, bbPctB: 0.48,
+    priceVsPocPct: 3.2, binStep: 100, modelAgreement: 0.85,
+  });
+  check("Chronos selects 'curve' on tight POC consolidation", curveSignals.recommended_strategy === "curve");
+  const step200Signals = buildTacticalSignals({
+    p10Pct: -10.8, p50Pct: -0.9, p90Pct: 11.3,
+    rsi14: 52, bbPctB: 0.38, microP50Pct: -1.2,
+    priceVsPocPct: 39.5, binStep: 200, modelAgreement: 0.22,
+  });
+  check("Chronos selects 'curve' on bin_step=200 moderate spread to avoid bid_ask starvation", step200Signals.recommended_strategy === "curve");
+  const mtfBullSignals = buildTacticalSignals({
+    p10Pct: -4.0, p50Pct: 3.5, p90Pct: 16.0,
+    rsi14: 58, bbPctB: 0.62,
+    microP50Pct: 1.4, macro15mP50Pct: 2.8, priceVsPocPct: 4.5,
+    binStep: 100, modelAgreement: 0.88,
+  });
+  check("Chronos 1m+5m+15m+POC alignment boosts conviction_mult to 1.25x & enables micro_breakout_hold",
+    mtfBullSignals.conviction_mult === 1.25 && mtfBullSignals.micro_breakout_hold === true && mtfBullSignals.recommended_strategy === "bid_ask"
+  );
+  const knifeSignals = buildTacticalSignals({
+    p10Pct: -22.0, p50Pct: -6.5, p90Pct: -1.0,
+    rsi14: 34, bbPctB: 0.12,
+    macro15mP50Pct: -8.2, chronos2P50Pct: -5.8,
+    modelAgreement: 0.80,
+  });
+  check("Chronos knife_rescue_trigger & volume_decay_warning fire on confirmed breakdown",
+    knifeSignals.knife_rescue_trigger === true && knifeSignals.volume_decay_warning === true && knifeSignals.claim_threshold_mult === 0.4
+  );
+  check("Knife rescue pre-stop-loss cuts at -16% before -35% hard stop",
+    getDeterministicCloseRule(pos({ pnl_pct: -16 }), { ...mgmt, stopLossPct: -35, knifeRescueStopLossPct: -15 }, knifeSignals)?.rule === 1
+  );
+  check("Realized fee velocity closes unproductive NIO-SOL zombie position (0.19%/hr < 0.45%/hr at 77m) even when 24h pool fee/TVL is 4.56%",
+    getDeterministicCloseRule(
+      pos({
+        pnl_pct: 0.33,
+        age_minutes: 77,
+        fee_per_tvl_24h: 4.56,
+        total_value_true_usd: 18.03,
+        collected_fees_true_usd: 0,
+        unclaimed_fees_true_usd: 0.0442,
+      }),
+      { ...mgmt, minFeePerTvl24h: 3, minPositionFeeVelocityPctPerHr: 0.45, minAgeBeforeYieldCheck: 60 },
+    )?.rule === 5
+  );
+  const cf200 = localQuantizedForecast(synthCandles, { poolAddress: POOL_A, binStep: 200 });
+  check("bin_step=200 scales bins_below down (~22-36 bins instead of 55)", cf200 && cf200.recommended_bins.bins_below >= 22 && cf200.recommended_bins.bins_below <= 36);
 }
 
 console.log(failed === 0 ? "\nALL TESTS PASSED" : `\n${failed} TEST(S) FAILED`);

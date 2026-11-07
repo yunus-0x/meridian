@@ -62,7 +62,23 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
+  if (detail.is_blacklisted !== false) {
+    return {
+      pass: false,
+      reason: "Pool blacklist status is unsafe or unknown.",
+    };
+  }
+  const xWarnings = Array.isArray(detail.token_x?.warnings) ? detail.token_x.warnings : [];
+  const yWarnings = Array.isArray(detail.token_y?.warnings) ? detail.token_y.warnings : [];
+  if ([...xWarnings, ...yWarnings].some(w => ["critical", "danger", "warning"].includes(w?.severity))) {
+    return {
+      pass: false,
+      reason: "Pool has critical/danger/warning token flags.",
+    };
+  }
+
   const tvl = poolDetailTvl(detail);
+  const activeTvl = numberOrNull(detail?.active_tvl);
   const minTvl = numberOrNull(config.screening.minTvl);
   const maxTvl = numberOrNull(config.screening.maxTvl);
   if (tvl == null) {
@@ -77,10 +93,34 @@ async function validateDeployPoolThresholds(args) {
       reason: `Pool TVL $${tvl} is below configured minTvl $${minTvl}.`,
     };
   }
+  if (minTvl != null && minTvl > 0 && activeTvl != null && activeTvl < minTvl) {
+    return {
+      pass: false,
+      reason: `Pool active TVL $${activeTvl} is below configured minTvl $${minTvl}.`,
+    };
+  }
   if (maxTvl != null && maxTvl > 0 && tvl > maxTvl) {
     return {
       pass: false,
       reason: `Pool TVL $${tvl} is above configured maxTvl $${maxTvl}.`,
+    };
+  }
+
+  const volume = numberOrNull(detail?.volume);
+  const minVolume = numberOrNull(config.screening.minVolume);
+  if (minVolume != null && minVolume > 0 && (volume == null || volume < minVolume)) {
+    return {
+      pass: false,
+      reason: `Pool volume $${volume ?? "unknown"} is below configured minVolume $${minVolume}.`,
+    };
+  }
+
+  const quoteOrganic = numberOrNull(detail?.token_y?.organic_score);
+  const minQuoteOrganic = numberOrNull(config.screening.minQuoteOrganic);
+  if (minQuoteOrganic != null && minQuoteOrganic > 0 && quoteOrganic != null && quoteOrganic < minQuoteOrganic) {
+    return {
+      pass: false,
+      reason: `Pool quote organic score ${quoteOrganic} is below configured minQuoteOrganic ${minQuoteOrganic}.`,
     };
   }
 
@@ -140,11 +180,10 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
-  const baseMint = detail?.token_x?.address || detail?.base_token_address || null;
   const entryMarketData = {
     entry_mcap: numberOrNull(detail?.token_x?.market_cap ?? detail?.base_token_market_cap),
     entry_tvl: tvl,
-    entry_volume: numberOrNull(detail?.volume),
+    entry_volume: volume,
     entry_holders: numberOrNull(detail?.base_token_holders ?? detail?.token_x?.holders),
   };
 
@@ -180,17 +219,26 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  */
 async function swapBaseToSolWithRetry(baseMint, label, poolAddress = null) {
   // Touchpoint 4: Smart Post-Claim & Post-Close Micro-Bounce Swap
-  // After close, open positions is 0; after claim, the claimed position itself is open (1).
+  // Scope the open-position check to the target pool/mint so multi-position portfolios
+  // (maxPositions > 1) still benefit from micro-bounce on the closed/claimed pool.
+  const openInSamePool = getTrackedPositions(true).filter(
+    (p) => p.pool === poolAddress || (baseMint && p.signal_snapshot?.base_mint === baseMint),
+  ).length;
   const maxOpenForBounce = label === "after claim" ? 1 : 0;
-  if (poolAddress && process.env.DRY_RUN !== "true" && getTrackedPositions(true).length <= maxOpenForBounce) {
+  if (poolAddress && process.env.DRY_RUN !== "true" && openInSamePool <= maxOpenForBounce) {
     const cachedChronos = getCachedChronosAnalysis(poolAddress);
-    if (cachedChronos?.tactical_signals?.micro_oversold_bounce) {
+    const isBounce = Boolean(cachedChronos?.tactical_signals?.micro_oversold_bounce);
+    const isBreakout = Boolean(!isBounce && cachedChronos?.tactical_signals?.micro_breakout_hold);
+    if (isBounce || isBreakout) {
+      const targetMovePct = isBreakout ? 2.0 : 1.2;
+      const stopMovePct = isBreakout ? -1.2 : -1.5;
+      const modeLabel = isBreakout ? "micro-breakout rider" : "micro-bounce";
       try {
         const initBal = await getWalletBalances({ force: true }).catch(() => null);
         const initTok = initBal?.tokens?.find((t) => t.mint === baseMint);
         const initUsd = Number(initTok?.usd ?? 0);
         if (initTok && initTok.balance > 0 && initUsd >= 0.5) {
-          log("executor", `Chronos micro-bounce active for ${baseMint.slice(0, 8)} (${label}): holding up to 24s for +1.2% bounce...`);
+          log("executor", `Chronos ${modeLabel} active for ${baseMint.slice(0, 8)} (${label}): holding up to 24s for +${targetMovePct}%...`);
           for (let tick = 1; tick <= 3; tick++) {
             await sleep(8_000);
             const curBal = await getWalletBalances({ force: true }).catch(() => null);
@@ -198,18 +246,18 @@ async function swapBaseToSolWithRetry(baseMint, label, poolAddress = null) {
             const curUsd = Number(curTok?.usd ?? 0);
             if (!curTok || curUsd <= 0) break;
             const movePct = ((curUsd - initUsd) / initUsd) * 100;
-            if (movePct >= 1.2) {
-              log("executor", `Chronos micro-bounce captured +${movePct.toFixed(2)}% on ${baseMint.slice(0, 8)} after ${tick * 8}s — swapping now`);
+            if (movePct >= targetMovePct) {
+              log("executor", `Chronos ${modeLabel} captured +${movePct.toFixed(2)}% on ${baseMint.slice(0, 8)} after ${tick * 8}s — swapping now`);
               break;
             }
-            if (movePct <= -1.5) {
-              log("executor_warn", `Chronos micro-bounce stop hit (${movePct.toFixed(2)}%) on ${baseMint.slice(0, 8)} — swapping immediately`);
+            if (movePct <= stopMovePct) {
+              log("executor_warn", `Chronos ${modeLabel} stop hit (${movePct.toFixed(2)}%) on ${baseMint.slice(0, 8)} — swapping immediately`);
               break;
             }
           }
         }
       } catch {
-        // Proceed immediately to swap if bounce polling fails
+        // Proceed immediately to swap if bounce/breakout polling fails
       }
     }
   }
@@ -358,7 +406,7 @@ async function runSafetyChecks(name, args) {
           pass: false,
           reason: `bin_step ${args.bin_step} is outside the allowed range of [${minStep}-${maxStep}].`,
         };
-      }
+      };
 
       const deployAmountY = Number(args.amount_y ?? args.amount_sol ?? 0);
       const deployAmountX = Number(args.amount_x ?? 0);

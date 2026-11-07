@@ -9,11 +9,12 @@
 // so no single node's 8-hour limit ever interrupts real Chronos inference.
 
 import { execFile } from "node:child_process";
-import { config, MIN_SAFE_BINS_BELOW } from "../config.js";
+import { config, MIN_SAFE_BINS_BELOW, scaleBinsForBinStep } from "../config.js";
 import { log } from "../logger.js";
 
 const localCache = new Map();
 const LOCAL_CACHE_TTL_MS = 40_000;
+const inflightRefreshByPool = new Map();
 const wakeAttemptByMachine = new Map();
 let activeNodeIndex = 0;
 let activeNodeStartedAt = Date.now();
@@ -109,6 +110,11 @@ export function buildTacticalSignals({
   microRsi14 = rsi14,
   microBbPctB = bbPctB,
   microP50Pct = p50Pct,
+  macro15mP50Pct = p50Pct,
+  macro15mP90Pct = p90Pct,
+  chronos2P50Pct = p50Pct,
+  priceVsPocPct = 0,
+  binStep = 100,
   modelAgreement = 0.7,
 }) {
   const xRatioMult = p50Pct <= -4.0
@@ -123,20 +129,79 @@ export function buildTacticalSignals({
   );
   const letWinnersRun = Boolean(p50Pct >= 2.5 && p90Pct >= 12.0 && !sniperLock);
   const microOversoldBounce = Boolean(microBbPctB < 0.08 && microRsi14 < 32.0 && microP50Pct > 1.0);
+  const microBreakoutHold = Boolean(
+    !sniperLock && p50Pct >= 2.5 && p90Pct >= 10.0 && microP50Pct >= 0.8 && microRsi14 < 78.0,
+  );
   const spreadPct = Math.round((p90Pct - p10Pct) * 1000) / 1000;
+  const stepNum = Number(binStep) || 100;
 
-  const convictionMult = (p50Pct >= 1.5 && modelAgreement >= 0.65 && p10Pct > -20.0)
-    ? 1.15
-    : (p10Pct <= -30.0 && modelAgreement < 0.35)
-      ? 0.80
+  // Upgrade #3: Dynamic Strategy Shape (curve vs spot vs bid_ask)
+  // - curve: tight spread near POC (mean-reverting consolidation) OR high bin_step (>=150) where
+  //   bid_ask would starve the active bin.
+  // - bid_ask: compact bin_step (<=125) with wide volatility spread, deep wick-hunt (p10<=-9%),
+  //   or explosive upside breakout (p90>=14%, p50>=2.5%).
+  // - spot: moderate trend or divergent model agreement (<0.45).
+  let recommendedStrategy = "spot";
+  if (
+    !sniperLock &&
+    ((spreadPct < 18.0 && modelAgreement >= 0.65 && Math.abs(priceVsPocPct) <= 12.0 && Math.abs(p50Pct) <= 2.5) ||
+      (stepNum >= 150 && spreadPct <= 24.0 && Math.abs(microP50Pct) <= 2.0))
+  ) {
+    recommendedStrategy = "curve";
+  } else if (
+    stepNum <= 125 &&
+    modelAgreement >= 0.45 &&
+    (spreadPct >= 22.0 ||
+      (p10Pct <= -9.0 && p50Pct >= -0.5) ||
+      (!sniperLock && p90Pct >= 14.0 && p50Pct >= 2.5))
+  ) {
+    recommendedStrategy = "bid_ask";
+  }
+
+  // Upgrade #4: Multi-Timeframe (1m + 5m + 15m + POC) Calibrated Conviction Multiplier
+  const fullMtfBull = Boolean(
+    microP50Pct > 0.5 &&
+    p50Pct >= 2.5 &&
+    macro15mP50Pct > 0.5 &&
+    modelAgreement >= 0.75 &&
+    priceVsPocPct > 0.5 &&
+    priceVsPocPct <= 20.0,
+  );
+  const convictionMult = fullMtfBull
+    ? 1.25
+    : (p50Pct >= 1.5 && macro15mP50Pct >= -2.0 && modelAgreement >= 0.65 && p10Pct > -20.0)
+      ? 1.15
+      : (p10Pct <= -30.0 && modelAgreement < 0.35)
+        ? 0.80
+        : (p50Pct <= -1.8 || macro15mP50Pct <= -3.5 || (modelAgreement < 0.35 && chronos2P50Pct <= -2.0))
+          ? 0.75
+          : 1.00;
+
+  const volumeDecayWarning = Boolean(
+    chronos2P50Pct <= -2.0 && (p50Pct < 0 || modelAgreement < 0.35),
+  );
+  const knifeRescueTrigger = Boolean(
+    p50Pct <= -5.0 && macro15mP50Pct <= -6.0 && modelAgreement >= 0.70,
+  );
+  const claimThresholdMult = (sniperLock || p50Pct <= -2.0 || chronos2P50Pct <= -2.5)
+    ? 0.40
+    : letWinnersRun
+      ? 1.25
       : 1.00;
+  const takeProfitMult = (letWinnersRun || macro15mP90Pct >= 16.0) ? 1.35 : 1.00;
 
   return {
+    recommended_strategy: recommendedStrategy,
     x_ratio_mult: xRatioMult,
     conviction_mult: convictionMult,
     sniper_lock: sniperLock,
     let_winners_run: letWinnersRun,
     micro_oversold_bounce: microOversoldBounce,
+    micro_breakout_hold: microBreakoutHold,
+    volume_decay_warning: volumeDecayWarning,
+    knife_rescue_trigger: knifeRescueTrigger,
+    claim_threshold_mult: claimThresholdMult,
+    take_profit_mult: takeProfitMult,
     spread_pct: spreadPct,
   };
 }
@@ -151,6 +216,7 @@ export function localQuantizedForecast(candles, {
   defaultBinsBelow = config.strategy?.defaultBinsBelow ?? 55,
   minBinsBelow = MIN_SAFE_BINS_BELOW,
   horizon = 12,
+  candles1m = null,
 } = {}) {
   const valid = (Array.isArray(candles) ? candles : []).filter(c => Array.isArray(c) && Number(c[4]) > 0);
   if (valid.length < 16) {
@@ -161,6 +227,11 @@ export function localQuantizedForecast(candles, {
   const rsi14 = computeRsi14(closes);
   const bbPctB = computeBbPctB(closes, 20, 2);
   const vp = computeVolumeProfilePoc(valid);
+
+  const valid1m = (Array.isArray(candles1m) ? candles1m : []).filter(c => Array.isArray(c) && Number(c[4]) > 0);
+  const closes1m = valid1m.length >= 20 ? valid1m.map(c => Number(c[4])) : null;
+  const microRsi14 = closes1m ? computeRsi14(closes1m) : rsi14;
+  const microBbPctB = closes1m ? computeBbPctB(closes1m, 20, 2) : bbPctB;
 
   const returns = [];
   for (let i = 1; i < closes.length; i++) {
@@ -217,20 +288,34 @@ export function localQuantizedForecast(candles, {
   } else if (p50Pct <= -6.0 && p90Pct <= 0.5) {
     gateAction = "DEFER";
     gateReason = `freefall knife detected (P50=${p50Pct}%, P90=${p90Pct}%)`;
+  } else if (vp.price_vs_poc_pct > 28.0 && rsi14 >= 68.0 && p50Pct < 0.5) {
+    gateAction = "DEFER";
+    gateReason = `overextended above POC (+${vp.price_vs_poc_pct}% vs POC, RSI=${rsi14}, P50=${p50Pct}%)`;
   }
 
-  const rawBinsAbove = pctToBins(Math.max(1.5, p90Pct * 0.75), binStep);
+  const stepNum = Number(binStep) || 100;
+  const scaledMinBelow = scaleBinsForBinStep(minBinsBelow, stepNum, 22);
+  const scaledDefaultBelow = scaleBinsForBinStep(defaultBinsBelow, stepNum, 26);
+  const skewRatio = Math.abs(p90Pct) / Math.max(1.0, Math.abs(p10Pct));
+  const rawBinsAbove = pctToBins(Math.max(1.5, p90Pct * 0.75), stepNum);
+  const maxBinsAbove = (p50Pct >= 2.5 && p90Pct >= 12.0 && skewRatio >= 1.3) ? 15 : 11;
   const recommendedBinsAbove = p50Pct > 1.5
-    ? Math.max(6, Math.min(11, rawBinsAbove))
+    ? Math.max(5, Math.min(maxBinsAbove, rawBinsAbove))
     : p50Pct < -1.5
-      ? Math.max(5, Math.min(7, defaultBinsAbove))
+      ? Math.max(4, Math.min(7, defaultBinsAbove))
       : Math.max(5, Math.min(9, defaultBinsAbove));
 
-  const p10BinsNeeded = pctToBins(Math.abs(p10Pct) * 1.15, binStep);
-  const maxAllowedBelow = 69 - recommendedBinsAbove;
+  const p10BinsNeeded = pctToBins(Math.abs(p10Pct) * 1.15, stepNum);
+  const pocBinsNeeded = (vp.price_vs_poc_pct > 0 && vp.price_vs_poc_pct <= 35.0)
+    ? pctToBins(vp.price_vs_poc_pct * 1.08, stepNum)
+    : 0;
+  const maxAllowedBelow = Math.min(
+    scaleBinsForBinStep(69, stepNum, 36),
+    69 - recommendedBinsAbove,
+  );
   const recommendedBinsBelow = Math.max(
-    minBinsBelow,
-    Math.min(maxAllowedBelow, Math.max(defaultBinsBelow, p10BinsNeeded)),
+    scaledMinBelow,
+    Math.min(maxAllowedBelow, Math.max(scaledDefaultBelow, p10BinsNeeded, pocBinsNeeded)),
   );
 
   const oorBelowOutlook = (p50Pct < -4.0 && p90Pct < 1.0)
@@ -245,6 +330,14 @@ export function localQuantizedForecast(candles, {
     p90Pct,
     rsi14,
     bbPctB,
+    microRsi14,
+    microBbPctB,
+    microP50Pct: p50Pct,
+    macro15mP50Pct: p50Pct,
+    macro15mP90Pct: p90Pct,
+    chronos2P50Pct: p50Pct,
+    priceVsPocPct: vp.price_vs_poc_pct,
+    binStep: stepNum,
     modelAgreement: 0.7,
   });
 
@@ -269,6 +362,8 @@ export function localQuantizedForecast(candles, {
       macro_15m_p50_pct: p50Pct,
       macro_15m_p90_pct: p90Pct,
       micro_1m_p50_pct: p50Pct,
+      micro_1m_rsi_14: microRsi14,
+      micro_1m_bb_pct_b: microBbPctB,
       rsi_14: rsi14,
       bb_pct_b: bbPctB,
       poc_price: vp.poc_price,
@@ -443,10 +538,128 @@ async function fetchGeckoCandles(poolAddress, aggregate, limit = 1000) {
 
 export function getCachedChronosAnalysis(poolAddress) {
   const cached = localCache.get(poolAddress);
-  if (cached && Date.now() - cached.at < LOCAL_CACHE_TTL_MS * 3) {
+  if (cached && Date.now() - cached.at < LOCAL_CACHE_TTL_MS * 6) {
     return cached.data;
   }
   return null;
+}
+
+export function getChronosCacheAgeMs(poolAddress) {
+  const cached = localCache.get(poolAddress);
+  return cached ? Math.max(0, Date.now() - cached.at) : Infinity;
+}
+
+export function refreshChronosInBackground(poolAddress, opts = {}) {
+  if (!poolAddress || !config.chronos?.enabled) return false;
+  if (inflightRefreshByPool.has(poolAddress)) return false;
+  const p = analyzePoolWithChronos(poolAddress, { ...opts, maxCacheAgeMs: 0 })
+    .catch(() => null)
+    .finally(() => {
+      inflightRefreshByPool.delete(poolAddress);
+    });
+  inflightRefreshByPool.set(poolAddress, p);
+  return true;
+}
+
+function enrichClusterResponse(data, {
+  binStep = 100,
+  defaultBinsAbove = config.strategy?.defaultBinsAbove ?? 7,
+  defaultBinsBelow = config.strategy?.defaultBinsBelow ?? 55,
+  minBinsBelow = MIN_SAFE_BINS_BELOW,
+  computedMicroRsi14,
+  computedMicroBbPctB,
+} = {}) {
+  if (!data || !data.summary) return data;
+  const s = data.summary;
+  const stepNum = Number(binStep) || Number(data.recommended_bins?.bin_step) || 100;
+  const p10Pct = Number(s.p10_pct ?? 0);
+  const p50Pct = Number(s.p50_pct ?? 0);
+  const p90Pct = Number(s.p90_pct ?? 0);
+  const rsi14 = Number(s.rsi_14 ?? 50);
+  const bbPctB = Number(s.bb_pct_b ?? 0.5);
+  const macro15mP50Pct = Number(s.macro_15m_p50_pct ?? data.timeframes?.["15m"]?.p50_pct ?? p50Pct);
+  const macro15mP90Pct = Number(s.macro_15m_p90_pct ?? data.timeframes?.["15m"]?.p90_pct ?? p90Pct);
+  const microP50Pct = Number(s.micro_1m_p50_pct ?? data.timeframes?.["1m"]?.p50_pct ?? p50Pct);
+  const microRsi14 = Number(s.micro_1m_rsi_14 ?? data.timeframes?.["1m"]?.rsi_14 ?? computedMicroRsi14 ?? rsi14);
+  const microBbPctB = Number(s.micro_1m_bb_pct_b ?? data.timeframes?.["1m"]?.bb_pct_b ?? computedMicroBbPctB ?? bbPctB);
+  const priceVsPocPct = Number(s.price_vs_poc_pct ?? data.timeframes?.["5m"]?.volume_profile?.price_vs_poc_pct ?? 0);
+  const modelAgreement = Number(s.model_agreement ?? 0.7);
+  const chronos2P50Pct = Number(
+    s.chronos2_p50_pct ?? data.timeframes?.["5m"]?.chronos2_p50_pct ?? p50Pct,
+  );
+
+  s.chronos2_p50_pct = chronos2P50Pct;
+  s.macro_15m_p50_pct = macro15mP50Pct;
+  s.macro_15m_p90_pct = macro15mP90Pct;
+  s.price_vs_poc_pct = priceVsPocPct;
+
+  data.tactical_signals = {
+    ...(data.tactical_signals || {}),
+    ...buildTacticalSignals({
+      p10Pct,
+      p50Pct,
+      p90Pct,
+      rsi14,
+      bbPctB,
+      microRsi14,
+      microBbPctB,
+      microP50Pct,
+      macro15mP50Pct,
+      macro15mP90Pct,
+      chronos2P50Pct,
+      priceVsPocPct,
+      binStep: stepNum,
+      modelAgreement,
+    }),
+  };
+
+  // Upgrade #2 & #4: POC Overextended Gate & Macro 15m Structural Downtrend Gate
+  if (!data.gate || data.gate.action === "PASS") {
+    if (priceVsPocPct > 28.0 && rsi14 >= 68.0 && p50Pct < 0.5) {
+      data.gate = {
+        action: "DEFER",
+        reason: `overextended above POC (+${priceVsPocPct.toFixed(1)}% vs POC, RSI=${rsi14}, P50=${p50Pct}%)`,
+      };
+    } else if (macro15mP50Pct <= -7.5 && p50Pct < 1.0) {
+      data.gate = {
+        action: "DEFER",
+        reason: `macro 15m structural downtrend (15m P50=${macro15mP50Pct}%, 5m P50=${p50Pct}%)`,
+      };
+    }
+  }
+
+  // Upgrade #2: POC-Anchored & Bin-Step-Scaled Range
+  const scaledMinBelow = scaleBinsForBinStep(minBinsBelow, stepNum, 22);
+  const scaledDefaultBelow = scaleBinsForBinStep(defaultBinsBelow, stepNum, 26);
+  const skewRatio = Math.abs(p90Pct) / Math.max(1.0, Math.abs(p10Pct));
+  const rawBinsAbove = pctToBins(Math.max(1.5, p90Pct * 0.75), stepNum);
+  const maxBinsAbove = (p50Pct >= 2.5 && p90Pct >= 12.0 && skewRatio >= 1.3) ? 15 : 11;
+  const recommendedBinsAbove = p50Pct > 1.5
+    ? Math.max(5, Math.min(maxBinsAbove, rawBinsAbove))
+    : p50Pct < -1.5
+      ? Math.max(4, Math.min(7, defaultBinsAbove))
+      : Math.max(5, Math.min(9, defaultBinsAbove));
+
+  const p10BinsNeeded = pctToBins(Math.abs(p10Pct) * 1.15, stepNum);
+  const pocBinsNeeded = (priceVsPocPct > 0 && priceVsPocPct <= 35.0)
+    ? pctToBins(priceVsPocPct * 1.08, stepNum)
+    : 0;
+  const maxAllowedBelow = Math.min(
+    scaleBinsForBinStep(69, stepNum, 36),
+    69 - recommendedBinsAbove,
+  );
+  const recommendedBinsBelow = Math.max(
+    scaledMinBelow,
+    Math.min(maxAllowedBelow, Math.max(scaledDefaultBelow, p10BinsNeeded, pocBinsNeeded)),
+  );
+
+  data.recommended_bins = {
+    bins_above: recommendedBinsAbove,
+    bins_below: recommendedBinsBelow,
+    bin_step: stepNum,
+  };
+
+  return data;
 }
 
 /**
@@ -462,11 +675,12 @@ export async function analyzePoolWithChronos(poolAddress, {
   defaultBinsBelow = config.strategy?.defaultBinsBelow ?? 55,
   minBinsBelow = MIN_SAFE_BINS_BELOW,
   candles5m = null,
+  maxCacheAgeMs = LOCAL_CACHE_TTL_MS,
 } = {}) {
   if (!config.chronos?.enabled) return null;
 
   const cached = localCache.get(poolAddress);
-  if (cached && Date.now() - cached.at < LOCAL_CACHE_TTL_MS && !candles5m) {
+  if (cached && maxCacheAgeMs > 0 && Date.now() - cached.at < maxCacheAgeMs && !candles5m) {
     return { ...cached.data, cached: true };
   }
 
@@ -481,6 +695,11 @@ export async function analyzePoolWithChronos(poolAddress, {
       fetchGeckoCandles(poolAddress, 15, 350),
     ]);
   }
+
+  const valid1m = (Array.isArray(c1m) ? c1m : []).filter(c => Array.isArray(c) && Number(c[4]) > 0);
+  const closes1m = valid1m.length >= 20 ? valid1m.map(c => Number(c[4])) : null;
+  const computedMicroRsi14 = closes1m ? computeRsi14(closes1m) : undefined;
+  const computedMicroBbPctB = closes1m ? computeBbPctB(closes1m, 20, 2) : undefined;
 
   const nodes = getClusterNodes();
   if (nodes.length > 0 && (c5m || c1m) && !candles5m) {
@@ -508,18 +727,14 @@ export async function analyzePoolWithChronos(poolAddress, {
           signal: AbortSignal.timeout(config.chronos?.timeoutMs ?? 6500),
         });
         if (res.ok) {
-          const data = await res.json();
-          if (!data.tactical_signals && data.summary) {
-            data.tactical_signals = buildTacticalSignals({
-              p10Pct: data.summary.p10_pct,
-              p50Pct: data.summary.p50_pct,
-              p90Pct: data.summary.p90_pct,
-              rsi14: data.summary.rsi_14,
-              bbPctB: data.summary.bb_pct_b,
-              microP50Pct: data.summary.micro_1m_p50_pct ?? data.summary.p50_pct,
-              modelAgreement: data.summary.model_agreement,
-            });
-          }
+          const data = enrichClusterResponse(await res.json(), {
+            binStep,
+            defaultBinsAbove,
+            defaultBinsBelow,
+            minBinsBelow,
+            computedMicroRsi14,
+            computedMicroBbPctB,
+          });
           data.cluster_node = node.name;
           if (idx !== activeNodeIndex) {
             log("chronos", `Cluster failover succeeded: switched active node to ${node.name} (#${idx + 1}/${nodes.length})`);
@@ -551,6 +766,7 @@ export async function analyzePoolWithChronos(poolAddress, {
       defaultBinsAbove,
       defaultBinsBelow,
       minBinsBelow,
+      candles1m: c1m,
     });
     if (fallback) {
       localCache.set(poolAddress, { at: Date.now(), data: fallback });

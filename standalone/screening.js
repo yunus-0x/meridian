@@ -96,16 +96,31 @@ export async function screenMint(mint, { poolAddress = null } = {}) {
   }
   candidates.sort((a, b) => b.fee_active_tvl_ratio - a.fee_active_tvl_ratio || b.active_tvl - a.active_tvl || a.pool_address.localeCompare(b.pool_address));
   if (candidates.length > 1) {
-    const chronos = await analyzePoolWithChronos(candidates[0].pool_address, {
-      binStep: candidates[0].dlmm_params?.bin_step ?? 100,
-      activePrice: candidates[0].pool_price,
-    }).catch(() => null);
-    const spreadPct = Number(chronos?.tactical_signals?.spread_pct ?? 20);
+    const topSlice = candidates.slice(0, 3);
+    const chronosMap = new Map();
+    await Promise.all(topSlice.map(async c => {
+      const ch = await analyzePoolWithChronos(c.pool_address, {
+        binStep: c.dlmm_params?.bin_step ?? 100,
+        activePrice: c.pool_price,
+      }).catch(() => null);
+      if (ch) chronosMap.set(c.pool_address, ch);
+    }));
+    const refChronos = chronosMap.get(candidates[0].pool_address);
+    const defaultSpreadPct = Number(refChronos?.tactical_signals?.spread_pct ?? 20);
     const scoreCandidate = p => {
       const base = Number(p.fee_active_tvl_ratio ?? 0);
       const step = Number(p.dlmm_params?.bin_step ?? 100);
-      const mult = spreadPct > 35 && step >= 100 ? 1.25 : spreadPct < 18 && step <= 80 ? 1.20 : 1.0;
-      return base * mult;
+      const ch = chronosMap.get(p.pool_address);
+      const spreadPct = Number(ch?.tactical_signals?.spread_pct ?? defaultSpreadPct);
+      const gatePenalty = ch?.gate?.action === 'DEFER' ? 0.15 : 1.0;
+      const stepMult = spreadPct > 35 && step >= 100
+        ? 1.25
+        : spreadPct <= 24 && step <= 100
+          ? 1.20
+          : spreadPct <= 24 && step >= 150
+            ? 0.80
+            : 1.0;
+      return base * stepMult * gatePenalty;
     };
     candidates.sort((a, b) => scoreCandidate(b) - scoreCandidate(a) || b.active_tvl - a.active_tvl || a.pool_address.localeCompare(b.pool_address));
   }

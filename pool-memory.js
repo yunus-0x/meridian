@@ -8,6 +8,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { config } from "./config.js";
+import { getCachedChronosAnalysis } from "./standalone/chronos.js";
 
 import { repoPath } from "./repo-root.js";
 
@@ -35,7 +36,9 @@ function load() {
 }
 
 function save(data) {
-  fs.writeFileSync(POOL_MEMORY_FILE, JSON.stringify(data, null, 2));
+  const tmpFile = `${POOL_MEMORY_FILE}.tmp`;
+  fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2));
+  fs.renameSync(tmpFile, POOL_MEMORY_FILE);
 }
 
 function isOorCloseReason(reason) {
@@ -169,8 +172,8 @@ export function recordPoolDeploy(poolAddress, deployData) {
     entry.base_mint = deployData.base_mint;
   }
 
-  // Set cooldown for low yield closes — pool wasn't profitable enough, don't redeploy soon
-  if (deploy.close_reason === "low yield") {
+  // Set cooldown for low yield / dead capital closes — pool wasn't profitable enough, don't redeploy soon
+  if (String(deploy.close_reason || "").trim().toLowerCase().startsWith("low yield")) {
     const cooldownHours = 4;
     const cooldownUntil = setPoolCooldown(entry, cooldownHours, "low yield");
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
@@ -223,22 +226,36 @@ export function recordPoolDeploy(poolAddress, deployData) {
   log("pool-memory", `Recorded deploy for ${entry.name} (${poolAddress.slice(0, 8)}): PnL ${deploy.pnl_pct}%`);
 }
 
+function isRepeatWinnerBypassedByChronos(poolAddress, reason) {
+  if (!String(reason || "").startsWith("repeat fee-generating deploys")) return false;
+  const ch = poolAddress ? getCachedChronosAnalysis(poolAddress) : null;
+  return Boolean(
+    ch &&
+    ch.gate?.action === "PASS" &&
+    ch.tactical_signals?.let_winners_run === true &&
+    Number(ch.summary?.model_agreement ?? 0) >= 0.75,
+  );
+}
+
 export function isPoolOnCooldown(poolAddress) {
   if (!poolAddress) return false;
   const db = load();
   const entry = db[poolAddress];
   if (!entry?.cooldown_until) return false;
-  return new Date(entry.cooldown_until) > new Date();
+  if (new Date(entry.cooldown_until) <= new Date()) return false;
+  if (isRepeatWinnerBypassedByChronos(poolAddress, entry.cooldown_reason)) return false;
+  return true;
 }
 
 export function isBaseMintOnCooldown(baseMint) {
   if (!baseMint) return false;
   const db = load();
   const now = new Date();
-  return Object.values(db).some((entry) =>
+  return Object.entries(db).some(([poolAddr, entry]) =>
     entry?.base_mint === baseMint &&
     entry?.base_mint_cooldown_until &&
-    new Date(entry.base_mint_cooldown_until) > now
+    new Date(entry.base_mint_cooldown_until) > now &&
+    !isRepeatWinnerBypassedByChronos(poolAddr, entry.base_mint_cooldown_reason)
   );
 }
 

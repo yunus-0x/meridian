@@ -10,6 +10,13 @@ const u = fs.existsSync(USER_CONFIG_PATH)
   : {};
 export const MIN_SAFE_BINS_BELOW = 35;
 
+export function scaleBinsForBinStep(bins, binStep = 100, minFloor = 22) {
+  const rawBins = Math.max(0, Math.round(Number(bins) || 0));
+  const step = Number(binStep) || 100;
+  if (step <= 100) return rawBins;
+  return Math.max(minFloor, Math.round(rawBins * (100 / step)));
+}
+
 function numericConfig(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -112,8 +119,10 @@ export const config = {
     repeatDeployCooldownScope: u.repeatDeployCooldownScope ?? "token", // pool | token | both
     repeatDeployCooldownMinFeeEarnedPct: u.repeatDeployCooldownMinFeeEarnedPct ?? u.repeatDeployCooldownMinFeeYieldPct ?? 0,
     stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
+    knifeRescueStopLossPct: u.knifeRescueStopLossPct ?? -15,
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
+    minPositionFeeVelocityPctPerHr: u.minPositionFeeVelocityPctPerHr ?? 0.45,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
     minSolToOpen:          u.minSolToOpen          ?? 0.55,
     deployAmountSol:       u.deployAmountSol       ?? 0.5,

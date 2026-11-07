@@ -6,7 +6,7 @@ import {
 } from "@solana/web3.js";
 import BN from "bn.js";
 import bs58 from "bs58";
-import { config, computeDeployAmount, MIN_SAFE_BINS_BELOW } from "../config.js";
+import { config, computeDeployAmount, MIN_SAFE_BINS_BELOW, scaleBinsForBinStep } from "../config.js";
 import { log } from "../logger.js";
 import {
   trackPosition,
@@ -72,21 +72,37 @@ async function getDLMM() {
 // Avoids crashing on import when WALLET_PRIVATE_KEY is not yet set
 // (e.g. during screening-only tests).
 let _connection = null;
+let _connectionUrl = null;
 let _wallet = null;
+let _walletSecret = null;
+
+export function resetDlmmWalletCache() {
+  _wallet = null;
+  _walletSecret = null;
+  _connection = null;
+  _connectionUrl = null;
+  _positionsCacheAt = 0;
+}
 
 function getConnection() {
-  if (!_connection) {
-    _connection = new Connection(process.env.RPC_URL, "confirmed");
+  const url = process.env.RPC_URL;
+  if (!_connection || _connectionUrl !== url) {
+    _connection = new Connection(url, "confirmed");
+    _connectionUrl = url;
   }
   return _connection;
 }
 
 function getWallet() {
-  if (!_wallet) {
-    if (!process.env.WALLET_PRIVATE_KEY) {
-      throw new Error("WALLET_PRIVATE_KEY not set");
-    }
-    _wallet = Keypair.fromSecretKey(bs58.decode(process.env.WALLET_PRIVATE_KEY));
+  const raw = process.env.WALLET_PRIVATE_KEY;
+  if (!raw) {
+    throw new Error("WALLET_PRIVATE_KEY not set");
+  }
+  if (!_wallet || _walletSecret !== raw) {
+    const text = String(raw).trim();
+    const bytes = text.startsWith("[") ? Uint8Array.from(JSON.parse(text)) : bs58.decode(text);
+    _wallet = Keypair.fromSecretKey(bytes);
+    _walletSecret = raw;
     log("init", `Wallet: ${_wallet.publicKey.toString()}`);
   }
   return _wallet;
@@ -331,7 +347,8 @@ export async function deployPosition({
   if (!Number.isInteger(activeBinsBelow) || !Number.isInteger(activeBinsAbove)) {
     throw new Error("Invalid bin range: bins_below and bins_above must be whole-bin integers.");
   }
-  const minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW));
+  const rawMinBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW));
+  const minBinsBelow = scaleBinsForBinStep(rawMinBinsBelow, actualBinStep, 22);
   const totalBins = activeBinsBelow + activeBinsAbove;
   if (totalBins < minBinsBelow) {
     throw new Error(
@@ -544,7 +561,7 @@ export async function deployPosition({
     const allDeployTxs = preSwapTxHash ? [preSwapTxHash, ...txHashes] : txHashes;
 
     _positionsCacheAt = 0;
-    const signalSnapshot = null;
+    const signalSnapshot = baseMint ? { base_mint: baseMint } : null;
     let resolvedInitialValueUsd = initial_value_usd;
     if (resolvedInitialValueUsd == null) {
       const balForPrice = await getWalletBalances().catch(() => null);
@@ -1003,7 +1020,6 @@ export async function claimFees({ position_address }) {
   }
 
   const tracked = getTrackedPosition(position_address);
-  const preCloseCachedPos = _positionsCache?.positions?.find(p => p.position === position_address) ?? null;
   if (tracked?.closed) {
     return { success: false, error: "Position already closed — fees were claimed during close" };
   }
@@ -1033,7 +1049,11 @@ export async function claimFees({ position_address }) {
     }
     log("claim", `SUCCESS txs: ${txHashes.join(", ")}`);
     const cachedPos = _positionsCache?.positions?.find(p => p.position === position_address);
-    const claimedUsd = cachedPos?.unclaimed_fees_true_usd ?? cachedPos?.unclaimed_fees_usd ?? 0;
+    const claimedUsd = cachedPos?.unclaimed_fees_true_usd != null && cachedPos.unclaimed_fees_true_usd > 0
+      ? cachedPos.unclaimed_fees_true_usd
+      : !config.management.solMode
+        ? (cachedPos?.unclaimed_fees_usd ?? 0)
+        : 0;
     _positionsCacheAt = 0; // invalidate cache after claim
     recordClaim(position_address, claimedUsd);
 
@@ -1087,7 +1107,11 @@ export async function closePosition({ position_address, reason }) {
             claimTxHashes.push(claimHash);
           }
           log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
-          const step1ClaimedUsd = preCloseCachedPos?.unclaimed_fees_true_usd ?? preCloseCachedPos?.unclaimed_fees_usd ?? 0;
+          const step1ClaimedUsd = preCloseCachedPos?.unclaimed_fees_true_usd != null && preCloseCachedPos.unclaimed_fees_true_usd > 0
+            ? preCloseCachedPos.unclaimed_fees_true_usd
+            : !config.management.solMode
+              ? (preCloseCachedPos?.unclaimed_fees_usd ?? 0)
+              : 0;
           recordClaim(position_address, step1ClaimedUsd);
           if (tracked && step1ClaimedUsd > 0) {
             tracked.total_fees_claimed_usd = (tracked.total_fees_claimed_usd || 0) + step1ClaimedUsd;
@@ -1203,6 +1227,7 @@ export async function closePosition({ position_address, reason }) {
       let finalValueUsd = 0;
       let initialUsd = 0;
       let feesUsd = tracked.total_fees_claimed_usd || 0;
+      let feesSol = null;
       try {
         const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
         for (let attempt = 0; attempt < 6; attempt++) {
@@ -1217,6 +1242,7 @@ export async function closePosition({ position_address, reason }) {
               const nextFinalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
               const nextInitialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
               const nextFeesUsd = parseFloat(posEntry.allTimeFees?.total?.usd || 0) || feesUsd;
+              const nextFeesSol = maybeNum(posEntry.allTimeFees?.total?.sol);
 
               if (shouldRejectClosedPnl(nextPnlPct, reason || tracked?.close_reason)) {
                 log("close_warn", `Rejected unsettled closed PnL for ${position_address.slice(0, 8)} on attempt ${attempt + 1}/6: ${nextPnlPct.toFixed(2)}%`);
@@ -1227,6 +1253,7 @@ export async function closePosition({ position_address, reason }) {
                 finalValueUsd = nextFinalValueUsd;
                 initialUsd    = nextInitialUsd;
                 feesUsd       = nextFeesUsd;
+                if (nextFeesSol != null) feesSol = nextFeesSol;
                 log("close", `Closed PnL from API: pnl=${pnlUsd.toFixed(2)} ${config.management.solMode ? "SOL" : "USD"} (${pnlPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(2)} USD, deposited=${initialUsd.toFixed(2)} USD`);
                 break;
               }
@@ -1247,12 +1274,19 @@ export async function closePosition({ position_address, reason }) {
           pnlUsd        = config.management.solMode ? (cachedPos.pnl_usd ?? 0) : pnlTrueUsd;
           pnlPct        = cachedPos.pnl_pct   ?? 0;
           feesUsd       = Math.max(feesUsd, (cachedPos.collected_fees_true_usd || 0) + (cachedPos.unclaimed_fees_true_usd || 0));
+          if (config.management.solMode && feesSol == null) {
+            feesSol = (cachedPos.collected_fees_usd || 0) + (cachedPos.unclaimed_fees_usd || 0);
+          }
           initialUsd    = tracked.initial_value_usd || 0;
-          finalValueUsd = cachedPos.total_value_true_usd ?? cachedPos.total_value_usd ?? Math.max(0, initialUsd + pnlTrueUsd - feesUsd);
+          // Strictly use USD values for finalValueUsd so SOL-mode amounts never leak into USD fields
+          finalValueUsd = cachedPos.total_value_true_usd ?? (!config.management.solMode ? cachedPos.total_value_usd : null) ?? Math.max(0, initialUsd + pnlTrueUsd - feesUsd);
           if (initialUsd > 0) {
             if (!config.management.solMode && cachedPos.pnl_pct == null) pnlPct = (pnlTrueUsd / initialUsd) * 100;
           } else {
             initialUsd = Math.max(0, finalValueUsd + feesUsd - pnlTrueUsd);
+          }
+          if (config.management.solMode && cachedPos.pnl_pct == null && tracked.amount_sol > 0) {
+            pnlPct = (pnlUsd / tracked.amount_sol) * 100;
           }
           log("close_warn", `Using cached pnl fallback because closed API has not settled yet`);
         }
@@ -1291,8 +1325,10 @@ export async function closePosition({ position_address, reason }) {
         organic_score: tracked.organic_score || null,
         amount_sol: tracked.amount_sol,
         fees_earned_usd: feesUsd,
+        fees_earned_sol: feesSol,
         final_value_usd: finalValueUsd,
         initial_value_usd: initialUsd,
+        reported_pnl_pct: pnlPct,
         minutes_in_range: minutesHeld - minutesOOR,
         minutes_held: minutesHeld,
         close_reason: reason || "agent decision",
@@ -1369,7 +1405,6 @@ export async function closePosition({ position_address, reason }) {
 async function lookupPoolForPosition(position_address, walletAddress) {
   // Check state registry first (fast path)
   const tracked = getTrackedPosition(position_address);
-  const preCloseCachedPos = _positionsCache?.positions?.find(p => p.position === position_address) ?? null;
   if (tracked?.pool) return tracked.pool;
 
   // Check in-memory positions cache

@@ -6,7 +6,7 @@
 // (close_position > other writes > deploy_position) in standalone/transactions.js.
 
 import fs from "node:fs";
-import { config, computeDeployAmount, MIN_SAFE_BINS_BELOW } from "../config.js";
+import { config, computeDeployAmount, MIN_SAFE_BINS_BELOW, scaleBinsForBinStep } from "../config.js";
 import { log } from "../logger.js";
 import { repoPath } from "../repo-root.js";
 import { sendMessage as tgSend, isEnabled as tgEnabled } from "../telegram.js";
@@ -21,7 +21,14 @@ import { getTrackedPosition, getTrackedPositions, confirmPeak, updatePnlAndCheck
 import { recordPositionSnapshot } from "../pool-memory.js";
 import { getDeterministicCloseRule, computeBinsBelow } from "../exit-rules.js";
 import { startAdmin } from "./telegram-admin.js";
-import { analyzePoolWithChronos, getCachedChronosAnalysis, startChronosKeepalive, stopChronosKeepalive } from "./chronos.js";
+import {
+  analyzePoolWithChronos,
+  getCachedChronosAnalysis,
+  getChronosCacheAgeMs,
+  refreshChronosInBackground,
+  startChronosKeepalive,
+  stopChronosKeepalive,
+} from "./chronos.js";
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -56,7 +63,7 @@ async function drainSignals() {
       try {
         await pursueSignal(signal);
       } catch (e) {
-        finishSignal(store, signal, `error: ${e.message}`);
+        finishSignal(store, signal, `error: ${e.message}`, config.standalone);
         log("signal_error", `Signal ${signal.mint.slice(0, 8)} aborted: ${e.message}`);
       }
     }
@@ -79,7 +86,7 @@ async function pursueSignal(signal) {
     if (wait > 0) await sleep(wait);
   }
   if (!signal.done) {
-    finishSignal(store, signal, lastReason);
+    finishSignal(store, signal, lastReason, config.standalone);
     log("signal", `Signal ${signal.mint.slice(0, 8)} expired: ${lastReason}`);
   }
 }
@@ -97,11 +104,11 @@ async function attemptEntry(signal) {
     (attempt.status === "submitting" ||
       (["entered", "proposed"].includes(attempt.status) && Date.now() - (attempt.at ?? 0) < attemptCooldownMs))
   ) {
-    finishSignal(store, signal, `mint already attempted (${attempt.status})`);
+    finishSignal(store, signal, `mint already attempted (${attempt.status})`, config.standalone);
     return null;
   }
   if (attempt?.status === "failed" && (attempt.failures ?? 0) >= 2) {
-    finishSignal(store, signal, "deploy failed repeatedly");
+    finishSignal(store, signal, "deploy failed repeatedly", config.standalone);
     return null;
   }
 
@@ -109,7 +116,7 @@ async function attemptEntry(signal) {
   const positions = await getMyPositions({ force: true }).catch(() => null);
   if (!positions || positions.error || !Array.isArray(positions.positions)) return "position read unavailable";
   if (positions.positions.length >= config.risk.maxPositions) {
-    finishSignal(store, signal, "portfolio full");
+    finishSignal(store, signal, "portfolio full", config.standalone);
     return null;
   }
 
@@ -122,7 +129,7 @@ async function attemptEntry(signal) {
   }
   if (!screened.pass) {
     if (screened.terminal) {
-      finishSignal(store, signal, `blocked: ${screened.reason}`);
+      finishSignal(store, signal, `blocked: ${screened.reason}`, config.standalone);
       return null;
     }
     return screened.reason;
@@ -134,22 +141,25 @@ async function attemptEntry(signal) {
   const balances = await getWalletBalances({ force: true, nativeOnly: true });
   if (balances.error || !Number.isFinite(balances.sol)) return "balance read unavailable";
   if (balances.sol < config.management.minSolToOpen + config.management.gasReserve) {
-    finishSignal(store, signal, "insufficient spendable SOL");
+    finishSignal(store, signal, "insufficient spendable SOL", config.standalone);
     return null;
   }
 
   const pool = screened.pool;
+  const poolBinStep = Number(pool.dlmm_params?.bin_step ?? 100);
+  const effectiveMinBinsBelow = scaleBinsForBinStep(MIN_SAFE_BINS_BELOW, poolBinStep, 22);
   const configuredBinsAbove = Number(config.strategy.defaultBinsAbove ?? 0);
   const whaleBinsAbove = Math.max(0, ...signal.events.map(e => Number(e.binsAbove || 0)));
   let binsAbove = configuredBinsAbove > 0
     ? Math.min(configuredBinsAbove, whaleBinsAbove > 0 ? whaleBinsAbove : configuredBinsAbove)
     : 0;
-  const rawBinsBelow = computeBinsBelow(pool.volatility);
-  let binsBelow = Math.max(MIN_SAFE_BINS_BELOW, Math.min(rawBinsBelow, 69 - binsAbove));
+  const rawBinsBelow = computeBinsBelow(pool.volatility, poolBinStep);
+  let binsBelow = Math.max(effectiveMinBinsBelow, Math.min(rawBinsBelow, 69 - binsAbove));
+  let selectedStrategy = config.strategy.strategy;
 
-  // Chronos AI Pre-Deploy Gate & Dynamic Bin Calibration (InstaBox 5-Node Cluster + Fallback)
+  // Chronos AI Pre-Deploy Gate & Dynamic Bin/Strategy Calibration (InstaBox 5-Node Cluster + Fallback)
   const chronos = await analyzePoolWithChronos(pool.pool_address, {
-    binStep: pool.dlmm_params?.bin_step ?? 100,
+    binStep: poolBinStep,
     activePrice: pool.pool_price,
     defaultBinsAbove: binsAbove,
     defaultBinsBelow: binsBelow,
@@ -164,13 +174,16 @@ async function attemptEntry(signal) {
       return `chronos gate: ${chronos.gate.reason}`;
     }
     if (configuredBinsAbove > 0 && chronos.recommended_bins?.bins_above > 0) {
-      binsAbove = chronos.recommended_bins.bins_above;
+      binsAbove = Math.min(15, chronos.recommended_bins.bins_above);
     }
     if (chronos.recommended_bins?.bins_below > 0) {
       binsBelow = Math.max(
-        MIN_SAFE_BINS_BELOW,
-        Math.min(Math.max(binsBelow, chronos.recommended_bins.bins_below), 69 - binsAbove),
+        effectiveMinBinsBelow,
+        Math.min(chronos.recommended_bins.bins_below, 69 - binsAbove),
       );
+    }
+    if (chronos.tactical_signals?.recommended_strategy) {
+      selectedStrategy = chronos.tactical_signals.recommended_strategy;
     }
     if (Number.isFinite(Number(chronos.tactical_signals?.conviction_mult))) {
       convictionMult = Number(chronos.tactical_signals.conviction_mult);
@@ -181,7 +194,7 @@ async function attemptEntry(signal) {
     const s = chronos.summary ?? {};
     log(
       "chronos",
-      `Pool ${pool.pool_address.slice(0, 8)} [${chronos.engine}]: P10=${s.p10_pct}% P50=${s.p50_pct}% P90=${s.p90_pct}% RSI=${s.rsi_14} BB%B=${s.bb_pct_b} → bins=${binsBelow}↓/${binsAbove}↑ xMult=${xRatioMult} convMult=${convictionMult} (${chronos.latency_ms}ms)`,
+      `Pool ${pool.pool_address.slice(0, 8)} [${chronos.engine}]: P10=${s.p10_pct}% P50=${s.p50_pct}% P90=${s.p90_pct}% 15mP50=${s.macro_15m_p50_pct}% POC=${s.price_vs_poc_pct}% → strategy=${selectedStrategy} bins=${binsBelow}↓/${binsAbove}↑ xMult=${xRatioMult} convMult=${convictionMult} (${chronos.latency_ms}ms)`,
     );
   }
   const amountY = computeDeployAmount(balances.sol, convictionMult);
@@ -198,6 +211,7 @@ async function attemptEntry(signal) {
     pool_address: pool.pool_address,
     base_mint: mint,
     pool_name: pool.name,
+    strategy: selectedStrategy,
     bin_step: pool.dlmm_params?.bin_step,
     volatility: pool.volatility,
     fee_tvl_ratio: pool.fee_active_tvl_ratio,
@@ -230,7 +244,7 @@ async function attemptEntry(signal) {
     record.txs = result.txs ?? [];
     record.amountSol = amountY;
     store.save();
-    finishSignal(store, signal, record.status === "proposed" ? "shadow proposal recorded" : "entered");
+    finishSignal(store, signal, record.status === "proposed" ? "shadow proposal recorded" : "entered", config.standalone);
     const label = result.dry_run ? "[SHADOW] Would deploy" : "Deployed";
     log("entry", `${label} ${amountY} SOL → pool ${pool.pool_address.slice(0, 8)} mint ${mint.slice(0, 8)} (${binsBelow} bins below, ${signal.events.length}-wallet convergence)`);
     void notify(`${result.dry_run ? "🕯️ Shadow proposal" : "✅ Entry"}: ${amountY} SOL → ${pool.pool_address.slice(0, 8)} (mint ${mint.slice(0, 8)}, ${signal.events.length} wallets)`);
@@ -281,7 +295,7 @@ async function finalRecheck(signal, screened, spentSol = 0) {
 // One management pass: trailing/rule exits and fee claims. Never triggers
 // screening — an empty portfolio just waits for the next convergence signal.
 export async function manageOnce({ confirmTicksOverride = 1 } = {}) {
-  if (manageBusy || shuttingDown) return null;
+  if (manageBusy || pollBusy || shuttingDown) return null;
   manageBusy = true;
   try {
     const live = await getMyPositions({ force: true }).catch(() => null);
@@ -311,9 +325,16 @@ export async function manageOnce({ confirmTicksOverride = 1 } = {}) {
       const exitSignalName = exit ? (exit.action ?? "EXIT") : closeRule ? `RULE_${closeRule.rule}` : null;
       const { fire: exitConfirmed } = registerExitSignal(p.position, exitSignalName, exitConfirmTicks);
       let action = null;
+      const claimableFeeVal = config.management.solMode
+        ? (p.unclaimed_fees_usd ?? 0)
+        : (p.unclaimed_fees_true_usd ?? p.unclaimed_fees_usd ?? 0);
+      const claimMult = Number.isFinite(Number(chronosCtx?.claim_threshold_mult))
+        ? Number(chronosCtx.claim_threshold_mult)
+        : 1.0;
+      const effectiveMinClaim = (config.management.minClaimAmount ?? 1.0) * claimMult;
       if (closeRule?.action === "CLOSE" && exitConfirmed) {
         action = { tool: "close_position", args: { position_address: p.position, reason: closeRule.reason }, label: `close (${closeRule.reason})` };
-      } else if ((p.unclaimed_fees_true_usd ?? p.unclaimed_fees_usd ?? 0) >= config.management.minClaimAmount) {
+      } else if (claimableFeeVal >= effectiveMinClaim) {
         action = { tool: "claim_fees", args: { position_address: p.position }, label: "claim fees" };
       }
       // LLM-set free-text instructions have no execution path in standalone — hold.
@@ -341,6 +362,23 @@ function startPnlPoller() {
       const live = await getMyPositions({ force: true, silent: true }).catch(() => null);
       if (!live?.positions?.length) return;
       for (const p of live.positions) {
+        const tracked = getTrackedPosition(p.position);
+        const span = (p.upper_bin != null && p.lower_bin != null && p.upper_bin > p.lower_bin)
+          ? (p.upper_bin - p.lower_bin)
+          : 0;
+        const edgeDist = (span > 0 && p.active_bin != null)
+          ? Math.min(Math.abs(p.active_bin - p.lower_bin), Math.abs(p.upper_bin - p.active_bin))
+          : span;
+        const isEdgeOfRange = span > 0 && (edgeDist / span) <= 0.15;
+        const isCriticalZone = Boolean(
+          !p.in_range ||
+          isEdgeOfRange ||
+          (p.pnl_pct != null && (p.pnl_pct >= 1.5 || p.pnl_pct <= -8.0)),
+        );
+        const cacheAgeMs = getChronosCacheAgeMs(p.pool);
+        if (cacheAgeMs > (isCriticalZone ? 40_000 : 90_000)) {
+          refreshChronosInBackground(p.pool, { binStep: tracked?.bin_step ?? 100 });
+        }
         const cachedChronos = getCachedChronosAnalysis(p.pool);
         const chronosCtx = cachedChronos
           ? { ...(cachedChronos.tactical_signals ?? {}), oor_below_outlook: cachedChronos.oor_below_outlook }

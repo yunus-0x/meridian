@@ -51,14 +51,16 @@ function load() {
     return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
   } catch (err) {
     log("state_error", `Failed to read state.json: ${err.message}`);
-    return { positions: {}, lastUpdated: null };
+    return { positions: {}, recentEvents: [], lastUpdated: null };
   }
 }
 
 function save(state) {
   try {
     state.lastUpdated = new Date().toISOString();
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+    const tmpFile = `${STATE_FILE}.tmp`;
+    fs.writeFileSync(tmpFile, JSON.stringify(state, null, 2));
+    fs.renameSync(tmpFile, STATE_FILE);
   } catch (err) {
     log("state_error", `Failed to write state.json: ${err.message}`);
   }
@@ -438,11 +440,23 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   if (changed) save(state);
 
-  // ── Stop loss ──────────────────────────────────────────────────
+  // ── Stop loss & Predictive Knife-Rescue Pre-Stop-Loss ──────────
   if (!effectiveSuspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
     return {
       action: "STOP_LOSS",
       reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%`,
+    };
+  }
+  const knifeRescuePct = mgmtConfig.knifeRescueStopLossPct ?? -15;
+  if (
+    !effectiveSuspicious &&
+    currentPnlPct != null &&
+    currentPnlPct <= knifeRescuePct &&
+    (chronosCtx?.knife_rescue_trigger || chronosCtx?.oor_below_outlook === "WEAK_STRUCTURAL_BREAKDOWN")
+  ) {
+    return {
+      action: "STOP_LOSS",
+      reason: `Knife rescue pre-stop-loss: PnL ${currentPnlPct.toFixed(2)}% <= ${knifeRescuePct}% with Chronos structural breakdown`,
     };
   }
 
@@ -490,23 +504,66 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     }
   }
 
-  // ── Low yield (only after position has had time to accumulate fees, and never cut at a loss) ───
+  // ── Low yield & Realized Fee Velocity (Dead Capital) ───────────
   const { age_minutes } = positionData;
   const minAgeForYieldCheck = mgmtConfig.minAgeBeforeYieldCheck ?? 60;
+  const depositUsd = Number(pos.initial_value_usd || positionData.total_value_true_usd || 0);
+  const totalFeesEarnedUsd = Number(positionData.collected_fees_true_usd ?? 0) + Number(positionData.unclaimed_fees_true_usd ?? 0);
+  const depositSol = Number(pos.amount_sol || positionData.total_value_usd || 0);
+  const totalFeesEarnedSol = Number(positionData.collected_fees_usd ?? 0) + Number(positionData.unclaimed_fees_usd ?? 0);
+  const feeEarnedPct = depositUsd > 0
+    ? (totalFeesEarnedUsd / depositUsd) * 100
+    : (mgmtConfig.solMode && depositSol > 0)
+      ? (totalFeesEarnedSol / depositSol) * 100
+      : null;
+  const ageHours = age_minutes != null && age_minutes > 0 ? Math.max(0.25, age_minutes / 60) : null;
+  const feeVelocityPctPerHr = (feeEarnedPct != null && ageHours != null) ? feeEarnedPct / ageHours : null;
+  const minFeeVelocity = mgmtConfig.minPositionFeeVelocityPctPerHr ?? 0.45;
+
+  // Stage 1: Early Dead-Capital Cut (age >= 40m + Chronos-2 Volume Decay + low fee velocity)
   if (
     !effectiveSuspicious &&
     currentPnlPct != null &&
-    currentPnlPct >= 0 &&
-    fee_per_tvl_24h != null &&
-    mgmtConfig.minFeePerTvl24h != null &&
-    mgmtConfig.minFeePerTvl24h > 0 &&
-    fee_per_tvl_24h < mgmtConfig.minFeePerTvl24h &&
-    (age_minutes == null || age_minutes >= minAgeForYieldCheck)
+    currentPnlPct >= -0.4 &&
+    age_minutes != null &&
+    age_minutes >= Math.min(40, minAgeForYieldCheck) &&
+    feeVelocityPctPerHr != null &&
+    feeVelocityPctPerHr < minFeeVelocity * 0.7 &&
+    chronosCtx?.volume_decay_warning === true
   ) {
     return {
       action: "LOW_YIELD",
-      reason: `Low yield: fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}% (age: ${age_minutes ?? "?"}m, PnL: +${currentPnlPct.toFixed(2)}%)`,
+      reason: `low yield (dead capital + volume decay: ${feeVelocityPctPerHr.toFixed(2)}%/hr < ${(minFeeVelocity * 0.7).toFixed(2)}%/hr, age: ${age_minutes}m, PnL: ${currentPnlPct.toFixed(2)}%)`,
     };
+  }
+
+  // Stage 2: Standard Low Yield (Pool 24h Fee/TVL OR Realized Position Fee Velocity)
+  if (
+    !effectiveSuspicious &&
+    currentPnlPct != null &&
+    currentPnlPct >= -0.25 &&
+    !chronosCtx?.let_winners_run &&
+    (age_minutes == null || age_minutes >= minAgeForYieldCheck)
+  ) {
+    const poolFeeLow =
+      fee_per_tvl_24h != null &&
+      mgmtConfig.minFeePerTvl24h != null &&
+      mgmtConfig.minFeePerTvl24h > 0 &&
+      fee_per_tvl_24h < mgmtConfig.minFeePerTvl24h &&
+      currentPnlPct >= 0;
+    const realizedVelocityLow =
+      age_minutes != null &&
+      feeVelocityPctPerHr != null &&
+      minFeeVelocity > 0 &&
+      feeVelocityPctPerHr < minFeeVelocity;
+    if (poolFeeLow || realizedVelocityLow) {
+      return {
+        action: "LOW_YIELD",
+        reason: realizedVelocityLow && !poolFeeLow
+          ? `low yield (realized fee velocity ${feeVelocityPctPerHr.toFixed(2)}%/hr < min ${minFeeVelocity}%/hr, age: ${age_minutes}m, PnL: ${currentPnlPct.toFixed(2)}%)`
+          : `Low yield: fee/TVL ${(fee_per_tvl_24h ?? 0).toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}% (age: ${age_minutes ?? "?"}m, PnL: +${currentPnlPct.toFixed(2)}%)`,
+      };
+    }
   }
 
   return null;
