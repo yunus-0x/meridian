@@ -356,7 +356,7 @@ export function getStateSummary() {
  * @param {object} mgmtConfig
  * Returns { action, reason } or null if no exit needed.
  */
-export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig) {
+export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig, chronosCtx = null) {
   const { pnl_pct: currentPnlPct, pnl_pct_suspicious, in_range, fee_per_tvl_24h } = positionData;
   const state = load();
   const pos = state.positions[position_address];
@@ -364,11 +364,21 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   let changed = false;
 
+  // Touchpoint 2: Chronos-Adaptive Trailing Take-Profit (Sniper Lock vs Let Winners Run)
+  const effectiveTriggerPct = chronosCtx?.sniper_lock
+    ? Math.min(mgmtConfig.trailingTriggerPct ?? 3.8, 2.2)
+    : (mgmtConfig.trailingTriggerPct ?? 3.8);
+  const effectiveDropPct = chronosCtx?.sniper_lock
+    ? Math.min(mgmtConfig.trailingDropPct ?? 1.2, 0.7)
+    : chronosCtx?.let_winners_run
+      ? Math.max(mgmtConfig.trailingDropPct ?? 1.2, 2.2)
+      : (mgmtConfig.trailingDropPct ?? 1.2);
+
   // Activate trailing TP once trigger threshold is reached
-  if (mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= mgmtConfig.trailingTriggerPct) {
+  if (mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= effectiveTriggerPct) {
     pos.trailing_active = true;
     changed = true;
-    log("state", `Position ${position_address} trailing TP activated (confirmed peak: ${pos.peak_pnl_pct}%)`);
+    log("state", `Position ${position_address} trailing TP activated (confirmed peak: ${pos.peak_pnl_pct}%, trigger: ${effectiveTriggerPct}%)`);
   }
 
   // Update OOR state
@@ -392,13 +402,13 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     };
   }
 
-  // ── Trailing TP ────────────────────────────────────────────────
-  if (!pnl_pct_suspicious && pos.trailing_active) {
+  // ── Trailing TP (never close at a loss: currentPnlPct must be > 0) ─────────
+  if (!pnl_pct_suspicious && pos.trailing_active && currentPnlPct != null && currentPnlPct > 0) {
     const dropFromPeak = pos.peak_pnl_pct - currentPnlPct;
-    if (dropFromPeak >= mgmtConfig.trailingDropPct) {
+    if (dropFromPeak >= effectiveDropPct) {
       return {
         action: "TRAILING_TP",
-        reason: `Trailing TP: peak ${pos.peak_pnl_pct.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${dropFromPeak.toFixed(2)}% >= ${mgmtConfig.trailingDropPct}%)`,
+        reason: `Trailing TP: peak ${pos.peak_pnl_pct.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${dropFromPeak.toFixed(2)}% >= ${effectiveDropPct}%)`,
         needs_confirmation: true,
         peak_pnl_pct: pos.peak_pnl_pct,
         current_pnl_pct: currentPnlPct,
@@ -407,29 +417,51 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     }
   }
 
-  // ── Out of range too long ──────────────────────────────────────
+  // ── Out of range too long (separated: Above vs Below + Touchpoint 3 Chronos OOR-Below Defense) ─────────
   if (pos.out_of_range_since) {
     const minutesOOR = Math.floor((Date.now() - new Date(pos.out_of_range_since).getTime()) / 60000);
-    if (minutesOOR >= mgmtConfig.outOfRangeWaitMinutes) {
+    const { active_bin, upper_bin, lower_bin } = positionData;
+    const isAbove = active_bin != null && upper_bin != null && active_bin > upper_bin;
+    const isBelow = active_bin != null && lower_bin != null && active_bin < lower_bin;
+    let oorLimit = isAbove
+      ? (mgmtConfig.outOfRangeAboveWaitMinutes ?? mgmtConfig.outOfRangeWaitMinutes ?? 60)
+      : isBelow
+        ? (mgmtConfig.outOfRangeBelowWaitMinutes ?? mgmtConfig.outOfRangeWaitMinutes ?? 240)
+        : (mgmtConfig.outOfRangeWaitMinutes ?? 60);
+    if (isBelow && chronosCtx?.oor_below_outlook === "WEAK_STRUCTURAL_BREAKDOWN") {
+      oorLimit = mgmtConfig.outOfRangeBelowEarlyCutMinutes ?? 90;
+    } else if (
+      isBelow &&
+      chronosCtx?.oor_below_outlook === "STRONG_REBOUND_PROBABILITY" &&
+      (currentPnlPct == null || currentPnlPct > -25)
+    ) {
+      oorLimit = (mgmtConfig.outOfRangeBelowWaitMinutes ?? 240) + 90;
+    }
+    const dirLabel = isAbove ? "ABOVE" : isBelow ? "BELOW" : "OOR";
+    if (minutesOOR >= oorLimit) {
       return {
         action: "OUT_OF_RANGE",
-        reason: `Out of range for ${minutesOOR}m (limit: ${mgmtConfig.outOfRangeWaitMinutes}m)`,
+        reason: `Out of range (${dirLabel}) for ${minutesOOR}m (limit: ${oorLimit}m)`,
       };
     }
   }
 
-  // ── Low yield (only after position has had time to accumulate fees) ───
+  // ── Low yield (only after position has had time to accumulate fees, and never cut at a loss) ───
   const { age_minutes } = positionData;
   const minAgeForYieldCheck = mgmtConfig.minAgeBeforeYieldCheck ?? 60;
   if (
+    !pnl_pct_suspicious &&
+    currentPnlPct != null &&
+    currentPnlPct >= 0 &&
     fee_per_tvl_24h != null &&
     mgmtConfig.minFeePerTvl24h != null &&
+    mgmtConfig.minFeePerTvl24h > 0 &&
     fee_per_tvl_24h < mgmtConfig.minFeePerTvl24h &&
     (age_minutes == null || age_minutes >= minAgeForYieldCheck)
   ) {
     return {
       action: "LOW_YIELD",
-      reason: `Low yield: fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}% (age: ${age_minutes ?? "?"}m)`,
+      reason: `Low yield: fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}% (age: ${age_minutes ?? "?"}m, PnL: +${currentPnlPct.toFixed(2)}%)`,
     };
   }
 

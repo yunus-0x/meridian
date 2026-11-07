@@ -5,6 +5,7 @@ import { isDevBlocked, getBlockedDevs } from '../dev-blocklist.js';
 import { isBaseMintOnCooldown, isPoolOnCooldown } from '../pool-memory.js';
 import { fetchJson, readRpc } from './rpc.js';
 import { TOKEN_PROGRAMS } from './balances.js';
+import { analyzePoolWithChronos } from './chronos.js';
 
 const number = value => value == null || value === '' ? null : Number.isFinite(Number(value)) ? Number(value) : null;
 const discovery = 'https://pool-discovery-api.datapi.meteora.ag/pools';
@@ -18,7 +19,7 @@ export async function poolDetail(address, timeframe = config.screening.timeframe
 export function rejectToken(token, mint, s, now = Date.now()) {
   if (token?.id !== mint) return 'Token mint mismatch';
   const updated = Date.parse(token.updatedAt);
-  if (!Number.isFinite(updated) || now - updated > 90_000 || updated > now + 5000) return 'Token data is stale or has no timestamp';
+  if (!Number.isFinite(updated) || now - updated > 240_000 || updated > now + 5000) return 'Token data is stale or has no timestamp';
   const audit = token.audit;
   if (audit?.mintAuthorityDisabled !== true || audit?.freezeAuthorityDisabled !== true) return 'Mint/freeze authority is enabled or unknown';
   for (const [key, limit] of [['topHoldersPercentage', s.maxTop10Pct], ['botHoldersPercentage', s.maxBotHoldersPct]]) {
@@ -87,11 +88,26 @@ export async function screenMint(mint, { poolAddress = null } = {}) {
       const p = await poolDetail(address);
       const minutes = { '5m': 5, '30m': 30, '1h': 60, '2h': 120, '4h': 240, '12h': 720, '24h': 1440 };
       if ((minutes[config.screening.timeframe] || 5) < 30) p.volatility = (await poolDetail(address, '30m')).volatility;
+      if (!(number(p.volatility) > 0)) p.volatility = (await poolDetail(address, '1h')).volatility;
       const why = rejectPool(p, mint, config.screening);
       if (why) { rejected.push(why); continue; }
       candidates.push(p);
     } catch (e) { rejected.push(e.message); }
   }
   candidates.sort((a, b) => b.fee_active_tvl_ratio - a.fee_active_tvl_ratio || b.active_tvl - a.active_tvl || a.pool_address.localeCompare(b.pool_address));
+  if (candidates.length > 1) {
+    const chronos = await analyzePoolWithChronos(candidates[0].pool_address, {
+      binStep: candidates[0].dlmm_params?.bin_step ?? 100,
+      activePrice: candidates[0].pool_price,
+    }).catch(() => null);
+    const spreadPct = Number(chronos?.tactical_signals?.spread_pct ?? 20);
+    const scoreCandidate = p => {
+      const base = Number(p.fee_active_tvl_ratio ?? 0);
+      const step = Number(p.dlmm_params?.bin_step ?? 100);
+      const mult = spreadPct > 35 && step >= 100 ? 1.25 : spreadPct < 18 && step <= 80 ? 1.20 : 1.0;
+      return base * mult;
+    };
+    candidates.sort((a, b) => scoreCandidate(b) - scoreCandidate(a) || b.active_tvl - a.active_tvl || a.pool_address.localeCompare(b.pool_address));
+  }
   return candidates.length ? { pass: true, pool: candidates[0], token, fetchedAt: Date.now() } : { pass: false, reason: rejected.slice(0, 3).join('; ') || 'No eligible token/SOL pool' };
 }

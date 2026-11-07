@@ -58,7 +58,7 @@ export async function getWalletBalances(options = {}) {
   try {
     const walletAddress = config.standalone.walletAddress || getWallet().publicKey.toString();
     const raw = await rpcBalances(walletAddress, options);
-    return options.nativeOnly ? raw : await priceBalances(raw);
+    return options.nativeOnly ? raw : await priceBalances(raw, options);
   } catch (error) {
     return { wallet: null, sol: null, sol_price: null, sol_usd: null, usdc: null, tokens: [], total_usd: null, error: error.message };
   }

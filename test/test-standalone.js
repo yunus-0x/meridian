@@ -7,13 +7,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import bs58 from "bs58";
-import { config } from "../config.js";
+import { config, computeDeployAmount } from "../config.js";
 import { MonitorStore, qualifyingEvents, acceptEvents, finishSignal } from "../standalone/store.js";
 import { decodeEvents, transactionEntries } from "../standalone/events.js";
 import { aggregateTokenAccounts } from "../standalone/balances.js";
 import { rejectToken, rejectPool } from "../standalone/screening.js";
 import { withWalletLock } from "../standalone/transactions.js";
 import { getDeterministicCloseRule, computeBinsBelow } from "../exit-rules.js";
+import { localQuantizedForecast, buildTacticalSignals } from "../standalone/chronos.js";
+import { envryptEncrypt, envryptDecrypt } from "../envcrypt.js";
 
 const options = {
   walletThreshold: 2,
@@ -180,6 +182,7 @@ console.log("\n[4] transactionEntries — rebalances, ownership, quote side, dus
 
   const entries = await transactionEntries(tx(), "sig", W1, options, snapshot, coder, now);
   check("valid SOL-side deposit extracted", entries.length === 1 && entries[0].mint === MINT && Math.abs(entries[0].depositSol - 0.5) < 1e-9);
+  check("whale bin range (binsBelow/binsAbove) extracted", entries[0].binsBelow === 10 && entries[0].binsAbove === 30);
 
   check("stale transaction ignored", (await transactionEntries(tx("ADD1", { blockTime: Math.floor(now / 1000) - 500 }), "sig", W1, options, snapshot, coder, now)).length === 0);
   check("other wallet's deposit ignored", (await transactionEntries(tx(), "sig", W2, options, snapshot, coder, now)).length === 0);
@@ -259,11 +262,14 @@ console.log("\n[7] withWalletLock — exits jump the queue, never concurrent");
 
 console.log("\n[8] deterministic rules");
 {
-  const pos = base => ({ position: "Pos111111111111111111111111111111111111111", pair: "T/SOL", pnl_pct: 0, active_bin: 100, upper_bin: 100, minutes_out_of_range: 0, age_minutes: 90, fee_per_tvl_24h: 10, ...base });
-  const mgmt = { ...config.management };
+  const pos = base => ({ position: "Pos111111111111111111111111111111111111111", pair: "T/SOL", pnl_pct: 0, active_bin: 100, lower_bin: 50, upper_bin: 100, minutes_out_of_range: 0, age_minutes: 90, fee_per_tvl_24h: 10, ...base });
+  const mgmt = { ...config.management, takeProfitPct: 8, outOfRangeBinsToClose: 25, outOfRangeAboveWaitMinutes: 60, outOfRangeBelowWaitMinutes: 240 };
   check("stop loss closes", getDeterministicCloseRule(pos({ pnl_pct: -60 }), mgmt)?.rule === 1);
   check("take profit closes", getDeterministicCloseRule(pos({ pnl_pct: 10 }), mgmt)?.rule === 2);
   check("pumped far above range closes", getDeterministicCloseRule(pos({ active_bin: 130 }), mgmt)?.rule === 3);
+  check("OOR above closes after 60m", getDeterministicCloseRule(pos({ active_bin: 105, minutes_out_of_range: 65 }), mgmt)?.rule === 4);
+  check("OOR below holds at 65m (waits for 240m)", getDeterministicCloseRule(pos({ active_bin: 40, minutes_out_of_range: 65 }), mgmt) === null);
+  check("OOR below closes after 240m", getDeterministicCloseRule(pos({ active_bin: 40, minutes_out_of_range: 245 }), mgmt)?.rule === 4);
   check("suspect PnL never closes on PnL rules", getDeterministicCloseRule(pos({ pnl_pct: -95, pnl_pct_suspicious: true }), mgmt) === null);
 
   const lo = config.strategy.minBinsBelow, hi = config.strategy.maxBinsBelow;
@@ -272,6 +278,42 @@ console.log("\n[8] deterministic rules");
   let threw = false;
   try { computeBinsBelow(null); } catch { threw = true; }
   check("unknown volatility refuses to deploy", threw);
+
+  // Chronos quantized trajectory test
+  const synthCandles = Array.from({ length: 60 }, (_, i) => {
+    const p = 1.0 + Math.sin(i / 4) * 0.04 + i * 0.001;
+    return [1700000000 + i * 300, p * 0.995, p * 1.01, p * 0.99, p, 1000 + i * 25];
+  });
+  const cf = localQuantizedForecast(synthCandles, { poolAddress: POOL_A, binStep: 100 });
+  check("chronos forecast produces ordered quantiles", cf && cf.summary.p10_pct <= cf.summary.p50_pct && cf.summary.p50_pct <= cf.summary.p90_pct);
+  check("chronos recommends safe bins", cf && cf.recommended_bins.bins_below >= lo && cf.recommended_bins.bins_above >= 0 && cf.recommended_bins.bins_below + cf.recommended_bins.bins_above <= 69);
+  check("5-node InstaBox cluster ring configured", Array.isArray(config.chronos.nodes) && config.chronos.nodes.length === 5);
+
+  // Touchpoint 1, 2, 4, 5, 6 tactical signals tests
+  const dumpSignals = buildTacticalSignals({
+    p10Pct: -32, p50Pct: -5.5, p90Pct: 5,
+    rsi14: 75, bbPctB: 0.93,
+    microRsi14: 26, microBbPctB: 0.04, microP50Pct: 1.5,
+    modelAgreement: 0.30,
+  });
+  check("TP1/TP6/TP2/TP4 dump + climax + micro-bounce signals", dumpSignals.x_ratio_mult === 0.35 && dumpSignals.conviction_mult === 0.8 && dumpSignals.sniper_lock === true && dumpSignals.micro_oversold_bounce === true);
+  const bullSignals = buildTacticalSignals({
+    p10Pct: -5, p50Pct: 3.2, p90Pct: 18,
+    rsi14: 58, bbPctB: 0.65,
+    modelAgreement: 0.82,
+  });
+  check("TP1/TP2/TP6 high-conviction bull signals", bullSignals.x_ratio_mult === 0.85 && bullSignals.conviction_mult === 1.15 && bullSignals.let_winners_run === true);
+  check("TP6 conviction sizing scales deploy amount", computeDeployAmount(2.0, 1.15) > computeDeployAmount(2.0, 0.8));
+
+  // Touchpoint 3 OOR-Below Chronos Defense tests
+  check("TP3 OOR-below WEAK_STRUCTURAL_BREAKDOWN rescues early at 90m", getDeterministicCloseRule(pos({ active_bin: 40, minutes_out_of_range: 95 }), mgmt, { oor_below_outlook: "WEAK_STRUCTURAL_BREAKDOWN" })?.rule === 4);
+  check("TP3 OOR-below STRONG_REBOUND_PROBABILITY extends hold past 240m to 330m", getDeterministicCloseRule(pos({ active_bin: 40, minutes_out_of_range: 260, pnl_pct: -12 }), mgmt, { oor_below_outlook: "STRONG_REBOUND_PROBABILITY" }) === null);
+
+  // Audit bug-fix regression checks
+  const highByteKey = "k\u00ff\u00fe99";
+  const secretVal = "sec_key_12345_!@#_\u00e9";
+  check("Bug #10 envcrypt roundtrips high-byte XOR cleanly", envryptDecrypt(envryptEncrypt(secretVal, highByteKey), highByteKey) === secretVal);
+  check("Bug #9 real -92% crash triggers stop loss (not masked by >0.01 value)", getDeterministicCloseRule(pos({ pnl_pct: -92, total_value_usd: 0.02 }), mgmt)?.rule === 1);
 }
 
 console.log(failed === 0 ? "\nALL TESTS PASSED" : `\n${failed} TEST(S) FAILED`);

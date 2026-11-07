@@ -6,7 +6,7 @@
 // (close_position > other writes > deploy_position) in standalone/transactions.js.
 
 import fs from "node:fs";
-import { config, computeDeployAmount } from "../config.js";
+import { config, computeDeployAmount, MIN_SAFE_BINS_BELOW } from "../config.js";
 import { log } from "../logger.js";
 import { repoPath } from "../repo-root.js";
 import { sendMessage as tgSend, isEnabled as tgEnabled } from "../telegram.js";
@@ -21,6 +21,7 @@ import { getTrackedPositions, confirmPeak, updatePnlAndCheckExits, registerExitS
 import { recordPositionSnapshot } from "../pool-memory.js";
 import { getDeterministicCloseRule, computeBinsBelow } from "../exit-rules.js";
 import { startAdmin } from "./telegram-admin.js";
+import { analyzePoolWithChronos, getCachedChronosAnalysis, startChronosKeepalive, stopChronosKeepalive } from "./chronos.js";
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -88,8 +89,14 @@ async function pursueSignal(signal) {
 async function attemptEntry(signal) {
   const mint = signal.mint;
   const attempt = store.data.attempts[mint];
-  // One attempt chain per mint; bounded retries only for temporary failures.
-  if (attempt && ["entered", "proposed", "submitting"].includes(attempt.status)) {
+  const attemptCooldownMs = (config.standalone.cooldownSec ?? 300) * 1000;
+  // Block concurrent mid-submit or immediate duplicate signal within signal cooldown;
+  // longer-term repeat-entry limits are enforced by pool-memory (repeatDeployCooldownTriggerCount).
+  if (
+    attempt &&
+    (attempt.status === "submitting" ||
+      (["entered", "proposed"].includes(attempt.status) && Date.now() - (attempt.at ?? 0) < attemptCooldownMs))
+  ) {
     finishSignal(store, signal, `mint already attempted (${attempt.status})`);
     return null;
   }
@@ -126,14 +133,58 @@ async function attemptEntry(signal) {
 
   const balances = await getWalletBalances({ force: true, nativeOnly: true });
   if (balances.error || !Number.isFinite(balances.sol)) return "balance read unavailable";
-  const amountY = computeDeployAmount(balances.sol);
   if (balances.sol < config.management.minSolToOpen + config.management.gasReserve) {
     finishSignal(store, signal, "insufficient spendable SOL");
     return null;
   }
 
   const pool = screened.pool;
-  const binsBelow = computeBinsBelow(pool.volatility);
+  const configuredBinsAbove = Number(config.strategy.defaultBinsAbove ?? 0);
+  const whaleBinsAbove = Math.max(0, ...signal.events.map(e => Number(e.binsAbove || 0)));
+  let binsAbove = configuredBinsAbove > 0
+    ? Math.min(configuredBinsAbove, whaleBinsAbove > 0 ? whaleBinsAbove : configuredBinsAbove)
+    : 0;
+  const rawBinsBelow = computeBinsBelow(pool.volatility);
+  let binsBelow = Math.max(MIN_SAFE_BINS_BELOW, Math.min(rawBinsBelow, 69 - binsAbove));
+
+  // Chronos AI Pre-Deploy Gate & Dynamic Bin Calibration (InstaBox 5-Node Cluster + Fallback)
+  const chronos = await analyzePoolWithChronos(pool.pool_address, {
+    binStep: pool.dlmm_params?.bin_step ?? 100,
+    activePrice: pool.pool_price,
+    defaultBinsAbove: binsAbove,
+    defaultBinsBelow: binsBelow,
+    minBinsBelow: MIN_SAFE_BINS_BELOW,
+  }).catch(() => null);
+
+  let convictionMult = 1.0;
+  let xRatioMult = 0.65;
+  if (chronos) {
+    if (chronos.gate?.action === "DEFER") {
+      log("chronos_gate", `Deferred ${mint.slice(0, 8)} (${pool.pool_address.slice(0, 8)}): ${chronos.gate.reason}`);
+      return `chronos gate: ${chronos.gate.reason}`;
+    }
+    if (configuredBinsAbove > 0 && chronos.recommended_bins?.bins_above > 0) {
+      binsAbove = chronos.recommended_bins.bins_above;
+    }
+    if (chronos.recommended_bins?.bins_below > 0) {
+      binsBelow = Math.max(
+        MIN_SAFE_BINS_BELOW,
+        Math.min(Math.max(binsBelow, chronos.recommended_bins.bins_below), 69 - binsAbove),
+      );
+    }
+    if (Number.isFinite(Number(chronos.tactical_signals?.conviction_mult))) {
+      convictionMult = Number(chronos.tactical_signals.conviction_mult);
+    }
+    if (Number.isFinite(Number(chronos.tactical_signals?.x_ratio_mult))) {
+      xRatioMult = Number(chronos.tactical_signals.x_ratio_mult);
+    }
+    const s = chronos.summary ?? {};
+    log(
+      "chronos",
+      `Pool ${pool.pool_address.slice(0, 8)} [${chronos.engine}]: P10=${s.p10_pct}% P50=${s.p50_pct}% P90=${s.p90_pct}% RSI=${s.rsi_14} BB%B=${s.bb_pct_b} → bins=${binsBelow}↓/${binsAbove}↑ xMult=${xRatioMult} convMult=${convictionMult} (${chronos.latency_ms}ms)`,
+    );
+  }
+  const amountY = computeDeployAmount(balances.sol, convictionMult);
   // Checkpoint before building anything: a crash mid-sequence leaves a
   // recovery pointer instead of a silent duplicate-entry risk.
   store.data.attempts[mint] = {
@@ -145,8 +196,16 @@ async function attemptEntry(signal) {
   let submitted = 0;
   const result = await executeTool("deploy_position", {
     pool_address: pool.pool_address,
+    base_mint: mint,
+    pool_name: pool.name,
+    bin_step: pool.dlmm_params?.bin_step,
+    volatility: pool.volatility,
+    fee_tvl_ratio: pool.fee_active_tvl_ratio,
+    organic_score: screened.token?.organicScore,
     amount_y: amountY,
     bins_below: binsBelow,
+    bins_above: binsAbove,
+    x_ratio_mult: xRatioMult,
     before_submit: async () => {
       // Gate only the first transaction of the sequence. Once creation has
       // been sent, completing the sequence is safer than abandoning a
@@ -162,6 +221,9 @@ async function attemptEntry(signal) {
   }).catch(e => ({ error: e.message }));
 
   const record = store.data.attempts[mint];
+  if (Array.isArray(result?.txs) && result.txs.length > 0) {
+    record.txs = result.txs;
+  }
   const ok = result && result.success !== false && !result.error && !result.blocked;
   if (ok) {
     record.status = result.dry_run ? "proposed" : "entered";
@@ -228,17 +290,22 @@ export async function manageOnce() {
     if (live.positions.length === 0) return "No open positions";
     for (const p of live.positions) {
       recordPositionSnapshot(p.pool, p);
+      // Refresh Chronos tactical context for open position during management pass
+      const chronos = await analyzePoolWithChronos(p.pool).catch(() => getCachedChronosAnalysis(p.pool));
+      const chronosCtx = chronos
+        ? { ...(chronos.tactical_signals ?? {}), oor_below_outlook: chronos.oor_below_outlook }
+        : null;
       // Slow backstop: raise peaks immediately and act on detected exits.
       // Real-time confirmation lives in the fast poller below.
       confirmPeak(p.position, p.pnl_pct, 1);
-      const exit = updatePnlAndCheckExits(p.position, p, config.management);
+      const exit = updatePnlAndCheckExits(p.position, p, config.management, chronosCtx);
       const closeRule = exit
         ? { action: "CLOSE", rule: "exit", reason: exit.reason }
-        : getDeterministicCloseRule(p, config.management);
+        : getDeterministicCloseRule(p, config.management, chronosCtx);
       let action = null;
       if (closeRule?.action === "CLOSE") {
         action = { tool: "close_position", args: { position_address: p.position, reason: closeRule.reason }, label: `close (${closeRule.reason})` };
-      } else if ((p.unclaimed_fees_usd ?? 0) >= config.management.minClaimAmount) {
+      } else if ((p.unclaimed_fees_true_usd ?? p.unclaimed_fees_usd ?? 0) >= config.management.minClaimAmount) {
         action = { tool: "claim_fees", args: { position_address: p.position }, label: "claim fees" };
       }
       // LLM-set free-text instructions have no execution path in standalone — hold.
@@ -266,9 +333,13 @@ function startPnlPoller() {
       const live = await getMyPositions({ force: true, silent: true }).catch(() => null);
       if (!live?.positions?.length) return;
       for (const p of live.positions) {
+        const cachedChronos = getCachedChronosAnalysis(p.pool);
+        const chronosCtx = cachedChronos
+          ? { ...(cachedChronos.tactical_signals ?? {}), oor_below_outlook: cachedChronos.oor_below_outlook }
+          : null;
         confirmPeak(p.position, p.pnl_pct, confirmTicks);
-        const exit = updatePnlAndCheckExits(p.position, p, config.management);
-        const closeRule = exit ? null : getDeterministicCloseRule(p, config.management);
+        const exit = updatePnlAndCheckExits(p.position, p, config.management, chronosCtx);
+        const closeRule = exit ? null : getDeterministicCloseRule(p, config.management, chronosCtx);
         let signal = null, reason = null;
         if (exit) { signal = exit.action ?? "EXIT"; reason = exit.reason; }
         else if (closeRule) { signal = `RULE_${closeRule.rule}`; reason = closeRule.reason; }
@@ -322,6 +393,7 @@ async function shutdown(signalName) {
   if (shuttingDown) return;
   shuttingDown = true;
   log("runtime", `${signalName} received — shutting down`);
+  stopChronosKeepalive();
   for (const timer of Object.values(timers)) clearInterval(timer);
   try { stopAdmin?.(); } catch { /* best-effort */ }
   try { await monitor?.stop(); } catch { /* best-effort */ }
@@ -349,11 +421,15 @@ export async function startStandalone() {
   if (!monitor.healthy()) {
     log("runtime_warn", "Monitor baseline incomplete — wallets without a portfolio baseline produce no signals until reconciliation succeeds");
   }
+  for (const s of Object.values(store.data.signals)) {
+    if (!s.done && s.deadline > Date.now()) onSignal(s);
+  }
 
   // Entries come only from signals; exits run on their own cadences.
   timers.manage = setInterval(() => { void manageOnce(); }, Math.max(1, config.schedule.managementIntervalMin) * 60_000);
   startPnlPoller();
   startHeartbeat();
+  startChronosKeepalive();
   void manageOnce();
   stopAdmin = startAdmin({
     monitor,

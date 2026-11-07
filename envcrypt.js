@@ -52,19 +52,23 @@ function shouldEncryptEnvKey(envKey) {
 }
 
 export function envryptEncrypt(value, key) {
-  return Buffer.from(
-    Array.from(String(value), (char, index) =>
-      String.fromCharCode(char.charCodeAt(0) ^ key.charCodeAt(index % key.length))
-    ).join(""),
-    "ascii",
-  ).toString("base64");
+  const valBuf = Buffer.from(String(value), "utf8");
+  const keyBuf = Buffer.from(String(key), "utf8");
+  const out = Buffer.alloc(valBuf.length);
+  for (let i = 0; i < valBuf.length; i++) {
+    out[i] = valBuf[i] ^ keyBuf[i % keyBuf.length];
+  }
+  return out.toString("base64");
 }
 
 export function envryptDecrypt(value, key) {
-  const encrypted = Buffer.from(String(value), "base64").toString("utf8");
-  return Array.from(encrypted, (char, index) =>
-    String.fromCharCode(char.charCodeAt(0) ^ key.charCodeAt(index % key.length))
-  ).join("");
+  const encBuf = Buffer.from(String(value), "base64");
+  const keyBuf = Buffer.from(String(key), "utf8");
+  const out = Buffer.alloc(encBuf.length);
+  for (let i = 0; i < encBuf.length; i++) {
+    out[i] = encBuf[i] ^ keyBuf[i % keyBuf.length];
+  }
+  return out.toString("utf8");
 }
 
 export function loadEnv({ envPath = DEFAULT_ENV_PATH, keyPath = DEFAULT_KEY_PATH, override = true } = {}) {

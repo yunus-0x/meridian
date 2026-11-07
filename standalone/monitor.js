@@ -42,6 +42,8 @@ export class WalletMonitor {
       for (const [address, id] of this.subscriptions) if (!addresses.has(address)) {
         await this.ws.removeOnLogsListener(id).catch(() => {});
         this.subscriptions.delete(address);
+      }
+      for (const address of Object.keys(this.store.data.wallets)) if (!addresses.has(address)) {
         delete this.store.data.wallets[address];
         this.store.data.events = this.store.data.events.filter(e => e.wallet !== address);
       }
@@ -94,12 +96,14 @@ export class WalletMonitor {
   async drain() {
     if (!this.running || this.draining) return;
     this.draining = true;
+    let dirty = false;
     try {
       for (const [key, pending] of Object.entries(this.store.data.pending).slice(0, 20)) {
         if (!this.running) break;
         if (pending.retryAt > Date.now()) continue;
+        dirty = true;
         try {
-          if (!this.store.data.wallets[pending.wallet] || Date.now() - pending.queuedAt > this.options.windowSec * 1000) {
+          if (!this.store.data.wallets[pending.wallet] || Date.now() - pending.queuedAt > this.options.windowSec * 1000 || (pending.failures ?? 0) >= 3) {
             delete this.store.data.pending[key]; continue;
           }
           const tx = await this.rpc('monitor', c => c.getTransaction(pending.signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 }));
@@ -117,8 +121,8 @@ export class WalletMonitor {
           pending.retryAt = Date.now() + Math.min(15_000, 1000 * 2 ** Math.min(pending.failures, 4));
           this.stats.errors++;
         }
-        this.store.save();
       }
+      if (dirty) this.store.save();
     } finally { this.draining = false; }
   }
   async stop() {

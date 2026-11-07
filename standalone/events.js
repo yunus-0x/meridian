@@ -88,7 +88,7 @@ export async function transactionEntries(tx, signature, wallet, options, snapsho
     // Require a meaningful quote-side deposit. Token-only inventory selling is excluded.
     const depositSol = await quoteInSol(quote, d.amounts[xQuote ? 0 : 1]);
     if (depositSol < options.minDepositSol) continue;
-    out.push({ id: `${signature}:${wallet}:${d.position}`, signature, wallet, position: d.position, pool: d.pool, mint, at: tx.blockTime * 1000, slot: tx.slot, depositSol, shares: p.shares });
+    out.push({ id: `${signature}:${wallet}:${d.position}`, signature, wallet, position: d.position, pool: d.pool, mint, at: tx.blockTime * 1000, slot: tx.slot, depositSol, shares: p.shares, binsBelow: Math.max(0, p.active - p.lower), binsAbove: Math.max(0, p.upper - p.active) });
   }
   return out;
 }

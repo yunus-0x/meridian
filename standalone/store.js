@@ -15,8 +15,20 @@ export class MonitorStore {
   }
   prune(now = Date.now()) {
     this.data.events = this.data.events.filter(e => now - e.at < 10 * 60_000);
-    for (const [key, at] of Object.entries(this.data.seen)) if (now - at > 24 * 3600_000) delete this.data.seen[key];
-    for (const [mint, s] of Object.entries(this.data.signals)) if (s.done && now - s.createdAt > 24 * 3600_000) delete this.data.signals[mint];
+    for (const [key, at] of Object.entries(this.data.seen)) if (now - at > 2 * 3600_000) delete this.data.seen[key];
+    const seenEntries = Object.entries(this.data.seen);
+    if (seenEntries.length > 5000) {
+      seenEntries.sort((a, b) => b[1] - a[1]);
+      this.data.seen = Object.fromEntries(seenEntries.slice(0, 5000));
+    }
+    for (const [mint, s] of Object.entries(this.data.signals)) {
+      if (!s.done && now > s.deadline) {
+        s.done = true;
+        s.reason = s.reason || "expired";
+        s.closedAt = now;
+      }
+      if (s.done && now - s.createdAt > 24 * 3600_000) delete this.data.signals[mint];
+    }
     // Attempt records double as mint-level duplicate protection; a day matches
     // the pool-memory cooldown horizon. Never prune mid-submit checkpoints.
     for (const [mint, a] of Object.entries(this.data.attempts)) if (a.status !== "submitting" && now - a.at > 24 * 3600_000) delete this.data.attempts[mint];

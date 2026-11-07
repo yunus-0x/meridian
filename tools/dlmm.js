@@ -20,7 +20,7 @@ import {
 } from "../state.js";
 import { recordPerformance } from "../performance.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
-import { normalizeMint } from "./wallet.js";
+import { normalizeMint, swapToken, getWalletBalances } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { computePositions, fetchDlmmPnlForPool } from "./pnl.js";
 
@@ -239,6 +239,7 @@ export async function deployPosition({
   entry_tvl,
   entry_volume,
   entry_holders,
+  x_ratio_mult,
   before_submit,
   on_prepared,
 }) {
@@ -267,9 +268,9 @@ export async function deployPosition({
     log("deploy", `Base mint ${baseMint.slice(0, 8)} is on cooldown — skipping deploy for pool ${pool_address.slice(0, 8)}`);
     return { success: false, error: "Token on cooldown — recently closed out-of-range too many times. Try a different token." };
   }
-  const activeBin = await pool.getActiveBin();
+  let activeBin = await pool.getActiveBin();
   const actualBinStep = pool.lbPair.binStep;
-  const activePrice = Number(getPriceOfBinByBinId(activeBin.binId, actualBinStep).toString());
+  let activePrice = Number(getPriceOfBinByBinId(activeBin.binId, actualBinStep).toString());
 
   if (downside_pct != null || upside_pct != null) {
     const downsidePct = Math.max(0, Number(downside_pct ?? 0));
@@ -308,25 +309,14 @@ export async function deployPosition({
     amount_y == null && amount_sol == null
       ? computeDeployAmount((await getWalletBalances()).sol)
       : 0;
-  const finalAmountY = Number(amount_y ?? amount_sol ?? fallbackAmountY);
-  const finalAmountX = Number(amount_x ?? 0);
+  let finalAmountY = Number(amount_y ?? amount_sol ?? fallbackAmountY);
+  let finalAmountX = Number(amount_x ?? 0);
+  const totalDeploySol = finalAmountY;
   if (!Number.isFinite(finalAmountY) || !Number.isFinite(finalAmountX) || finalAmountY < 0 || finalAmountX < 0) {
     throw new Error("Invalid deploy amount: amount_x and amount_y must be valid non-negative numbers.");
   }
-  if (finalAmountX > 0) {
-    throw new Error("Unsupported deploy amount: this agent only supports single-side SOL deploys. Use amount_y/amount_sol and keep amount_x=0.");
-  }
-  if (finalAmountY <= 0) {
-    throw new Error("Invalid deploy amount: provide a positive amount_y/amount_sol.");
-  }
-  const isSingleSidedSol = finalAmountX <= 0 && finalAmountY > 0;
-  if (isSingleSidedSol && (Number(bins_above ?? 0) > 0 || Number(upside_pct ?? 0) > 0)) {
-    throw new Error(
-      "Single-side SOL deploy cannot use bins_above or upside_pct. Use amount_y with bins_below only; the upper bin is the SDK active bin.",
-    );
-  }
-  if (isSingleSidedSol) {
-    activeBinsAbove = 0;
+  if (finalAmountY <= 0 && finalAmountX <= 0) {
+    throw new Error("Invalid deploy amount: provide a positive amount_y/amount_sol or amount_x.");
   }
   activeBinsBelow = Number(activeBinsBelow);
   activeBinsAbove = Number(activeBinsAbove);
@@ -365,53 +355,109 @@ export async function deployPosition({
     };
   }
 
-  const isWideRange = totalBins > 69;
-  const minBinId = activeBin.binId - activeBinsBelow;
-  const maxBinId = isSingleSidedSol ? activeBin.binId : activeBin.binId + activeBinsAbove;
+  const txHashes = [];
+  let swappedRawDeltaX = 0n;
+  let swappedDeltaXUi = 0;
 
-  if (minBinId > maxBinId) {
-    throw new Error(`Invalid bin range: ${minBinId} -> ${maxBinId}`);
-  }
-  if (isSingleSidedSol && maxBinId !== activeBin.binId) {
-    throw new Error(
-      `Single-side SOL deploy must end at the SDK active bin. Expected ${activeBin.binId}, got ${maxBinId}.`,
-    );
-  }
-
-  await assertRangeDoesNotRequireBinArrayInitialization(pool, minBinId, maxBinId);
-
-  const minPrice = Number(getPriceOfBinByBinId(minBinId, actualBinStep).toString());
-  const maxPrice = Number(getPriceOfBinByBinId(maxBinId, actualBinStep).toString());
-  const downsideCoveragePct = activePrice > 0 ? ((activePrice - minPrice) / activePrice) * 100 : null;
-  const upsideCoveragePct = activePrice > 0 ? ((maxPrice - activePrice) / activePrice) * 100 : null;
-  const totalWidthPct = minPrice > 0 ? ((maxPrice - minPrice) / minPrice) * 100 : null;
-
-  // Read base fee directly from pool — baseFactor * binStep / 10^6 gives fee in %
-  const baseFactor = pool.lbPair.parameters?.baseFactor ?? 0;
-  const actualBaseFee = base_fee ?? (baseFactor > 0 ? parseFloat((baseFactor * actualBinStep / 1e6 * 100).toFixed(4)) : null);
-
-  const totalYLamports = new BN(Math.floor(finalAmountY * 1e9));
-  // Token X amount uses mint decimals when available, falling back to 9.
-  let totalXLamports = new BN(0);
-  if (finalAmountX > 0) {
-    const mintInfo = await getConnection().getParsedAccountInfo(new PublicKey(pool.lbPair.tokenXMint));
-    const decimals = mintInfo.value?.data?.parsed?.info?.decimals ?? 9;
-    totalXLamports = new BN(Math.floor(finalAmountX * Math.pow(10, decimals)));
-  }
-
-
-
-  const wallet = getWallet();
-  const newPosition = Keypair.generate();
-  await on_prepared?.(newPosition.publicKey.toString());
-
-  log("deploy", `Pool: ${pool_address}`);
-  log("deploy", `Strategy: ${activeStrategy}, Bins: ${minBinId} to ${maxBinId} (${totalBins} bins${isWideRange ? " — WIDE RANGE" : ""})`);
-  log("deploy", `Amount: ${finalAmountX} X, ${finalAmountY} Y`);
-  log("deploy", `Position: ${newPosition.publicKey.toString()}`);
+  const rollbackSwappedTokenX = async (reason) => {
+    if (swappedDeltaXUi <= 0) return;
+    try {
+      log("deploy_warn", `Rolling back pre-deploy swapped ${swappedDeltaXUi} ${baseMint.slice(0, 8)} -> SOL after deploy failure (${reason})`);
+      await swapToken({ input_mint: baseMint, output_mint: "SOL", amount: swappedDeltaXUi });
+    } catch (rollbackErr) {
+      log("deploy_error", `Rollback swap failed for ${baseMint.slice(0, 8)}: ${rollbackErr.message}`);
+    }
+  };
 
   try {
-    const txHashes = [];
+    // Auto-swap proportional SOL -> Token X when deploying dual-sided (activeBinsAbove > 0) with only SOL provided
+    if (activeBinsAbove > 0 && finalAmountX <= 0 && finalAmountY > 0) {
+      const initialTotalBins = activeBinsBelow + activeBinsAbove;
+      const rawRatio = activeBinsAbove / initialTotalBins;
+      const customMult = Number.isFinite(Number(x_ratio_mult))
+        ? Math.max(0.25, Math.min(1.0, Number(x_ratio_mult)))
+        : 0.65;
+      const xRatio = activeStrategy === "bid_ask" ? rawRatio * customMult : rawRatio;
+      const swapSolAmount = parseFloat((finalAmountY * xRatio).toFixed(6));
+      if (swapSolAmount >= 0.005) {
+        const preSwapMinBinId = activeBin.binId - activeBinsBelow;
+        const preSwapMaxBinId = activeBin.binId + activeBinsAbove;
+        if (preSwapMinBinId > preSwapMaxBinId) {
+          throw new Error(`Invalid bin range: ${preSwapMinBinId} -> ${preSwapMaxBinId}`);
+        }
+        await assertRangeDoesNotRequireBinArrayInitialization(pool, preSwapMinBinId, preSwapMaxBinId);
+        const preSwapBal = await getWalletBalances({ force: true }).catch(() => null);
+        const preSwapTok = preSwapBal?.tokens?.find(t => t.mint === baseMint);
+        const preSwapRaw = BigInt(preSwapTok?.raw_balance ?? "0");
+        log("deploy", `Dual-sided deploy (${activeBinsBelow} below, ${activeBinsAbove} above): swapping ${swapSolAmount} SOL (${(xRatio * 100).toFixed(1)}%) -> ${baseMint.slice(0, 8)}`);
+        await before_submit?.();
+        const swapRes = await swapToken({ input_mint: "SOL", output_mint: baseMint, amount: swapSolAmount });
+        if (!swapRes?.success) {
+          throw new Error(`Dual-sided pre-deploy swap failed: ${swapRes?.error || "unknown error"}`);
+        }
+        if (swapRes.tx) txHashes.push(swapRes.tx);
+        finalAmountY = parseFloat((finalAmountY - swapSolAmount).toFixed(6));
+        let tok = null;
+        for (let attempt = 0; attempt < 6; attempt++) {
+          await new Promise(r => setTimeout(r, 1500));
+          const freshBal = await getWalletBalances({ force: true });
+          tok = freshBal.tokens?.find(t => t.mint === baseMint);
+          if (tok && BigInt(tok.raw_balance ?? "0") > preSwapRaw) break;
+        }
+        const postSwapRaw = BigInt(tok?.raw_balance ?? "0");
+        if (!tok || postSwapRaw <= preSwapRaw) {
+          throw new Error(`Dual-sided pre-deploy swap succeeded (${swapRes.tx}), but token balance delta not yet readable`);
+        }
+        swappedRawDeltaX = postSwapRaw - preSwapRaw;
+        const tokDecimals = Number(tok.decimals ?? 9);
+        swappedDeltaXUi = Number(swappedRawDeltaX) / Math.pow(10, tokDecimals);
+        finalAmountX = swappedDeltaXUi;
+        activeBin = await pool.getActiveBin();
+        activePrice = Number(getPriceOfBinByBinId(activeBin.binId, actualBinStep).toString());
+      } else {
+        activeBinsAbove = 0;
+      }
+    }
+    const finalTotalBins = activeBinsBelow + activeBinsAbove;
+    const isWideRange = finalTotalBins > 69;
+    const minBinId = activeBin.binId - activeBinsBelow;
+    const maxBinId = activeBin.binId + activeBinsAbove;
+
+    if (minBinId > maxBinId) {
+      throw new Error(`Invalid bin range: ${minBinId} -> ${maxBinId}`);
+    }
+
+    await assertRangeDoesNotRequireBinArrayInitialization(pool, minBinId, maxBinId);
+
+    const minPrice = Number(getPriceOfBinByBinId(minBinId, actualBinStep).toString());
+    const maxPrice = Number(getPriceOfBinByBinId(maxBinId, actualBinStep).toString());
+    const downsideCoveragePct = activePrice > 0 ? ((activePrice - minPrice) / activePrice) * 100 : null;
+    const upsideCoveragePct = activePrice > 0 ? ((maxPrice - activePrice) / activePrice) * 100 : null;
+    const totalWidthPct = minPrice > 0 ? ((maxPrice - minPrice) / minPrice) * 100 : null;
+
+    // Read base fee directly from pool — baseFactor * binStep / 10^6 gives fee in %
+    const baseFactor = pool.lbPair.parameters?.baseFactor ?? 0;
+    const actualBaseFee = base_fee ?? (baseFactor > 0 ? parseFloat((baseFactor * actualBinStep / 1e6 * 100).toFixed(4)) : null);
+
+    const totalYLamports = new BN(Math.floor(finalAmountY * 1e9));
+    // Token X amount uses exact raw delta when from pre-deploy swap, or mint decimals otherwise.
+    let totalXLamports = new BN(0);
+    if (swappedRawDeltaX > 0n) {
+      totalXLamports = new BN(swappedRawDeltaX.toString());
+    } else if (finalAmountX > 0) {
+      const mintInfo = await getConnection().getParsedAccountInfo(new PublicKey(pool.lbPair.tokenXMint));
+      const decimals = mintInfo.value?.data?.parsed?.info?.decimals ?? 9;
+      totalXLamports = new BN(Math.floor(finalAmountX * Math.pow(10, decimals)));
+    }
+
+    const wallet = getWallet();
+    const newPosition = Keypair.generate();
+    await on_prepared?.(newPosition.publicKey.toString());
+
+    log("deploy", `Pool: ${pool_address}`);
+    log("deploy", `Strategy: ${activeStrategy}, Bins: ${minBinId} to ${maxBinId} (${totalBins} bins${isWideRange ? " — WIDE RANGE" : ""})`);
+    log("deploy", `Amount: ${finalAmountX} X, ${finalAmountY} Y`);
+    log("deploy", `Position: ${newPosition.publicKey.toString()}`);
 
     if (isWideRange) {
       // ── Wide Range Path (>69 bins) ─────────────────────────────────
@@ -481,7 +527,7 @@ export async function deployPosition({
       volatility: normalizedVolatility,
       fee_tvl_ratio,
       organic_score,
-      amount_sol: finalAmountY,
+      amount_sol: totalDeploySol,
       amount_x: finalAmountX,
       active_bin: activeBin.binId,
       initial_value_usd,
@@ -498,14 +544,14 @@ export async function deployPosition({
       pool: pool_address,
       pool_name,
       position: newPosition.publicKey.toString(),
-      summary: `Deployed ${finalAmountY} SOL with ${activeStrategy}`,
+      summary: `Deployed ${totalDeploySol} SOL with ${activeStrategy}`,
       reason: `Chosen range ${minBinId}→${maxBinId} around active bin ${activeBin.binId}`,
       risks: [
         normalizedVolatility != null ? `volatility ${normalizedVolatility}` : null,
         fee_tvl_ratio != null ? `fee/TVL ${fee_tvl_ratio}%` : null,
       ].filter(Boolean),
       metrics: {
-        amount_sol: finalAmountY,
+        amount_sol: totalDeploySol,
         strategy: activeStrategy,
         active_bin: activeBin.binId,
         min_bin: minBinId,
@@ -538,7 +584,8 @@ export async function deployPosition({
     };
   } catch (error) {
     log("deploy_error", error.message);
-    return { success: false, error: error.message };
+    await rollbackSwappedTokenX(error.message);
+    return { success: false, error: error.message, txs: txHashes };
   }
 }
 
@@ -943,10 +990,12 @@ export async function claimFees({ position_address }) {
       txHashes.push(txHash);
     }
     log("claim", `SUCCESS txs: ${txHashes.join(", ")}`);
+    const cachedPos = _positionsCache?.positions?.find(p => p.position === position_address);
+    const claimedUsd = cachedPos?.unclaimed_fees_true_usd ?? cachedPos?.unclaimed_fees_usd ?? 0;
     _positionsCacheAt = 0; // invalidate cache after claim
-    recordClaim(position_address);
+    recordClaim(position_address, claimedUsd);
 
-    return { success: true, position: position_address, txs: txHashes, base_mint: pool.lbPair.tokenXMint.toString() };
+    return { success: true, position: position_address, pool: poolAddress.toString(), txs: txHashes, base_mint: pool.lbPair.tokenXMint.toString() };
   } catch (error) {
     log("claim_error", error.message);
     return { success: false, error: error.message };

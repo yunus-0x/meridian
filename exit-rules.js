@@ -8,15 +8,17 @@ import { getTrackedPosition } from "./state.js";
  * Rule-based close decision for a position (stop loss, take profit, range
  * exhaustion, low yield). Returns { action: "CLOSE", rule, reason } or null.
  */
-export function getDeterministicCloseRule(position, managementConfig) {
+export function getDeterministicCloseRule(position, managementConfig, chronosCtx = null) {
   const tracked = getTrackedPosition(position.position);
   const pnlSuspect = (() => {
     // Couldn't-price-this-tick flag (e.g. Jupiter outage) — never act on PnL rules.
     if (position.pnl_pct_suspicious) return true;
     if (position.pnl_pct == null) return false;
     if (position.pnl_pct > -90) return false;
-    if (tracked?.amount_sol && (position.total_value_usd ?? 0) > 0.01) {
-      log("cron_warn", `Suspect PnL for ${position.pair}: ${position.pnl_pct}% but position still has value — skipping PnL rules`);
+    // Only treat <= -90% PnL as a pricing glitch when remaining value still exceeds 25% of initial deposit
+    const minGlitchValue = tracked?.amount_sol ? tracked.amount_sol * 0.25 : 0.05;
+    if (tracked?.amount_sol && (position.total_value_usd ?? 0) > minGlitchValue) {
+      log("cron_warn", `Suspect PnL for ${position.pair}: ${position.pnl_pct}% but position still has >25% value (${position.total_value_usd}) — skipping PnL rules`);
       return true;
     }
     return false;
@@ -35,15 +37,37 @@ export function getDeterministicCloseRule(position, managementConfig) {
   ) {
     return { action: "CLOSE", rule: 3, reason: "pumped far above range" };
   }
+  const oorAboveLimit = managementConfig.outOfRangeAboveWaitMinutes ?? managementConfig.outOfRangeWaitMinutes ?? 60;
+  let oorBelowLimit = managementConfig.outOfRangeBelowWaitMinutes ?? managementConfig.outOfRangeWaitMinutes ?? 240;
+  if (chronosCtx?.oor_below_outlook === "WEAK_STRUCTURAL_BREAKDOWN") {
+    oorBelowLimit = managementConfig.outOfRangeBelowEarlyCutMinutes ?? 90;
+  } else if (
+    chronosCtx?.oor_below_outlook === "STRONG_REBOUND_PROBABILITY" &&
+    (position.pnl_pct == null || position.pnl_pct > -25)
+  ) {
+    oorBelowLimit = (managementConfig.outOfRangeBelowWaitMinutes ?? 240) + 90;
+  }
   if (
     position.active_bin != null &&
     position.upper_bin != null &&
     position.active_bin > position.upper_bin &&
-    (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
+    (position.minutes_out_of_range ?? 0) >= oorAboveLimit
   ) {
-    return { action: "CLOSE", rule: 4, reason: "OOR" };
+    return { action: "CLOSE", rule: 4, reason: `OOR above (${oorAboveLimit}m)` };
   }
   if (
+    position.active_bin != null &&
+    position.lower_bin != null &&
+    position.active_bin < position.lower_bin &&
+    (position.minutes_out_of_range ?? 0) >= oorBelowLimit
+  ) {
+    return { action: "CLOSE", rule: 4, reason: `OOR below (${oorBelowLimit}m)` };
+  }
+  if (
+    !pnlSuspect &&
+    position.pnl_pct != null &&
+    position.pnl_pct >= 0 &&
+    managementConfig.minFeePerTvl24h > 0 &&
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
     (position.age_minutes ?? 0) >= 60

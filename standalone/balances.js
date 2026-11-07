@@ -31,9 +31,9 @@ export async function rpcBalances(address, { force = false, nativeOnly = false, 
   return value;
 }
 export function invalidateBalances() { balances.clear(); }
-export async function priceBalances(raw) {
+export async function priceBalances(raw, { force = false } = {}) {
   const mints = [...new Set([config.tokens.SOL, ...raw.tokens.map(t => t.mint)])];
-  const missing = mints.filter(m => !prices.has(m) || Date.now() - prices.get(m).at > 30_000);
+  const missing = mints.filter(m => force || !prices.has(m) || Date.now() - prices.get(m).at > 30_000);
   for (let i = 0; i < missing.length; i += 50) {
     try {
       const data = await fetchJson(`https://api.jup.ag/price/v3?ids=${missing.slice(i, i + 50).join(',')}`, {

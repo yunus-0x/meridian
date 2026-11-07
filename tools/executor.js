@@ -4,8 +4,10 @@ import { withWalletLock } from "../standalone/transactions.js";
 import { invalidateBalances } from "../standalone/balances.js";
 import { config, MIN_SAFE_BINS_BELOW } from "../config.js";
 import { addPoolNote } from "../pool-memory.js";
+import { getTrackedPositions } from "../state.js";
 import { log, logAction } from "../logger.js";
 import { notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
+import { getCachedChronosAnalysis } from "../standalone/chronos.js";
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 const MIN_VOLATILITY_TIMEFRAME = "30m";
 const TIMEFRAME_MINUTES = { "5m": 5, "30m": 30, "1h": 60, "2h": 120, "4h": 240, "12h": 720, "24h": 1440 };
@@ -108,7 +110,13 @@ async function validateDeployPoolThresholds(args) {
     }
   }
 
-  const volatility = poolDetailVolatility(volatilityDetail);
+  let volatility = poolDetailVolatility(volatilityDetail);
+  if ((volatility == null || volatility <= 0) && volatilityTimeframe !== "1h") {
+    try {
+      const fallback1h = await fetchFreshPoolDetail(args.pool_address, "1h");
+      volatility = poolDetailVolatility(fallback1h);
+    } catch { /* ignore fallback error */ }
+  }
   if (volatility == null || volatility <= 0) {
     return {
       pass: false,
@@ -170,7 +178,40 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * fills). Treats both a throw AND result.success===false / missing tx as failure.
  * Returns { swapped, result, token } — swapped=false if nothing to do or all attempts failed.
  */
-async function swapBaseToSolWithRetry(baseMint, label) {
+async function swapBaseToSolWithRetry(baseMint, label, poolAddress = null) {
+  // Touchpoint 4: Smart Post-Claim & Post-Close Micro-Bounce Swap
+  // Only hold when no other open positions are competing for the wallet lock / exit poller
+  if (poolAddress && process.env.DRY_RUN !== "true" && getTrackedPositions(true).length === 0) {
+    const cachedChronos = getCachedChronosAnalysis(poolAddress);
+    if (cachedChronos?.tactical_signals?.micro_oversold_bounce) {
+      try {
+        const initBal = await getWalletBalances({ force: true }).catch(() => null);
+        const initTok = initBal?.tokens?.find((t) => t.mint === baseMint);
+        const initUsd = Number(initTok?.usd ?? 0);
+        if (initTok && initTok.balance > 0 && initUsd >= 0.5) {
+          log("executor", `Chronos micro-bounce active for ${baseMint.slice(0, 8)} (${label}): holding up to 24s for +1.2% bounce...`);
+          for (let tick = 1; tick <= 3; tick++) {
+            await sleep(8_000);
+            const curBal = await getWalletBalances({ force: true }).catch(() => null);
+            const curTok = curBal?.tokens?.find((t) => t.mint === baseMint);
+            const curUsd = Number(curTok?.usd ?? 0);
+            if (!curTok || curUsd <= 0) break;
+            const movePct = ((curUsd - initUsd) / initUsd) * 100;
+            if (movePct >= 1.2) {
+              log("executor", `Chronos micro-bounce captured +${movePct.toFixed(2)}% on ${baseMint.slice(0, 8)} after ${tick * 8}s — swapping now`);
+              break;
+            }
+            if (movePct <= -1.5) {
+              log("executor_warn", `Chronos micro-bounce stop hit (${movePct.toFixed(2)}%) on ${baseMint.slice(0, 8)} — swapping immediately`);
+              break;
+            }
+          }
+        }
+      } catch {
+        // Proceed immediately to swap if bounce polling fails
+      }
+    }
+  }
   const attempts = Math.max(1, Number(config.management.autoSwapRetryAttempts ?? 3));
   const delayMs = Math.max(0, Number(config.management.autoSwapRetryDelayMs ?? 3000));
   let lastErr = null;
@@ -262,7 +303,7 @@ async function executeToolUnlocked(name, args) {
         }
         // Auto-swap base token back to SOL unless user said to hold (retried).
         if (!args.skip_swap && result.base_mint) {
-          const { swapped, result: swapResult } = await swapBaseToSolWithRetry(result.base_mint, "after close");
+          const { swapped, result: swapResult } = await swapBaseToSolWithRetry(result.base_mint, "after close", result.pool || args.pool_address);
           if (swapped) {
             // Tell the model the swap already happened so it doesn't call swap_token again
             result.auto_swapped = true;
@@ -271,7 +312,7 @@ async function executeToolUnlocked(name, args) {
           }
         }
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
-        await swapBaseToSolWithRetry(result.base_mint, "after claim");
+        await swapBaseToSolWithRetry(result.base_mint, "after claim", result.pool || args.pool_address);
       }
     }
 
@@ -320,16 +361,10 @@ async function runSafetyChecks(name, args) {
 
       const deployAmountY = Number(args.amount_y ?? args.amount_sol ?? 0);
       const deployAmountX = Number(args.amount_x ?? 0);
-      if (Number.isFinite(deployAmountX) && deployAmountX > 0) {
-        return {
-          pass: false,
-          reason: "This agent only supports single-side SOL deploys. Use amount_y/amount_sol and keep amount_x=0.",
-        };
-      }
       const requestedBinsBelow = Number(args.bins_below ?? config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow);
       const requestedBinsAbove = Number(args.bins_above ?? 0);
       const minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW));
-      const isSingleSidedSol = deployAmountY > 0 && deployAmountX <= 0;
+      const isSingleSidedSol = deployAmountY > 0 && deployAmountX <= 0 && requestedBinsAbove <= 0;
       const requestedTotalBins = requestedBinsBelow + requestedBinsAbove;
       const requestedVolatility = args.volatility == null ? null : Number(args.volatility);
       if (args.volatility != null && (!Number.isFinite(requestedVolatility) || requestedVolatility <= 0)) {
@@ -418,7 +453,7 @@ async function runSafetyChecks(name, args) {
         };
       }
 
-      const minDeploy = Math.max(0.1, config.management.deployAmountSol);
+      const minDeploy = Math.max(0.1, parseFloat((config.management.deployAmountSol * 0.75).toFixed(2)));
       if (amountY < minDeploy) {
         return {
           pass: false,

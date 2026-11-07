@@ -26,6 +26,7 @@ const strategyDefaultBinsBelow = Math.max(
   strategyMinBinsBelow,
   Math.min(strategyMaxBinsBelow, Math.round(configuredDefaultBinsBelow)),
 );
+const strategyDefaultBinsAbove = Math.max(0, Math.round(numericConfig(u.defaultBinsAbove) ?? 0));
 
 // Apply wallet/RPC from user-config if not already in env
 if (u.rpcUrl)    process.env.RPC_URL            ||= u.rpcUrl;
@@ -101,6 +102,8 @@ export const config = {
     autoSwapRetryDelayMs:  u.autoSwapRetryDelayMs  ?? 3000, // delay between auto-swap retries
     outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 10,
     outOfRangeWaitMinutes: u.outOfRangeWaitMinutes ?? 30,
+    outOfRangeAboveWaitMinutes: u.outOfRangeAboveWaitMinutes ?? u.outOfRangeWaitMinutes ?? 60,
+    outOfRangeBelowWaitMinutes: u.outOfRangeBelowWaitMinutes ?? 240,
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
     oorCooldownHours:       u.oorCooldownHours       ?? 12,
     repeatDeployCooldownEnabled: u.repeatDeployCooldownEnabled ?? true,
@@ -131,6 +134,7 @@ export const config = {
     minBinsBelow: strategyMinBinsBelow,
     maxBinsBelow: strategyMaxBinsBelow,
     defaultBinsBelow: strategyDefaultBinsBelow,
+    defaultBinsAbove: strategyDefaultBinsAbove,
   },
 
   // ─── Scheduling ─────────────────────────
@@ -164,12 +168,60 @@ export const config = {
   jupiter: {
     // Internal Jupiter Ultra settings; override by env only, do not expose in user-config.
     apiKey: process.env.JUPITER_API_KEY ?? "",
-    referralAccount:
-      process.env.JUPITER_REFERRAL_ACCOUNT ??
-      "9MzhDUnq3KxecyPzvhguQMMPbooXQ3VAoCMPDnoijwey",
+    referralAccount: process.env.JUPITER_REFERRAL_ACCOUNT ?? "",
     referralFeeBps: Number(
-      process.env.JUPITER_REFERRAL_FEE_BPS ?? 50,
+      process.env.JUPITER_REFERRAL_FEE_BPS ?? 0,
     ),
+  },
+
+  chronos: {
+    enabled: u.chronosEnabled !== false,
+    endpointUrl: nonEmptyString(
+      process.env.CHRONOS_API_URL,
+      u.chronosEndpointUrl,
+      "https://8090-agq3hizmqo2kzfz3edtfttizua.instabox.tech",
+    ),
+    instaboxMachineId: nonEmptyString(
+      process.env.INSTABOX_MACHINE_ID,
+      u.instaboxMachineId,
+      "m_agq3hizmqo2kzfz3edtfttizua",
+    ),
+    instaboxApiKey: nonEmptyString(process.env.INSTABOX_API_KEY, u.instaboxApiKey),
+    instaboxSshToken: nonEmptyString(
+      process.env.INSTABOX_SSH_TOKEN,
+      u.instaboxSshToken,
+      "ibssh_45rzz2u3jx6kbz2feummidjqky",
+    ),
+    timeoutMs: Number(u.chronosTimeoutMs ?? 8000),
+    nodes: Array.isArray(u.chronosNodes) && u.chronosNodes.length > 0
+      ? u.chronosNodes
+      : [
+          {
+            name: "meridian-chronos",
+            machineId: "m_agq3hizmqo2kzfz3edtfttizua",
+            endpointUrl: "https://8090-agq3hizmqo2kzfz3edtfttizua.instabox.tech",
+          },
+          {
+            name: "coolify-cloud",
+            machineId: "m_agqu3gj6jnzpa3zeav4krldmvq",
+            endpointUrl: "https://8090-agqu3gj6jnzpa3zeav4krldmvq.instabox.tech",
+          },
+          {
+            name: "kev-server",
+            machineId: "m_agqvhqbopynhj2yvmrr6adqbfm",
+            endpointUrl: "https://8090-agqvhqbopynhj2yvmrr6adqbfm.instabox.tech",
+          },
+          {
+            name: "ci-runner",
+            machineId: "m_agqu2xvhzdofeofeiddtsavlrzb6m".replace("feofe", "fe"),
+            endpointUrl: "https://8090-agqu2xvhzdofeiddtsavlrzb6m.instabox.tech",
+          },
+          {
+            name: "hermes-cloud",
+            machineId: "m_agquh5zcw7xda4jdasnkusef3i",
+            endpointUrl: "https://8090-agquh5zcw7xda4jdasnkusef3i.instabox.tech",
+          },
+        ],
   },
 
 };
@@ -179,23 +231,21 @@ if (config.standalone.shadow) process.env.DRY_RUN = "true";
 
 /**
  * Compute the optimal deploy amount for a given wallet balance.
- * Scales position size with wallet growth (compounding).
+ * Scales position size with wallet growth (compounding) and optional Chronos conviction multiplier.
  *
- * Formula: clamp(deployable × positionSizePct, floor=deployAmountSol, ceil=maxDeployAmount)
- *
- * Examples (defaults: gasReserve=0.2, positionSizePct=0.35, floor=0.5):
- *   0.8 SOL wallet → 0.6 SOL deploy  (floor)
- *   2.0 SOL wallet → 0.63 SOL deploy
- *   3.0 SOL wallet → 0.98 SOL deploy
- *   4.0 SOL wallet → 1.33 SOL deploy
+ * Formula: clamp(deployable × positionSizePct × convictionMult, floor=deployAmountSol, ceil=min(maxDeployAmount, deployable))
  */
-export function computeDeployAmount(walletSol) {
+export function computeDeployAmount(walletSol, convictionMult = 1.0) {
   const reserve  = config.management.gasReserve      ?? 0.2;
   const pct      = config.management.positionSizePct ?? 0.35;
   const floor    = config.management.deployAmountSol;
   const ceil     = config.risk.maxDeployAmount;
+  const mult     = Number.isFinite(Number(convictionMult))
+    ? Math.max(0.75, Math.min(1.25, Number(convictionMult)))
+    : 1.0;
   const deployable = Math.max(0, walletSol - reserve);
-  const dynamic    = deployable * pct;
-  const result     = Math.min(ceil, Math.max(floor, dynamic));
-  return parseFloat(result.toFixed(2));
+  const dynamic    = deployable * pct * mult;
+  const raw        = Math.min(ceil, Math.max(floor * Math.min(1.0, mult), dynamic));
+  const safeMax    = deployable > 0 ? Math.min(raw, deployable) : raw;
+  return parseFloat(Math.max(floor * 0.75, safeMax).toFixed(2));
 }
