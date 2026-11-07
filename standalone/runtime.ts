@@ -1,0 +1,675 @@
+// Standalone orchestrator: monitor → convergence signal → focused screening →
+// revalidated deploy → deterministic exits. No Meridian server, no LLM authority.
+//
+// Entry and exit paths are independent: exits keep running while a signal is
+// being screened, and wallet mutations are serialized by the wallet lock
+// (close_position > other writes > deploy_position) in standalone/transactions.ts.
+// 100% Strict TypeScript, Oracle Engineering Standards: Zero any, Zero unsafe assertions.
+
+import fs from "node:fs";
+import { z } from "zod";
+import { config, computeDeployAmount, MIN_SAFE_BINS_BELOW, scaleBinsForBinStep } from "../config.js";
+import { log } from "../logger.js";
+import { repoPath } from "../repo-root.js";
+import { sendMessage as tgSend, isEnabled as tgEnabled } from "../telegram.js";
+import { MonitorStore, finishSignal } from "./store.js";
+import { WalletMonitor } from "./monitor.js";
+import { screenMint, poolDetail, type ScreenMintResult } from "./screening.js";
+import { exposureStillPresent } from "./events.js";
+import { getMyPositions } from "../tools/dlmm.js";
+import { executeTool } from "../tools/executor.js";
+import { getWalletBalances } from "../tools/wallet.js";
+import {
+  getTrackedPosition,
+  getTrackedPositions,
+  confirmPeak,
+  updatePnlAndCheckExits,
+  registerExitSignal,
+  syncOpenPositions,
+} from "../state.js";
+import { recordPositionSnapshot } from "../pool-memory.js";
+import { getDeterministicCloseRule, computeBinsBelow } from "../exit-rules.js";
+import { startAdmin } from "./telegram-admin.js";
+import {
+  analyzePoolWithChronos,
+  getCachedChronosAnalysis,
+  getChronosCacheAgeMs,
+  refreshChronosInBackground,
+  startChronosKeepalive,
+  stopChronosKeepalive,
+} from "./chronos.js";
+import { MonitorSignalSchema, type MonitorSignal, type MonitorAttempt } from "../src/schemas/storage.js";
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+export const DeployExecutionResultSchema = z.object({
+  success: z.boolean().optional(),
+  dry_run: z.boolean().optional(),
+  position: z.string().nullable().optional(),
+  txs: z.array(z.string()).optional(),
+  amountSol: z.number().optional(),
+  error: z.string().optional(),
+  reason: z.string().optional(),
+  blocked: z.boolean().optional(),
+  note: z.string().optional(),
+}).passthrough();
+export type DeployExecutionResult = z.infer<typeof DeployExecutionResultSchema>;
+
+interface RuntimeTimers {
+  pnl?: NodeJS.Timeout;
+  heartbeat?: NodeJS.Timeout;
+  manage?: NodeJS.Timeout;
+  [key: string]: NodeJS.Timeout | undefined;
+}
+
+let store: MonitorStore | null = null;
+let monitor: WalletMonitor | null = null;
+let lockPath: string | null = null;
+let stopAdmin: (() => void) | null = null;
+let shuttingDown = false;
+let manageBusy = false;
+let pollBusy = false;
+let pursuing = false;
+const timers: RuntimeTimers = {};
+const signalQueue: MonitorSignal[] = [];
+
+async function notify(text: string): Promise<void> {
+  try {
+    if (tgEnabled()) await tgSend(text);
+  } catch {
+    /* notifications are best-effort */
+  }
+}
+
+// ─── Signal pursuit ──────────────────────────────────────────────────────────
+
+function onSignal(rawSignal: unknown): void {
+  const parsed = MonitorSignalSchema.safeParse(rawSignal);
+  if (!parsed.success) return;
+  signalQueue.push(parsed.data);
+  void drainSignals();
+}
+
+async function drainSignals(): Promise<void> {
+  if (pursuing) return;
+  pursuing = true;
+  try {
+    while (signalQueue.length && !shuttingDown) {
+      const signal = signalQueue.shift();
+      if (!signal) break;
+      try {
+        await pursueSignal(signal);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (store) finishSignal(store, signal, `error: ${msg}`, config.standalone);
+        log("signal_error", `Signal ${signal.mint.slice(0, 8)} aborted: ${msg}`);
+      }
+    }
+  } finally {
+    pursuing = false;
+  }
+}
+
+// Screen and enter within the signal deadline. Terminal outcomes finish the
+// signal; temporary failures retry every retrySec until the deadline expires.
+async function pursueSignal(signal: MonitorSignal): Promise<void> {
+  const wallets = signal.events.map((e) => `${e.wallet.slice(0, 6)}(◎${e.depositSol.toFixed(1)})`).join(", ");
+  log(
+    "signal",
+    `Convergence on ${signal.mint.slice(0, 8)}: ${signal.events.length} wallets [${wallets}] — screening with ${
+      config.standalone.screeningDeadlineSec
+    }s deadline`
+  );
+  let lastReason = "no attempt";
+  while (!shuttingDown && !signal.done && Date.now() < signal.deadline) {
+    const reason = await attemptEntry(signal);
+    if (reason == null) return;
+    lastReason = reason;
+    const wait = Math.min(config.standalone.retrySec * 1000, signal.deadline - Date.now());
+    if (wait > 0) await sleep(wait);
+  }
+  if (!signal.done && store) {
+    finishSignal(store, signal, lastReason, config.standalone);
+    log("signal", `Signal ${signal.mint.slice(0, 8)} expired: ${lastReason}`);
+  }
+}
+
+// One entry attempt. Returns null when the signal is finished (entered,
+// terminal rejection, or fatal condition), or a reason string to retry.
+async function attemptEntry(signal: MonitorSignal): Promise<string | null> {
+  if (!store) return "store uninitialized";
+  const mint = signal.mint;
+  const attempt = store.data.attempts[mint];
+  const attemptCooldownMs = (config.standalone.cooldownSec ?? 300) * 1000;
+  // Block concurrent mid-submit or immediate duplicate signal within signal cooldown;
+  // longer-term repeat-entry limits are enforced by pool-memory (repeatDeployCooldownTriggerCount).
+  if (
+    attempt &&
+    (attempt.status === "submitting" ||
+      (["entered", "proposed"].includes(attempt.status) && Date.now() - (attempt.at ?? 0) < attemptCooldownMs))
+  ) {
+    finishSignal(store, signal, `mint already attempted (${attempt.status})`, config.standalone);
+    return null;
+  }
+  if (attempt?.status === "failed" && (attempt.failures ?? 0) >= 2) {
+    finishSignal(store, signal, "deploy failed repeatedly", config.standalone);
+    return null;
+  }
+
+  // A failed position read is unavailable data, never "no positions".
+  const positions = await getMyPositions({ force: true }).catch(() => null);
+  if (!positions || positions.error || !Array.isArray(positions.positions)) return "position read unavailable";
+  if (positions.positions.length >= config.risk.maxPositions) {
+    finishSignal(store, signal, "portfolio full", config.standalone);
+    return null;
+  }
+
+  // Focused screening: mint and eligible pools only.
+  let screened: ScreenMintResult;
+  try {
+    screened = await screenMint(mint);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return `screening error: ${msg}`;
+  }
+  if (!screened.pass) {
+    if (screened.terminal) {
+      finishSignal(store, signal, `blocked: ${screened.reason}`, config.standalone);
+      return null;
+    }
+    return screened.reason;
+  }
+
+  const gate = await finalRecheck(signal, screened);
+  if (gate) return gate;
+
+  const balances = await getWalletBalances({ force: true, nativeOnly: true });
+  if ("error" in balances || balances.sol == null || !Number.isFinite(balances.sol)) return "balance read unavailable";
+  if (balances.sol < config.management.minSolToOpen + config.management.gasReserve) {
+    finishSignal(store, signal, "insufficient spendable SOL", config.standalone);
+    return null;
+  }
+
+  const pool = screened.pool;
+  const poolBinStep = Number(pool.dlmm_params?.bin_step ?? 100);
+  const effectiveMinBinsBelow = scaleBinsForBinStep(MIN_SAFE_BINS_BELOW, poolBinStep, 22);
+  const configuredBinsAbove = Number(config.strategy.defaultBinsAbove ?? 0);
+  const whaleBinsAbove = Math.max(0, ...signal.events.map((e) => Number(e.binsAbove || 0)));
+  let binsAbove =
+    configuredBinsAbove > 0
+      ? Math.min(configuredBinsAbove, whaleBinsAbove > 0 ? whaleBinsAbove : configuredBinsAbove)
+      : 0;
+  const rawBinsBelow = computeBinsBelow(pool.volatility, poolBinStep);
+  let binsBelow = Math.max(effectiveMinBinsBelow, Math.min(rawBinsBelow, 69 - binsAbove));
+  let selectedStrategy = config.strategy.strategy;
+
+  // Chronos AI Pre-Deploy Gate & Dynamic Bin/Strategy Calibration
+  const chronos = await analyzePoolWithChronos(pool.pool_address, {
+    binStep: poolBinStep,
+    activePrice: pool.pool_price,
+    defaultBinsAbove: binsAbove,
+    defaultBinsBelow: binsBelow,
+    minBinsBelow: MIN_SAFE_BINS_BELOW,
+  }).catch(() => null);
+
+  let convictionMult = 1.0;
+  let xRatioMult = 0.65;
+  if (chronos) {
+    if (chronos.gate?.action === "DEFER") {
+      log("chronos_gate", `Deferred ${mint.slice(0, 8)} (${pool.pool_address.slice(0, 8)}): ${chronos.gate.reason}`);
+      return `chronos gate: ${chronos.gate.reason}`;
+    }
+    if (configuredBinsAbove > 0 && (chronos.recommended_bins?.bins_above ?? 0) > 0) {
+      binsAbove = Math.min(15, chronos.recommended_bins!.bins_above);
+    }
+    if ((chronos.recommended_bins?.bins_below ?? 0) > 0) {
+      binsBelow = Math.max(effectiveMinBinsBelow, Math.min(chronos.recommended_bins!.bins_below, 69 - binsAbove));
+    }
+    if (chronos.tactical_signals?.recommended_strategy) {
+      selectedStrategy = chronos.tactical_signals.recommended_strategy;
+    }
+    if (Number.isFinite(Number(chronos.tactical_signals?.conviction_mult))) {
+      convictionMult = Number(chronos.tactical_signals.conviction_mult);
+    }
+    if (Number.isFinite(Number(chronos.tactical_signals?.x_ratio_mult))) {
+      xRatioMult = Number(chronos.tactical_signals.x_ratio_mult);
+    }
+    const s = chronos.summary ?? {};
+    log(
+      "chronos",
+      `Pool ${pool.pool_address.slice(0, 8)} [${chronos.engine}]: P10=${s.p10_pct}% P50=${s.p50_pct}% P90=${s.p90_pct}% 15mP50=${
+        s.macro_15m_p50_pct
+      }% POC=${s.price_vs_poc_pct}% → strategy=${selectedStrategy} bins=${binsBelow}↓/${binsAbove}↑ xMult=${xRatioMult} convMult=${convictionMult} (${
+        chronos.latency_ms
+      }ms)`
+    );
+  }
+  const amountY = computeDeployAmount(balances.sol, convictionMult);
+  // Checkpoint before building anything: a crash mid-sequence leaves a
+  // recovery pointer instead of a silent duplicate-entry risk.
+  const newAttempt: MonitorAttempt = {
+    at: Date.now(),
+    mint,
+    pool: pool.pool_address,
+    wallets: signal.events.map((e) => e.wallet),
+    status: "submitting",
+    failures: attempt?.failures ?? 0,
+    position: null,
+    txs: [],
+  };
+  store.data.attempts[mint] = newAttempt;
+  store.save();
+
+  let submitted = 0;
+  const rawResult: unknown = await executeTool("deploy_position", {
+    pool_address: pool.pool_address,
+    base_mint: mint,
+    pool_name: pool.name,
+    strategy: selectedStrategy,
+    bin_step: pool.dlmm_params?.bin_step,
+    volatility: pool.volatility,
+    fee_tvl_ratio: pool.fee_active_tvl_ratio,
+    organic_score: screened.token?.organicScore,
+    amount_y: amountY,
+    bins_below: binsBelow,
+    bins_above: binsAbove,
+    x_ratio_mult: xRatioMult,
+    before_submit: async (stage = "lp", spentSol = 0) => {
+      // Always recheck before the pre-deploy swap AND before the first LP creation tx.
+      // Subsequent chunks of a multi-tx LP creation skip recheck so a half-built position completes.
+      if (stage !== "swap" && submitted++ > 0) return;
+      const fresh = await finalRecheck(signal, screened as ScreenMintResult & { pass: true }, spentSol);
+      if (fresh) throw new Error(`Pre-submit recheck failed: ${fresh}`);
+    },
+    on_prepared: (position: string) => {
+      const rec = store?.data.attempts[mint];
+      if (rec) {
+        rec.position = position;
+        store?.save();
+      }
+    },
+  }).catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) }));
+
+  const parseResult = DeployExecutionResultSchema.safeParse(rawResult);
+  const result: DeployExecutionResult = parseResult.success
+    ? parseResult.data
+    : { error: "Unparseable deploy result" };
+
+  const record = store.data.attempts[mint] ?? newAttempt;
+  if (Array.isArray(result.txs) && result.txs.length > 0) {
+    record.txs = result.txs;
+  }
+  const ok = result && result.success !== false && !result.error && !result.blocked;
+  if (ok) {
+    record.status = result.dry_run ? "proposed" : "entered";
+    record.position = result.position ?? record.position;
+    record.txs = result.txs ?? [];
+    record.amountSol = amountY;
+    store.save();
+    finishSignal(
+      store,
+      signal,
+      record.status === "proposed" ? "shadow proposal recorded" : "entered",
+      config.standalone
+    );
+    const label = result.dry_run ? "[SHADOW] Would deploy" : "Deployed";
+    log(
+      "entry",
+      `${label} ${amountY} SOL → pool ${pool.pool_address.slice(0, 8)} mint ${mint.slice(0, 8)} (${binsBelow} bins below, ${
+        signal.events.length
+      }-wallet convergence)`
+    );
+    void notify(
+      `${result.dry_run ? "🕯️ Shadow proposal" : "✅ Entry"}: ${amountY} SOL → ${pool.pool_address.slice(0, 8)} (mint ${mint.slice(
+        0,
+        8
+      )}, ${signal.events.length} wallets)`
+    );
+    return null;
+  }
+
+  record.status = "failed";
+  record.failures = (record.failures ?? 0) + 1;
+  record.error = result.error || result.reason || "unknown";
+  if (Array.isArray(record.txs) && record.txs.length > 0) {
+    record.note = "transaction submitted before failure — outcome uncertain";
+  }
+  store.save();
+  return `deploy failed (${record.error})`;
+}
+
+// Immediate pre-entry conditions: triggering wallets still hold
+// exposure, the market hasn't run away since screening, and spendable funds
+// cover the entry. Returns null if everything holds, else a reason.
+async function finalRecheck(
+  signal: MonitorSignal,
+  screened: ScreenMintResult & { pass: true },
+  spentSol = 0
+): Promise<string | null> {
+  let present = 0;
+  for (const e of signal.events) {
+    try {
+      if (await exposureStillPresent(e)) present++;
+    } catch {
+      /* unreadable position = not confirmed */
+    }
+  }
+  if (present < config.standalone.walletThreshold) {
+    return `wallet exposure gone (${present}/${signal.events.length} remain)`;
+  }
+  try {
+    const fresh = await poolDetail(screened.pool.pool_address);
+    const base = Number(screened.pool.pool_price);
+    const now = Number(fresh.pool_price);
+    if (!(base > 0) || !(now > 0)) return "price unavailable for move check";
+    const movePct = (Math.abs(now - base) / base) * 100;
+    const maxMovePct =
+      spentSol > 0 && now >= base ? config.standalone.maxPriceMovePct * 2 : config.standalone.maxPriceMovePct;
+    if (movePct > maxMovePct) return `price moved ${movePct.toFixed(1)}% since screening`;
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return `fresh pool read failed (${msg})`;
+  }
+  const balances = await getWalletBalances({ force: true, nativeOnly: true });
+  if ("error" in balances || balances.sol == null || !Number.isFinite(balances.sol)) return "balance read unavailable";
+  const priorSwapSol = Number.isFinite(Number(spentSol)) && Number(spentSol) > 0 ? Number(spentSol) : 0;
+  if (balances.sol + priorSwapSol < config.management.minSolToOpen + config.management.gasReserve) {
+    return "insufficient spendable SOL";
+  }
+  return null;
+}
+
+// ─── Exits (deterministic, no LLM) ──────────────────────────────────────────
+
+export interface ManageOnceOptions {
+  confirmTicksOverride?: number;
+}
+
+// One management pass: trailing/rule exits and fee claims. Never triggers
+// screening — an empty portfolio just waits for the next convergence signal.
+export async function manageOnce({ confirmTicksOverride = 1 }: ManageOnceOptions = {}): Promise<string | null> {
+  if (manageBusy || pollBusy || shuttingDown) return null;
+  manageBusy = true;
+  try {
+    const live = await getMyPositions({ force: true }).catch(() => null);
+    if (!live || live.error || !Array.isArray(live.positions)) {
+      log("manage_warn", "Position read unavailable — holding cycle");
+      return null;
+    }
+    syncOpenPositions(live.positions.map((p) => p.position));
+    if (live.positions.length === 0) return "No open positions";
+    const confirmTicks = Math.max(1, Number(config.pnl.confirmTicks ?? 2));
+    const exitConfirmTicks = Math.max(1, Number(confirmTicksOverride ?? 1));
+    for (const p of live.positions) {
+      recordPositionSnapshot(p.pool, p);
+      const tracked = getTrackedPosition(p.position);
+      // Refresh Chronos tactical context for open position during management pass
+      const chronos = await analyzePoolWithChronos(p.pool, {
+        binStep: tracked?.bin_step ?? 100,
+      }).catch(() => getCachedChronosAnalysis(p.pool));
+      const chronosCtx = chronos
+        ? { ...(chronos.tactical_signals ?? {}), oor_below_outlook: chronos.oor_below_outlook }
+        : null;
+      confirmPeak(p.position, p.pnl_pct, confirmTicks);
+      const exit = updatePnlAndCheckExits(p.position, p, config.management, chronosCtx);
+      const closeRule = exit
+        ? { action: "CLOSE", rule: "exit", reason: exit.reason }
+        : getDeterministicCloseRule(p, config.management, chronosCtx);
+      const exitSignalName = exit ? (exit.action ?? "EXIT") : closeRule ? `RULE_${closeRule.rule}` : null;
+      const { fire: exitConfirmed } = registerExitSignal(p.position, exitSignalName, exitConfirmTicks);
+      let action: { tool: string; args: Record<string, unknown>; label: string } | null = null;
+      const claimableFeeVal = config.management.solMode
+        ? p.unclaimed_fees_usd ?? 0
+        : p.unclaimed_fees_true_usd ?? p.unclaimed_fees_usd ?? 0;
+      const claimMult = Number.isFinite(Number(chronosCtx?.claim_threshold_mult))
+        ? Number(chronosCtx?.claim_threshold_mult)
+        : 1.0;
+      const effectiveMinClaim = (config.management.minClaimAmount ?? 1.0) * claimMult;
+      if (closeRule?.action === "CLOSE" && exitConfirmed) {
+        action = {
+          tool: "close_position",
+          args: { position_address: p.position, reason: closeRule.reason },
+          label: `close (${closeRule.reason})`,
+        };
+      } else if (claimableFeeVal >= effectiveMinClaim) {
+        action = { tool: "claim_fees", args: { position_address: p.position }, label: "claim fees" };
+      }
+      if (!action) continue;
+      const rawRes: unknown = await executeTool(action.tool, action.args).catch((e: unknown) => ({
+        error: e instanceof Error ? e.message : String(e),
+      }));
+      const res = rawRes && typeof rawRes === "object" ? (rawRes as Record<string, unknown>) : {};
+      const ok = res.success !== false && !res.error && !res.blocked;
+      log(
+        "manage",
+        `${p.pair ?? p.position.slice(0, 8)}: ${action.label} ${
+          ok ? "done" : `FAILED — ${String(res.error || res.reason || "unknown")}`
+        }`
+      );
+    }
+    return null;
+  } finally {
+    manageBusy = false;
+  }
+}
+
+// Fast exit poller (RPC + Meteora deposits, no LLM). An exit fires only after
+// `confirmTicks` consecutive confirming polls; confirmed exits close directly.
+function startPnlPoller(): void {
+  const pollMs = Math.max(1, Number(config.pnl.pollIntervalSec ?? 3)) * 1000;
+  const confirmTicks = Math.max(1, Number(config.pnl.confirmTicks ?? 2));
+  timers.pnl = setInterval(async () => {
+    if (manageBusy || pollBusy || shuttingDown) return;
+    if (getTrackedPositions(true).length === 0) return;
+    pollBusy = true;
+    try {
+      const live = await getMyPositions({ force: true, silent: true }).catch(() => null);
+      if (!live?.positions?.length) return;
+      for (const p of live.positions) {
+        const tracked = getTrackedPosition(p.position);
+        const lowerBin = p.lower_bin;
+        const upperBin = p.upper_bin;
+        const activeBin = p.active_bin;
+        const span =
+          upperBin != null && lowerBin != null && upperBin > lowerBin ? upperBin - lowerBin : 0;
+        const edgeDist =
+          span > 0 && activeBin != null && lowerBin != null && upperBin != null
+            ? Math.min(Math.abs(activeBin - lowerBin), Math.abs(upperBin - activeBin))
+            : span;
+        const isEdgeOfRange = span > 0 && edgeDist / span <= 0.15;
+        const isCriticalZone = Boolean(
+          !p.in_range || isEdgeOfRange || (p.pnl_pct != null && (p.pnl_pct >= 1.5 || p.pnl_pct <= -8.0))
+        );
+        const cacheAgeMs = getChronosCacheAgeMs(p.pool);
+        if (cacheAgeMs > (isCriticalZone ? 40_000 : 90_000)) {
+          refreshChronosInBackground(p.pool, { binStep: tracked?.bin_step ?? 100 });
+        }
+        const cachedChronos = getCachedChronosAnalysis(p.pool);
+        const chronosCtx = cachedChronos
+          ? { ...(cachedChronos.tactical_signals ?? {}), oor_below_outlook: cachedChronos.oor_below_outlook }
+          : null;
+        confirmPeak(p.position, p.pnl_pct, confirmTicks);
+        const exit = updatePnlAndCheckExits(p.position, p, config.management, chronosCtx);
+        const closeRule = exit ? null : getDeterministicCloseRule(p, config.management, chronosCtx);
+        let signal: string | null = null;
+        let reason: string | null = null;
+        if (exit) {
+          signal = exit.action ?? "EXIT";
+          reason = exit.reason;
+        } else if (closeRule) {
+          signal = `RULE_${closeRule.rule}`;
+          reason = closeRule.reason;
+        }
+        const { fire } = registerExitSignal(p.position, signal, confirmTicks);
+        if (!signal || !fire) continue;
+        log("poll", `Exit confirmed (${confirmTicks} ticks): ${p.pair ?? p.position.slice(0, 8)} — ${reason} — closing`);
+        manageBusy = true;
+        try {
+          const rawRes: unknown = await executeTool("close_position", {
+            position_address: p.position,
+            reason,
+          }).catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) }));
+          const res = rawRes && typeof rawRes === "object" ? (rawRes as Record<string, unknown>) : {};
+          const ok = res.success !== false && !res.error && !res.blocked;
+          log(
+            "poll",
+            `${p.pair ?? p.position.slice(0, 8)}: ${ok ? "closed" : `close FAILED — ${String(res.error || res.reason || "unknown")}`}`
+          );
+        } finally {
+          manageBusy = false;
+        }
+        break;
+      }
+    } finally {
+      pollBusy = false;
+    }
+  }, pollMs);
+}
+
+// ─── Lifecycle ───────────────────────────────────────────────────────────────
+
+function startHeartbeat(): void {
+  timers.heartbeat = setInterval(() => {
+    if (!store) return;
+    const stats = monitor?.stats ?? { transactions: 0, entries: 0, lastLagMs: null, errors: 0 };
+    const active = Object.values(store.data.signals).filter((s) => !s.done).length;
+    const pending = Object.keys(store.data.pending).length;
+    const lag = stats.lastLagMs != null ? `${(stats.lastLagMs / 1000).toFixed(1)}s` : "n/a";
+    log(
+      "heartbeat",
+      `mode=${config.standalone.shadow ? "shadow" : "live"} | monitor tx=${stats.transactions ?? 0} entries=${
+        stats.entries ?? 0
+      } lag=${lag} pending=${pending} errors=${stats.errors ?? 0} | signals active=${active} queued=${signalQueue.length}`
+    );
+    store.prune();
+    store.save();
+  }, 60_000);
+}
+
+function acquireLock(): void {
+  lockPath = repoPath("standalone.lock");
+  if (fs.existsSync(lockPath)) {
+    const pid = Number(fs.readFileSync(lockPath, "utf8").trim());
+    let alive = false;
+    try {
+      process.kill(pid, 0);
+      alive = true;
+    } catch {
+      /* not running or invalid pid */
+    }
+    if (alive && pid !== process.pid) {
+      throw new Error(`Another standalone instance is running (pid ${pid}) — refusing to start`);
+    }
+    log("runtime", `Removing stale standalone lock (pid ${pid || "unknown"} is not running)`);
+    fs.rmSync(lockPath);
+  }
+  fs.writeFileSync(lockPath, String(process.pid));
+}
+
+async function shutdown(signalName: string, exitFn: (code: number) => void = process.exit): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log("runtime", `${signalName} received — shutting down`);
+  stopChronosKeepalive();
+  for (const timer of Object.values(timers)) {
+    if (timer) clearInterval(timer);
+  }
+  try {
+    stopAdmin?.();
+  } catch {
+    /* best-effort */
+  }
+  try {
+    await monitor?.stop();
+  } catch {
+    /* best-effort */
+  }
+  // Best-effort stop notice; never let a slow Telegram call hold shutdown.
+  await Promise.race([notify(`🛑 Meridian stopped (${signalName})`), sleep(3000)]).catch(() => {});
+  try {
+    if (lockPath) fs.rmSync(lockPath, { force: true });
+  } catch {
+    /* best-effort */
+  }
+  exitFn(0);
+}
+
+export async function startStandalone(): Promise<void> {
+  if (!config.standalone.monitorRpcUrl) throw new Error("Standalone requires RPC_URL or MONITOR_RPC_URL");
+  acquireLock();
+
+  store = new MonitorStore();
+  for (const [mint, attempt] of Object.entries(store.data.attempts)) {
+    if (attempt && attempt.status === "submitting") {
+      log(
+        "runtime_warn",
+        `Mint ${mint.slice(0, 8)} was mid-submit at shutdown (position ${attempt.position ?? "unknown"}, txs ${
+          attempt.txs?.length ?? 0
+        }) — reconcile on-chain before re-enabling entries`
+      );
+    }
+  }
+
+  monitor = new WalletMonitor(store, config.standalone, { onSignal });
+  log(
+    "runtime",
+    `Standalone starting — ${
+      config.standalone.shadow ? "SHADOW MODE (proposals recorded, nothing submitted)" : "LIVE MODE"
+    } | threshold=${config.standalone.walletThreshold} wallets / ${config.standalone.windowSec}s window | screening deadline=${
+      config.standalone.screeningDeadlineSec
+    }s`
+  );
+
+  await monitor.start();
+  if (!monitor.healthy()) {
+    log(
+      "runtime_warn",
+      "Monitor baseline incomplete — wallets without a portfolio baseline produce no signals until reconciliation succeeds"
+    );
+  }
+  for (const s of Object.values(store.data.signals)) {
+    if (!s.done && s.deadline > Date.now()) onSignal(s);
+  }
+
+  // Entries come only from signals; exits run on their own cadences.
+  timers.manage = setInterval(() => {
+    void manageOnce();
+  }, Math.max(1, config.schedule.managementIntervalMin) * 60_000);
+  startPnlPoller();
+  startHeartbeat();
+  startChronosKeepalive();
+  void manageOnce();
+  stopAdmin = startAdmin({
+    monitor,
+    activeSignals: () => (store ? Object.values(store.data.signals).filter((s) => !s.done).length : 0),
+  });
+
+  const trackedWallets = Object.keys(store.data.wallets).length;
+  void notify(
+    `🤖 Meridian started — ${config.standalone.shadow ? "SHADOW (nothing submitted)" : "LIVE"}\n${trackedWallets} wallet(s) monitored | trigger: ${
+      config.standalone.walletThreshold
+    } within ${config.standalone.windowSec}s | exits: ${config.pnl.pollIntervalSec}s poller`
+  );
+
+  process.on("SIGINT", () => {
+    void shutdown("SIGINT");
+  });
+  process.on("SIGTERM", () => {
+    void shutdown("SIGTERM");
+  });
+  log(
+    "runtime",
+    `Running exits every ${config.schedule.managementIntervalMin}m + ${config.pnl.pollIntervalSec}s poller; waiting for wallet convergence`
+  );
+}
+
+export const _test = {
+  acquireLock,
+  shutdown,
+  drainSignals,
+  attemptEntry,
+  finalRecheck,
+  notify,
+  getTimers: () => timers,
+  getSignalQueue: () => signalQueue,
+};

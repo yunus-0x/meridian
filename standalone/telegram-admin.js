@@ -223,7 +223,11 @@ function validate(setting, raw) {
 
 function applySetting(setting, value) {
   if (setting.type === "env") {
-    writeEnvValue(setting.k.slice(4), value);
+    const envKey = setting.k.slice(4);
+    writeEnvValue(envKey, value);
+    process.env[envKey] = value;
+    if (envKey === "PNL_SOURCE") config.pnl.source = value;
+    if (envKey === "JUPITER_API_KEY") config.jupiter.apiKey = value;
     return setting.restart;
   }
   const existingCfg = readUserConfig();
@@ -269,8 +273,8 @@ function rootKeyboard() {
   ];
 }
 
-function rootText() {
-  return `<b>⚙️ Meridian admin</b>\n<i>${config.standalone.shadow ? "🌑 SHADOW — nothing is submitted" : "🔴 LIVE — real transactions"}</i>\nPick a section:`;
+function rootText(note = "") {
+  return `<b>⚙️ Meridian admin</b>\n<i>${config.standalone.shadow ? "🌑 SHADOW — nothing is submitted" : "🔴 LIVE — real transactions"}</i>\nPick a section:${note ? `\n\n${note}` : ""}`;
 }
 
 function editHint(setting) {
@@ -309,8 +313,8 @@ const restartRow = () => [{ text: "♻️ Restart now", callback_data: "m:restar
 
 // ─── Views ───────────────────────────────────────────────────────────────────
 
-async function viewRoot() {
-  await render(rootText(), rootKeyboard());
+async function viewRoot(note = "") {
+  await render(rootText(note), rootKeyboard());
 }
 
 async function viewSection(sectionId, note = "") {
@@ -522,8 +526,17 @@ async function handleText(text) {
       }
       if (p.kind === "pkimport") {
         const kp = parseSecretKey(text);
-        writeEnvValue("WALLET_PRIVATE_KEY", bs58.encode(kp.secretKey));
-        process.env.WALLET_PRIVATE_KEY = bs58.encode(kp.secretKey); // live immediately; .env survives restarts
+        const encodedSecret = bs58.encode(kp.secretKey);
+        writeEnvValue("WALLET_PRIVATE_KEY", encodedSecret);
+        process.env.WALLET_PRIVATE_KEY = encodedSecret; // live immediately; .env survives restarts
+        try {
+          const { resetWalletCache } = await import("../tools/wallet.js");
+          const { resetDlmmWalletCache } = await import("../tools/dlmm.js");
+          const { invalidateBalances } = await import("./balances.js");
+          resetWalletCache?.();
+          resetDlmmWalletCache?.();
+          invalidateBalances?.();
+        } catch { /* best-effort cache reset */ }
         return void await viewSection("key", `✅ Key imported — wallet <code>${kp.publicKey.toString()}</code>\nSigning is active now (survives restarts).`);
       }
       if (p.kind === "walletaddr") {
@@ -566,7 +579,7 @@ async function handleText(text) {
 const adminContext = { monitor: null, activeSignals: null };
 
 // Exposed for the menu-schema tests in test/cleanup.test.js.
-export const _test = { SECTIONS, byKey, editHint, validate, sectionMenu, fmtValue };
+export const _test = { SECTIONS, byKey, editHint, validate, sectionMenu, fmtValue, rootText };
 
 export function startAdmin({ monitor = null, activeSignals = null } = {}) {
   adminContext.monitor = monitor;

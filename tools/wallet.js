@@ -11,17 +11,34 @@ import { log } from "../logger.js";
 import { config } from "../config.js";
 
 let _connection = null;
+let _connectionUrl = null;
 let _wallet = null;
+let _walletSecret = null;
+
+export function resetWalletCache() {
+  _wallet = null;
+  _walletSecret = null;
+  _connection = null;
+  _connectionUrl = null;
+}
 
 function getConnection() {
-  if (!_connection) _connection = new Connection(process.env.RPC_URL, "confirmed");
+  const url = process.env.RPC_URL;
+  if (!_connection || _connectionUrl !== url) {
+    _connection = new Connection(url, "confirmed");
+    _connectionUrl = url;
+  }
   return _connection;
 }
 
 function getWallet() {
-  if (!_wallet) {
-    if (!process.env.WALLET_PRIVATE_KEY) throw new Error("WALLET_PRIVATE_KEY not set");
-    _wallet = Keypair.fromSecretKey(bs58.decode(process.env.WALLET_PRIVATE_KEY));
+  const raw = process.env.WALLET_PRIVATE_KEY;
+  if (!raw) throw new Error("WALLET_PRIVATE_KEY not set");
+  if (!_wallet || _walletSecret !== raw) {
+    const text = String(raw).trim();
+    const bytes = text.startsWith("[") ? Uint8Array.from(JSON.parse(text)) : bs58.decode(text);
+    _wallet = Keypair.fromSecretKey(bytes);
+    _walletSecret = raw;
   }
   return _wallet;
 }

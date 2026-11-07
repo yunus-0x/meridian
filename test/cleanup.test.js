@@ -1,3 +1,8 @@
+process.env.NODE_ENV = 'test';
+process.env.DISABLE_TELEGRAM = 'true';
+delete process.env.TELEGRAM_BOT_TOKEN;
+delete process.env.TELEGRAM_CHAT_ID;
+
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -13,8 +18,8 @@ function sourceFiles(dir = REPO_ROOT) {
   });
 }
 function run(args) {
-  const env = { ...process.env, DRY_RUN: 'true' };
-  delete env.LLM_API_KEY; delete env.OPENROUTER_API_KEY; delete env.TELEGRAM_BOT_TOKEN;
+  const env = { ...process.env, DRY_RUN: 'true', NODE_ENV: 'test', DISABLE_TELEGRAM: 'true' };
+  delete env.LLM_API_KEY; delete env.OPENROUTER_API_KEY; delete env.TELEGRAM_BOT_TOKEN; delete env.TELEGRAM_CHAT_ID;
   const result = spawnSync(process.execPath, args, { cwd: REPO_ROOT, env, encoding: 'utf8', timeout: 10_000 });
   assert.equal(result.error, undefined, result.error?.message);
   return result;

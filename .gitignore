@@ -47,6 +47,8 @@ discord-signals.json
 
 # Claude Code runtime lock
 .claude/scheduled_tasks.lock
+# Multi-agent teamwork artifacts
+.agents/
 
 # Standalone monitor state and process lock
 wallet-monitor-state.json

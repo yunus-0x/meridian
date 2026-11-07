@@ -31,7 +31,9 @@ function load() {
 }
 
 function save(data) {
-  fs.writeFileSync(LESSONS_FILE, JSON.stringify(data, null, 2));
+  const tmpFile = `${LESSONS_FILE}.tmp`;
+  fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2));
+  fs.renameSync(tmpFile, LESSONS_FILE);
 }
 
 function buildSignalSnapshot(perf) {
@@ -67,7 +69,9 @@ export async function recordPerformance(perf) {
   const pnl_usd = (perf.final_value_usd + perf.fees_earned_usd) - perf.initial_value_usd;
   const pnl_pct = perf.initial_value_usd > 0
     ? (pnl_usd / perf.initial_value_usd) * 100
-    : 0;
+    : Number.isFinite(perf.reported_pnl_pct)
+      ? perf.reported_pnl_pct
+      : 0;
   const range_efficiency = perf.minutes_held > 0
     ? (perf.minutes_in_range / perf.minutes_held) * 100
     : 0;
@@ -101,6 +105,11 @@ export async function recordPerformance(perf) {
   // Update pool-level memory
   if (perf.pool) {
     const { recordPoolDeploy } = await import("./pool-memory.js");
+    const feeEarnedPct = perf.initial_value_usd > 0
+      ? ((perf.fees_earned_usd || 0) / perf.initial_value_usd) * 100
+      : perf.amount_sol > 0 && perf.fees_earned_sol != null
+        ? ((perf.fees_earned_sol || 0) / perf.amount_sol) * 100
+        : null;
     recordPoolDeploy(perf.pool, {
       pool_name: perf.pool_name,
       base_mint: perf.base_mint,
@@ -112,7 +121,7 @@ export async function recordPerformance(perf) {
       minutes_held: perf.minutes_held,
       fees_earned_usd: perf.fees_earned_usd,
       fees_earned_sol: perf.fees_earned_sol,
-      fee_earned_pct: perf.initial_value_usd > 0 ? ((perf.fees_earned_usd || 0) / perf.initial_value_usd) * 100 : null,
+      fee_earned_pct: feeEarnedPct,
       close_reason: perf.close_reason,
       strategy: perf.strategy,
       volatility: perf.volatility,

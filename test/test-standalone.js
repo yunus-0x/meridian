@@ -3,6 +3,11 @@
  * Run: node test/test-standalone.js
  */
 
+process.env.NODE_ENV = "test";
+process.env.DISABLE_TELEGRAM = "true";
+delete process.env.TELEGRAM_BOT_TOKEN;
+delete process.env.TELEGRAM_CHAT_ID;
+
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

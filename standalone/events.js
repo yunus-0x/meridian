@@ -6,12 +6,20 @@ import { readRpc, fetchJson } from './rpc.js';
 export const DLMM_PROGRAM = 'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo';
 const EVENT_CPI = Buffer.from([228, 69, 165, 46, 81, 203, 154, 29]);
 let coder;
+let coderPromise;
 async function getCoder() {
-  if (!coder) {
-    const { createProgram } = await import('@meteora-ag/dlmm');
-    coder = await readRpc('monitor', c => createProgram(c).coder);
+  if (coder) return coder;
+  if (!coderPromise) {
+    coderPromise = (async () => {
+      const { createProgram } = await import('@meteora-ag/dlmm');
+      coder = await readRpc('monitor', c => createProgram(c).coder);
+      return coder;
+    })().catch(err => {
+      coderPromise = null;
+      throw err;
+    });
   }
-  return coder;
+  return coderPromise;
 }
 // Decode only Anchor event CPI instructions emitted by the verified DLMM program.
 // Never interpret arbitrary log strings or another program's payload as an LP entry.

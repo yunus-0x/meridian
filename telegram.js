@@ -30,11 +30,27 @@ function resolveChatId() {
   return resolved != null ? String(resolved) : null;
 }
 
+export function isTelegramSuppressed() {
+  return (
+    process.env.NODE_ENV === "test" ||
+    process.env.DISABLE_TELEGRAM === "true" ||
+    process.env.DISABLE_TELEGRAM === "1" ||
+    Boolean(process.env.VITEST) ||
+    Boolean(process.env.TSX_TEST) ||
+    (typeof process.env.npm_lifecycle_event === "string" && process.env.npm_lifecycle_event.startsWith("test")) ||
+    process.execArgv.includes("--test") ||
+    process.argv.includes("--test") ||
+    process.argv.some((arg) => typeof arg === "string" && (arg.includes("test/") || arg.includes(".test.")))
+  );
+}
+
 export function isEnabled() {
+  if (isTelegramSuppressed()) return false;
   return !!TOKEN;
 }
 
 async function postTelegram(method, body) {
+  if (isTelegramSuppressed()) return null;
   if (!TOKEN || !chatId) return null;
   try {
     const res = await fetch(`${BASE}/${method}`, {
@@ -59,18 +75,21 @@ async function postTelegram(method, body) {
 }
 
 export async function sendMessage(text) {
-  if (!TOKEN || !chatId) return;
+  if (isTelegramSuppressed()) return null;
+  if (!TOKEN || !chatId) return null;
   return postTelegram("sendMessage", { text: String(text).slice(0, 4096) });
 }
 
 async function sendHTML(html) {
-  if (!TOKEN || !chatId) return;
+  if (isTelegramSuppressed()) return null;
+  if (!TOKEN || !chatId) return null;
   return postTelegram("sendMessage", { text: String(html).slice(0, 4096), parse_mode: "HTML" });
 }
 
 // ─── Admin console transport: inline menus + authorized update polling ──────
 
 export async function sendMenu(text, keyboard) {
+  if (isTelegramSuppressed()) return null;
   if (!TOKEN || !chatId) return null;
   return postTelegram("sendMessage", {
     text: String(text).slice(0, 4096),
@@ -80,6 +99,7 @@ export async function sendMenu(text, keyboard) {
 }
 
 export async function editMenu(messageId, text, keyboard) {
+  if (isTelegramSuppressed()) return null;
   if (!TOKEN || !chatId || !messageId) return null;
   return postTelegram("editMessageText", {
     message_id: messageId,
@@ -90,6 +110,7 @@ export async function editMenu(messageId, text, keyboard) {
 }
 
 export async function answerCallbackQuery(id, text = "") {
+  if (isTelegramSuppressed()) return null;
   if (!TOKEN || !id) return null;
   return postTelegram("answerCallbackQuery", { callback_query_id: id, ...(text ? { text: String(text).slice(0, 190) } : {}) });
 }
@@ -97,6 +118,7 @@ export async function answerCallbackQuery(id, text = "") {
 // Register the bot's command list so Telegram clients show current commands
 // instead of a stale cached set. Called on every startup by the admin console.
 export async function setBotCommands(commands) {
+  if (isTelegramSuppressed()) return null;
   if (!TOKEN || !Array.isArray(commands) || !commands.length) return null;
   return postTelegram("setMyCommands", { commands });
 }
@@ -108,6 +130,7 @@ export async function setBotCommands(commands) {
  * Returns a stop() function.
  */
 export function startAdminPolling(onUpdate) {
+  if (isTelegramSuppressed()) return () => {};
   const allowed = String(process.env.TELEGRAM_ALLOWED_USER_IDS || "")
     .split(",").map(s => s.trim()).filter(Boolean);
   if (!TOKEN || !allowed.length) {
@@ -160,6 +183,7 @@ export function startAdminPolling(onUpdate) {
 }
 
 export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee }) {
+  if (isTelegramSuppressed()) return;
   const priceStr = priceRange
     ? `Price range: ${priceRange.min < 0.0001 ? priceRange.min.toExponential(3) : priceRange.min.toFixed(6)} – ${priceRange.max < 0.0001 ? priceRange.max.toExponential(3) : priceRange.max.toFixed(6)}\n`
     : "";
@@ -181,6 +205,7 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
 }
 
 export async function notifyClose({ pair, pnlUsd, pnlPct, solMode }) {
+  if (isTelegramSuppressed()) return;
   const useSolMode = solMode != null ? Boolean(solMode) : Boolean(config.management?.solMode);
   const val = Number(pnlUsd ?? 0);
   const pct = Number(pnlPct ?? 0);
@@ -196,6 +221,7 @@ export async function notifyClose({ pair, pnlUsd, pnlPct, solMode }) {
 }
 
 export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx }) {
+  if (isTelegramSuppressed()) return;
   await sendHTML(
     `🔄 <b>Swapped</b> ${inputSymbol} → ${outputSymbol}\n` +
     `In: ${amountIn ?? "?"} | Out: ${amountOut ?? "?"}\n` +
