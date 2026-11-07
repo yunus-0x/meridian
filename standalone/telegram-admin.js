@@ -85,6 +85,7 @@ const SECTIONS = [
       { k: "minBinsBelow", path: ["strategy", "minBinsBelow"], type: "int", min: MIN_SAFE_BINS_BELOW, max: 200, unit: "bins" },
       { k: "maxBinsBelow", path: ["strategy", "maxBinsBelow"], type: "int", min: MIN_SAFE_BINS_BELOW, max: 200, unit: "bins" },
       { k: "defaultBinsBelow", path: ["strategy", "defaultBinsBelow"], type: "int", min: MIN_SAFE_BINS_BELOW, max: 200, unit: "bins" },
+      { k: "defaultBinsAbove", path: ["strategy", "defaultBinsAbove"], type: "int", min: 0, max: 60, unit: "bins" },
     ],
   },
   {
@@ -97,6 +98,8 @@ const SECTIONS = [
       { k: "trailingDropPct", path: ["management", "trailingDropPct"], type: "float", min: 0.1, max: 100, unit: "%" },
       { k: "outOfRangeBinsToClose", path: ["management", "outOfRangeBinsToClose"], type: "int", min: 0, max: 500 },
       { k: "outOfRangeWaitMinutes", path: ["management", "outOfRangeWaitMinutes"], type: "int", min: 0, max: 10_000, unit: "min" },
+      { k: "outOfRangeAboveWaitMinutes", path: ["management", "outOfRangeAboveWaitMinutes"], type: "int", min: 0, max: 10_000, unit: "min" },
+      { k: "outOfRangeBelowWaitMinutes", path: ["management", "outOfRangeBelowWaitMinutes"], type: "int", min: 0, max: 10_000, unit: "min" },
       { k: "minClaimAmount", path: ["management", "minClaimAmount"], type: "float", min: 0, max: 1000, unit: "$" },
       { k: "minFeePerTvl24h", path: ["management", "minFeePerTvl24h"], type: "float", min: 0, max: 1000, unit: "%" },
       { k: "oorCooldownTriggerCount", path: ["management", "oorCooldownTriggerCount"], type: "int", min: 1, max: 100 },

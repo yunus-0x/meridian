@@ -180,8 +180,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  */
 async function swapBaseToSolWithRetry(baseMint, label, poolAddress = null) {
   // Touchpoint 4: Smart Post-Claim & Post-Close Micro-Bounce Swap
-  // Only hold when no other open positions are competing for the wallet lock / exit poller
-  if (poolAddress && process.env.DRY_RUN !== "true" && getTrackedPositions(true).length === 0) {
+  // After close, open positions is 0; after claim, the claimed position itself is open (1).
+  const maxOpenForBounce = label === "after claim" ? 1 : 0;
+  if (poolAddress && process.env.DRY_RUN !== "true" && getTrackedPositions(true).length <= maxOpenForBounce) {
     const cachedChronos = getCachedChronosAnalysis(poolAddress);
     if (cachedChronos?.tactical_signals?.micro_oversold_bounce) {
       try {

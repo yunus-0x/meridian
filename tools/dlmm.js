@@ -356,17 +356,39 @@ export async function deployPosition({
   }
 
   const txHashes = [];
+  let preSwapTxHash = null;
+  let preSwapRaw = 0n;
   let swappedRawDeltaX = 0n;
   let swappedDeltaXUi = 0;
 
   const rollbackSwappedTokenX = async (reason) => {
-    if (swappedDeltaXUi <= 0) return;
-    try {
-      log("deploy_warn", `Rolling back pre-deploy swapped ${swappedDeltaXUi} ${baseMint.slice(0, 8)} -> SOL after deploy failure (${reason})`);
-      await swapToken({ input_mint: baseMint, output_mint: "SOL", amount: swappedDeltaXUi });
-    } catch (rollbackErr) {
-      log("deploy_error", `Rollback swap failed for ${baseMint.slice(0, 8)}: ${rollbackErr.message}`);
+    if (swappedRawDeltaX <= 0n && swappedDeltaXUi <= 0) return false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const freshBal = await getWalletBalances({ force: true }).catch(() => null);
+        const curTok = freshBal?.tokens?.find(t => t.mint === baseMint);
+        const curRaw = BigInt(curTok?.raw_balance ?? "0");
+        const tokDecimals = Number(curTok?.decimals ?? 9);
+        const rawToSell = curRaw > preSwapRaw
+          ? (curRaw - preSwapRaw < swappedRawDeltaX ? curRaw - preSwapRaw : swappedRawDeltaX)
+          : curRaw;
+        if (rawToSell <= 0n) return true;
+        // Floor to 6 decimal places in UI units so float conversion never exceeds raw balance
+        const exactUi = Number(rawToSell) / Math.pow(10, tokDecimals);
+        const safeUi = Math.floor(exactUi * 1e6) / 1e6;
+        const sellAmount = safeUi > 0 ? safeUi : exactUi;
+        log("deploy_warn", `Rolling back pre-deploy swapped ${sellAmount} ${baseMint.slice(0, 8)} -> SOL after deploy failure (${reason}, attempt ${attempt}/3)`);
+        const res = await swapToken({ input_mint: baseMint, output_mint: "SOL", amount: sellAmount });
+        if (res?.success && (res.tx || res.amount_out)) {
+          return true;
+        }
+        log("deploy_warn", `Rollback swap attempt ${attempt}/3 returned error: ${res?.error || "no tx"}`);
+      } catch (rollbackErr) {
+        log("deploy_error", `Rollback swap attempt ${attempt}/3 threw for ${baseMint.slice(0, 8)}: ${rollbackErr.message}`);
+      }
+      if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
     }
+    return false;
   };
 
   try {
@@ -388,14 +410,14 @@ export async function deployPosition({
         await assertRangeDoesNotRequireBinArrayInitialization(pool, preSwapMinBinId, preSwapMaxBinId);
         const preSwapBal = await getWalletBalances({ force: true }).catch(() => null);
         const preSwapTok = preSwapBal?.tokens?.find(t => t.mint === baseMint);
-        const preSwapRaw = BigInt(preSwapTok?.raw_balance ?? "0");
+        preSwapRaw = BigInt(preSwapTok?.raw_balance ?? "0");
         log("deploy", `Dual-sided deploy (${activeBinsBelow} below, ${activeBinsAbove} above): swapping ${swapSolAmount} SOL (${(xRatio * 100).toFixed(1)}%) -> ${baseMint.slice(0, 8)}`);
-        await before_submit?.();
+        await before_submit?.("swap");
         const swapRes = await swapToken({ input_mint: "SOL", output_mint: baseMint, amount: swapSolAmount });
         if (!swapRes?.success) {
           throw new Error(`Dual-sided pre-deploy swap failed: ${swapRes?.error || "unknown error"}`);
         }
-        if (swapRes.tx) txHashes.push(swapRes.tx);
+        if (swapRes.tx) preSwapTxHash = swapRes.tx;
         finalAmountY = parseFloat((finalAmountY - swapSolAmount).toFixed(6));
         let tok = null;
         for (let attempt = 0; attempt < 6; attempt++) {
@@ -514,23 +536,31 @@ export async function deployPosition({
     }
 
     log("deploy", `SUCCESS — ${txHashes.length} tx(s): ${txHashes[0]}`);
+    const allDeployTxs = preSwapTxHash ? [preSwapTxHash, ...txHashes] : txHashes;
 
     _positionsCacheAt = 0;
     const signalSnapshot = null;
+    let resolvedInitialValueUsd = initial_value_usd;
+    if (resolvedInitialValueUsd == null) {
+      const balForPrice = await getWalletBalances().catch(() => null);
+      if (balForPrice?.sol_price > 0) {
+        resolvedInitialValueUsd = parseFloat((totalDeploySol * balForPrice.sol_price).toFixed(2));
+      }
+    }
     trackPosition({
       position: newPosition.publicKey.toString(),
       pool: pool_address,
       pool_name,
       strategy: activeStrategy,
       bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
-      bin_step,
+      bin_step: bin_step ?? actualBinStep,
       volatility: normalizedVolatility,
       fee_tvl_ratio,
       organic_score,
       amount_sol: totalDeploySol,
       amount_x: finalAmountX,
       active_bin: activeBin.binId,
-      initial_value_usd,
+      initial_value_usd: resolvedInitialValueUsd,
       signal_snapshot: signalSnapshot,
       entry_mcap,
       entry_tvl,
@@ -580,12 +610,15 @@ export async function deployPosition({
       wide_range: isWideRange,
       amount_x: finalAmountX,
       amount_y: finalAmountY,
-      txs: txHashes,
+      txs: allDeployTxs,
     };
   } catch (error) {
     log("deploy_error", error.message);
-    await rollbackSwappedTokenX(error.message);
-    return { success: false, error: error.message, txs: txHashes };
+    const rolledBack = await rollbackSwappedTokenX(error.message);
+    const unrecoveredTxs = txHashes.length > 0
+      ? (preSwapTxHash ? [preSwapTxHash, ...txHashes] : txHashes)
+      : (!rolledBack && preSwapTxHash ? [preSwapTxHash] : []);
+    return { success: false, error: error.message, txs: unrecoveredTxs };
   }
 }
 
@@ -962,6 +995,7 @@ export async function claimFees({ position_address }) {
   }
 
   const tracked = getTrackedPosition(position_address);
+  const preCloseCachedPos = _positionsCache?.positions?.find(p => p.position === position_address) ?? null;
   if (tracked?.closed) {
     return { success: false, error: "Position already closed — fees were claimed during close" };
   }
@@ -1010,6 +1044,7 @@ export async function closePosition({ position_address, reason }) {
   }
 
   const tracked = getTrackedPosition(position_address);
+  const preCloseCachedPos = _positionsCache?.positions?.find(p => p.position === position_address) ?? null;
 
   try {
     log("close", `Closing position: ${position_address}`);
@@ -1193,7 +1228,7 @@ export async function closePosition({ position_address, reason }) {
       }
       // Fallback to pre-close cache snapshot if closed API had no data
       if (finalValueUsd === 0) {
-        const cachedPos = _positionsCache?.positions?.find(p => p.position === position_address);
+        const cachedPos = preCloseCachedPos ?? _positionsCache?.positions?.find(p => p.position === position_address);
         if (cachedPos) {
           pnlTrueUsd    = cachedPos.pnl_true_usd ?? (config.management.solMode ? 0 : cachedPos.pnl_usd) ?? 0;
           pnlUsd        = config.management.solMode ? (cachedPos.pnl_usd ?? 0) : pnlTrueUsd;
@@ -1323,6 +1358,7 @@ export async function closePosition({ position_address, reason }) {
 async function lookupPoolForPosition(position_address, walletAddress) {
   // Check state registry first (fast path)
   const tracked = getTrackedPosition(position_address);
+  const preCloseCachedPos = _positionsCache?.positions?.find(p => p.position === position_address) ?? null;
   if (tracked?.pool) return tracked.pool;
 
   // Check in-memory positions cache

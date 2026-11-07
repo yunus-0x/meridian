@@ -16,9 +16,16 @@ export function getDeterministicCloseRule(position, managementConfig, chronosCtx
     if (position.pnl_pct == null) return false;
     if (position.pnl_pct > -90) return false;
     // Only treat <= -90% PnL as a pricing glitch when remaining value still exceeds 25% of initial deposit
-    const minGlitchValue = tracked?.amount_sol ? tracked.amount_sol * 0.25 : 0.05;
-    if (tracked?.amount_sol && (position.total_value_usd ?? 0) > minGlitchValue) {
-      log("cron_warn", `Suspect PnL for ${position.pair}: ${position.pnl_pct}% but position still has >25% value (${position.total_value_usd}) — skipping PnL rules`);
+    // Match units cleanly: solMode compares SOL (amount_sol), USD mode compares USD (initial_value_usd)
+    const isSolMode = Boolean(managementConfig?.solMode);
+    const depositRef = isSolMode
+      ? Number(tracked?.amount_sol ?? 0)
+      : Number(tracked?.initial_value_usd ?? 0);
+    const currentVal = isSolMode
+      ? Number(position.total_value_usd ?? 0)
+      : Number(position.total_value_true_usd ?? position.total_value_usd ?? 0);
+    if (depositRef > 0 && currentVal > depositRef * 0.25) {
+      log("cron_warn", `Suspect PnL for ${position.pair}: ${position.pnl_pct}% but position still has >25% value (${currentVal}) — skipping PnL rules`);
       return true;
     }
     return false;

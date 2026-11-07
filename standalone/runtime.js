@@ -17,7 +17,7 @@ import { exposureStillPresent } from "./events.js";
 import { getMyPositions } from "../tools/dlmm.js";
 import { executeTool } from "../tools/executor.js";
 import { getWalletBalances } from "../tools/wallet.js";
-import { getTrackedPositions, confirmPeak, updatePnlAndCheckExits, registerExitSignal, syncOpenPositions } from "../state.js";
+import { getTrackedPosition, getTrackedPositions, confirmPeak, updatePnlAndCheckExits, registerExitSignal, syncOpenPositions } from "../state.js";
 import { recordPositionSnapshot } from "../pool-memory.js";
 import { getDeterministicCloseRule, computeBinsBelow } from "../exit-rules.js";
 import { startAdmin } from "./telegram-admin.js";
@@ -206,11 +206,10 @@ async function attemptEntry(signal) {
     bins_below: binsBelow,
     bins_above: binsAbove,
     x_ratio_mult: xRatioMult,
-    before_submit: async () => {
-      // Gate only the first transaction of the sequence. Once creation has
-      // been sent, completing the sequence is safer than abandoning a
-      // half-built position.
-      if (submitted++ > 0) return;
+    before_submit: async (stage = "lp") => {
+      // Always recheck before the pre-deploy swap AND before the first LP creation tx.
+      // Subsequent chunks of a multi-tx LP creation skip recheck so a half-built position completes.
+      if (stage !== "swap" && submitted++ > 0) return;
       const fresh = await finalRecheck(signal, screened);
       if (fresh) throw new Error(`Pre-submit recheck failed: ${fresh}`);
     },
@@ -288,22 +287,26 @@ export async function manageOnce() {
     }
     syncOpenPositions(live.positions.map(p => p.position));
     if (live.positions.length === 0) return "No open positions";
+    const confirmTicks = Math.max(1, Number(config.pnl.confirmTicks ?? 2));
     for (const p of live.positions) {
       recordPositionSnapshot(p.pool, p);
+      const tracked = getTrackedPosition(p.position);
       // Refresh Chronos tactical context for open position during management pass
-      const chronos = await analyzePoolWithChronos(p.pool).catch(() => getCachedChronosAnalysis(p.pool));
+      const chronos = await analyzePoolWithChronos(p.pool, {
+        binStep: tracked?.bin_step ?? 100,
+      }).catch(() => getCachedChronosAnalysis(p.pool));
       const chronosCtx = chronos
         ? { ...(chronos.tactical_signals ?? {}), oor_below_outlook: chronos.oor_below_outlook }
         : null;
-      // Slow backstop: raise peaks immediately and act on detected exits.
-      // Real-time confirmation lives in the fast poller below.
-      confirmPeak(p.position, p.pnl_pct, 1);
+      confirmPeak(p.position, p.pnl_pct, confirmTicks);
       const exit = updatePnlAndCheckExits(p.position, p, config.management, chronosCtx);
       const closeRule = exit
         ? { action: "CLOSE", rule: "exit", reason: exit.reason }
         : getDeterministicCloseRule(p, config.management, chronosCtx);
+      const exitSignalName = exit ? (exit.action ?? "EXIT") : closeRule ? `RULE_${closeRule.rule}` : null;
+      const { fire: exitConfirmed } = registerExitSignal(p.position, exitSignalName, confirmTicks);
       let action = null;
-      if (closeRule?.action === "CLOSE") {
+      if (closeRule?.action === "CLOSE" && exitConfirmed) {
         action = { tool: "close_position", args: { position_address: p.position, reason: closeRule.reason }, label: `close (${closeRule.reason})` };
       } else if ((p.unclaimed_fees_true_usd ?? p.unclaimed_fees_usd ?? 0) >= config.management.minClaimAmount) {
         action = { tool: "claim_fees", args: { position_address: p.position }, label: "claim fees" };

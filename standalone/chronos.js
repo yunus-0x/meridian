@@ -350,29 +350,41 @@ export function startChronosKeepalive() {
   if (nodes.length === 0) return;
 
   const maintainCluster = async () => {
-    // Proactive 6-hour relay shift before the 8-hour InstaBox limit
-    if (nodes.length > 1 && Date.now() - activeNodeStartedAt >= PROACTIVE_ROTATE_MS) {
+    // Proactive 6-hour relay shift before the 8-hour InstaBox limit (only when API key is configured)
+    if (config.chronos?.instaboxApiKey && nodes.length > 1 && Date.now() - activeNodeStartedAt >= PROACTIVE_ROTATE_MS) {
       const prevNode = nodes[activeNodeIndex];
       const nextIdx = (activeNodeIndex + 1) % nodes.length;
       const nextNode = nodes[nextIdx];
       const standbyIdx = (nextIdx + 1) % nodes.length;
       const standbyNode = nodes[standbyIdx];
 
-      log("chronos", `Proactive 6h relay shift: ${prevNode.name} → ${nextNode.name} (standby: ${standbyNode.name})`);
       await wakeInstaBoxIfNeeded(nextNode.machineId);
       await wakeInstaBoxIfNeeded(standbyNode.machineId);
-      activeNodeIndex = nextIdx;
-      activeNodeStartedAt = Date.now();
-      // Rest the previous node unless it is coolify-cloud (which runs Sync ERP)
-      if (prevNode.name !== "coolify-cloud") {
-        void suspendInstaBoxMachine(prevNode.machineId);
+      // Verify nextNode is reachable before shifting activeNodeIndex
+      let nextReady = false;
+      try {
+        const check = await fetch(`${nextNode.endpointUrl.replace(/\/$/, "")}/health`, {
+          signal: AbortSignal.timeout(5000),
+        });
+        nextReady = check.ok;
+      } catch {
+        nextReady = false;
       }
-      return;
+      if (nextReady) {
+        log("chronos", `Proactive 6h relay shift: ${prevNode.name} → ${nextNode.name} (standby: ${standbyNode.name})`);
+        activeNodeIndex = nextIdx;
+        activeNodeStartedAt = Date.now();
+        // Rest the previous node unless it is coolify-cloud (which runs Sync ERP)
+        if (prevNode.name !== "coolify-cloud") {
+          void suspendInstaBoxMachine(prevNode.machineId);
+        }
+        return;
+      }
     }
 
-    // Ping primary active node if it is meridian-chronos via SSH token, and ensure standby is awake
+    // Always keep primary meridian-chronos warm via SSH token if it is active or if no API key is configured
     const curNode = nodes[activeNodeIndex];
-    if (curNode?.name === "meridian-chronos" && sshToken) {
+    if ((curNode?.name === "meridian-chronos" || !config.chronos?.instaboxApiKey) && sshToken) {
       execFile(
         "ssh",
         [
@@ -385,7 +397,7 @@ export function startChronosKeepalive() {
         ],
         { timeout: 20_000 },
         err => {
-          if (err) void wakeInstaBoxIfNeeded(curNode.machineId);
+          if (err && curNode) void wakeInstaBoxIfNeeded(curNode.machineId);
         },
       );
     } else if (curNode?.endpointUrl) {

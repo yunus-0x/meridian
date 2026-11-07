@@ -365,21 +365,27 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   let changed = false;
 
   // Touchpoint 2: Chronos-Adaptive Trailing Take-Profit (Sniper Lock vs Let Winners Run)
+  const baseTriggerPct = mgmtConfig.trailingTriggerPct ?? 3.8;
   const effectiveTriggerPct = chronosCtx?.sniper_lock
-    ? Math.min(mgmtConfig.trailingTriggerPct ?? 3.8, 2.2)
-    : (mgmtConfig.trailingTriggerPct ?? 3.8);
+    ? Math.min(baseTriggerPct, 2.2)
+    : baseTriggerPct;
   const effectiveDropPct = chronosCtx?.sniper_lock
     ? Math.min(mgmtConfig.trailingDropPct ?? 1.2, 0.7)
     : chronosCtx?.let_winners_run
       ? Math.max(mgmtConfig.trailingDropPct ?? 1.2, 2.2)
       : (mgmtConfig.trailingDropPct ?? 1.2);
 
-  // Activate trailing TP once trigger threshold is reached
-  if (mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= effectiveTriggerPct) {
+  // Persist trailing_active permanently only when peak reaches the standard baseTriggerPct
+  if (mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= baseTriggerPct) {
     pos.trailing_active = true;
     changed = true;
-    log("state", `Position ${position_address} trailing TP activated (confirmed peak: ${pos.peak_pnl_pct}%, trigger: ${effectiveTriggerPct}%)`);
+    log("state", `Position ${position_address} trailing TP activated (confirmed peak: ${pos.peak_pnl_pct}%, trigger: ${baseTriggerPct}%)`);
   }
+  // Allow transient sniper_lock activation for this tick without locking pos.trailing_active permanently
+  const isTrailingActiveThisTick = Boolean(
+    pos.trailing_active ||
+    (mgmtConfig.trailingTakeProfit && chronosCtx?.sniper_lock && (pos.peak_pnl_pct ?? 0) >= effectiveTriggerPct),
+  );
 
   // Update OOR state
   if (in_range === false && !pos.out_of_range_since) {
@@ -403,7 +409,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   // ── Trailing TP (never close at a loss: currentPnlPct must be > 0) ─────────
-  if (!pnl_pct_suspicious && pos.trailing_active && currentPnlPct != null && currentPnlPct > 0) {
+  if (!pnl_pct_suspicious && isTrailingActiveThisTick && currentPnlPct != null && currentPnlPct > 0) {
     const dropFromPeak = pos.peak_pnl_pct - currentPnlPct;
     if (dropFromPeak >= effectiveDropPct) {
       return {
