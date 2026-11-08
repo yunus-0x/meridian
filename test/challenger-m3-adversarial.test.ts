@@ -26,8 +26,7 @@
 process.env.NODE_ENV = "test";
 process.env.DISABLE_TELEGRAM = "true";
 
-import test, { describe, beforeEach, afterEach } from "node:test";
-import assert from "node:assert/strict";
+import { describe, test, it, expect, assert, beforeEach, afterEach, vi } from "vitest";
 import bs58 from "bs58";
 import { PublicKey } from "@solana/web3.js";
 import { config } from "../config.js";
@@ -166,13 +165,7 @@ describe("Milestone 3 Challenge 1: Token Balances Aggregation", () => {
       ],
     };
 
-    assert.throws(
-      () => aggregateTokenAccounts([resp]),
-      (err: Error) => {
-        assert.equal(err.message, "Conflicting token decimals");
-        return true;
-      }
-    );
+    expect(() => aggregateTokenAccounts([resp])).toThrow(/Conflicting token decimals/);
   });
 
   test("rejects invalid boundary payloads via Zod validation", () => {
@@ -186,7 +179,7 @@ describe("Milestone 3 Challenge 1: Token Balances Aggregation", () => {
 describe("Milestone 3 Challenge 2: Jupiter Pricing & Cache Eviction", () => {
   const originalFetch = globalThis.fetch;
   let fetchCalls: string[] = [];
-  let mockJupiterResponses: Record<string, unknown> = {};
+  let mockJupiterResponses: Record<string, { usdPrice: number }> = {};
 
   beforeEach(() => {
     invalidateBalances();
@@ -201,8 +194,9 @@ describe("Milestone 3 Challenge 2: Jupiter Pricing & Cache Eviction", () => {
         const ids = (url.searchParams.get("ids") || "").split(",");
         const result: Record<string, { usdPrice: number }> = {};
         for (const id of ids) {
-          if (mockJupiterResponses[id]) {
-            result[id] = mockJupiterResponses[id] as { usdPrice: number };
+          const item = mockJupiterResponses[id];
+          if (item) {
+            result[id] = item;
           }
         }
         return new Response(JSON.stringify({ data: result }), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -475,12 +469,27 @@ describe("Milestone 3 Challenge 3: DLMM Event Decoding", () => {
     }
   });
 
+function hasEventCoder(val: unknown): val is { events: EventCoderLike } {
+  return (
+    typeof val === "object" &&
+    val !== null &&
+    "events" in val &&
+    typeof val.events === "object" &&
+    val.events !== null &&
+    "decode" in val.events &&
+    typeof val.events.decode === "function"
+  );
+}
+
   test("real Anchor coder decodes valid DLMM events and returns null for unknown events", async () => {
     const { createProgram } = await import("@meteora-ag/dlmm");
     const { Connection } = await import("@solana/web3.js");
     const dummyConn = new Connection("https://api.mainnet-beta.solana.com");
     const prog = createProgram(dummyConn);
-    const realCoder = (prog.coder as unknown as { events: EventCoderLike }).events;
+    if (!hasEventCoder(prog.coder)) {
+      throw new Error("prog.coder does not implement EventCoderLike");
+    }
+    const realCoder = prog.coder.events;
 
     // Unknown random event payload (8 bytes prefix + 16 bytes data)
     const randomPayload = Buffer.concat([

@@ -46,6 +46,7 @@ export const TrackedPositionSchema = z.object({
   pending_exit_action: z.string().nullable().default(null),
   pending_exit_count: z.number().default(0),
   pending_exit_started_at: z.union([z.string(), z.number()]).nullable().default(null),
+  missing_onchain_count: z.number().int().nonnegative().default(0),
   trailing_active: z.boolean().default(false),
 }).passthrough();
 

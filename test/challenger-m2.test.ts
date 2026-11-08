@@ -13,8 +13,7 @@ process.env.DISABLE_TELEGRAM = "true";
 delete process.env.TELEGRAM_BOT_TOKEN;
 delete process.env.TELEGRAM_CHAT_ID;
 
-import test, { describe, beforeEach, afterEach } from "node:test";
-import assert from "node:assert/strict";
+import { describe, test, it, expect, assert, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -331,6 +330,7 @@ describe("Milestone 2 Empirical Challenge: exit-rules.ts", () => {
       last_claim_at: null,
       total_fees_claimed_usd: 0,
       rebalance_count: 0,
+      missing_onchain_count: 0,
       closed: false,
       closed_at: null,
       notes: [],
@@ -471,6 +471,7 @@ describe("Milestone 2 Empirical Challenge: state.ts", () => {
       last_claim_at: null,
       total_fees_claimed_usd: 0,
       rebalance_count: 0,
+      missing_onchain_count: 0,
       closed: false,
       closed_at: null,
       notes: [],
@@ -644,9 +645,7 @@ describe("Milestone 2 Empirical Challenge: config.ts", () => {
   });
 
   test("updateConfig rejects invalid config updates with Zod error", () => {
-    assert.throws(() => updateConfig({ minSolToOpen: -1 }), (err: unknown) => {
-      return err instanceof Error;
-    });
+    expect(() => updateConfig({ minSolToOpen: -1 })).toThrow();
   });
 });
 
@@ -659,13 +658,9 @@ describe("Milestone 2 Empirical Challenge: Zero Telegram Test Leakage", () => {
     assert.equal(telegram.isEnabled(), false, "isEnabled must return false in test env");
 
     // Spy on globalThis.fetch to guarantee zero network traffic to Telegram API
-    let fetchCalled = false;
-    const originalFetch = globalThis.fetch;
-    const mockFetch = async () => {
-      fetchCalled = true;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
       throw new Error("LEAK: Network request initiated to Telegram API!");
-    };
-    (globalThis as unknown as { fetch: typeof mockFetch }).fetch = mockFetch;
+    });
 
     try {
       // Attempt all notification types
@@ -684,9 +679,9 @@ describe("Milestone 2 Empirical Challenge: Zero Telegram Test Leakage", () => {
       await telegram.sendMessage("Test direct message");
       await telegram.sendMenu("Test menu", [[{ text: "Btn", callback_data: "data" }]]);
 
-      assert.equal(fetchCalled, false, "Zero fetch requests allowed to Telegram API during tests");
+      expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
-      (globalThis as unknown as { fetch: typeof originalFetch }).fetch = originalFetch;
+      fetchSpy.mockRestore();
     }
   });
 });

@@ -274,10 +274,11 @@ async function attemptEntry(signal: MonitorSignal): Promise<string | null> {
     bins_below: binsBelow,
     bins_above: binsAbove,
     x_ratio_mult: xRatioMult,
-    before_submit: async (stage = "lp", spentSol = 0) => {
-      // Always recheck before the pre-deploy swap AND before the first LP creation tx.
-      // Subsequent chunks of a multi-tx LP creation skip recheck so a half-built position completes.
-      if (stage !== "swap" && submitted++ > 0) return;
+    before_submit: async (_stage = "lp", spentSol = 0) => {
+      // Recheck once before the very first on-chain commit (either the pre-deploy swap or the first LP tx).
+      // Once capital is already committed on-chain (submitted > 0 or spentSol > 0), skip recheck so a
+      // half-built dual-sided position completes instead of burning double swap slippage on rollback.
+      if (submitted++ > 0 || spentSol > 0) return;
       const fresh = await finalRecheck(signal, screened as ScreenMintResult & { pass: true }, spentSol);
       if (fresh) throw new Error(`Pre-submit recheck failed: ${fresh}`);
     },

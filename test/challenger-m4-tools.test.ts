@@ -28,8 +28,7 @@
 process.env.NODE_ENV = "test";
 process.env.DISABLE_TELEGRAM = "true";
 
-import test, { describe, beforeEach, afterEach } from "node:test";
-import assert from "node:assert/strict";
+import { describe, test, it, expect, assert, beforeEach, afterEach, vi } from "vitest";
 import bs58 from "bs58";
 import {
   Keypair,
@@ -78,11 +77,15 @@ function isDlmmStatics(val: unknown): val is DlmmStatics {
   return typeof val === "function" && "create" in val && "getAllLbPairPositionsByUser" in val;
 }
 
+function hasDefaultExport(val: object): val is { default: unknown } {
+  return "default" in val;
+}
+
 async function loadDlmmStatics(): Promise<DlmmStatics> {
   const mod: unknown = await import("@meteora-ag/dlmm");
   const candidate =
-    typeof mod === "object" && mod !== null && "default" in mod
-      ? (mod as { default: unknown }).default
+    typeof mod === "object" && mod !== null && hasDefaultExport(mod)
+      ? mod.default
       : mod;
   if (!isDlmmStatics(candidate)) {
     throw new Error("Expected @meteora-ag/dlmm to export static class constructor");
@@ -877,15 +880,12 @@ describe("Challenger M4 Suite 4: tools/dlmm.ts", () => {
     process.env.DRY_RUN = "true";
     const samplePool = Keypair.generate().publicKey.toBase58();
 
-    await assert.rejects(
-      async () => {
-        await deployPosition({
-          pool_address: samplePool,
-          amount_y: 0.5,
-        });
-      },
-      /Deploy requires a wallet-signal recheck \(before_submit\)/
-    );
+    await expect(
+      deployPosition({
+        pool_address: samplePool,
+        amount_y: 0.5,
+      })
+    ).rejects.toThrow(/Deploy requires a wallet-signal recheck \(before_submit\)/);
   });
 
   test("deployPosition: DRY_RUN mode validates parameters and returns dry_run payload safely", async () => {
@@ -917,49 +917,40 @@ describe("Challenger M4 Suite 4: tools/dlmm.ts", () => {
     const samplePool = Keypair.generate().publicKey.toBase58();
 
     // Non-integer bins
-    await assert.rejects(
-      async () => {
-        await deployPosition({
-          pool_address: samplePool,
-          amount_y: 0.5,
-          bins_below: 35.5,
-          bins_above: 10,
-          bin_step: 100,
-          before_submit: async () => {},
-        });
-      },
-      /bins_below and bins_above must be whole-bin integers/
-    );
+    await expect(
+      deployPosition({
+        pool_address: samplePool,
+        amount_y: 0.5,
+        bins_below: 35.5,
+        bins_above: 10,
+        bin_step: 100,
+        before_submit: async () => {},
+      })
+    ).rejects.toThrow(/bins_below and bins_above must be whole-bin integers/);
 
     // Negative bins
-    await assert.rejects(
-      async () => {
-        await deployPosition({
-          pool_address: samplePool,
-          amount_y: 0.5,
-          bins_below: -5,
-          bins_above: 10,
-          bin_step: 100,
-          before_submit: async () => {},
-        });
-      },
-      /bins_below and bins_above cannot be negative/
-    );
+    await expect(
+      deployPosition({
+        pool_address: samplePool,
+        amount_y: 0.5,
+        bins_below: -5,
+        bins_above: 10,
+        bin_step: 100,
+        before_submit: async () => {},
+      })
+    ).rejects.toThrow(/bins_below and bins_above cannot be negative/);
 
     // Tiny range below minimum
-    await assert.rejects(
-      async () => {
-        await deployPosition({
-          pool_address: samplePool,
-          amount_y: 0.5,
-          bins_below: 1,
-          bins_above: 1,
-          bin_step: 100,
-          before_submit: async () => {},
-        });
-      },
-      /below minimum/
-    );
+    await expect(
+      deployPosition({
+        pool_address: samplePool,
+        amount_y: 0.5,
+        bins_below: 1,
+        bins_above: 1,
+        bin_step: 100,
+        before_submit: async () => {},
+      })
+    ).rejects.toThrow(/below minimum/);
   });
 
   test("claimFees & closePosition: DRY_RUN mode safely returns dry_run payload without on-chain execution", async () => {

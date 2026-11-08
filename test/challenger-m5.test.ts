@@ -2,8 +2,7 @@
 // Covers: telegram.ts, standalone/telegram-admin.ts, src/schemas/cli.ts,
 // standalone/runtime.ts, setup.ts, scripts/check-syntax.ts, scripts/envcrypt.ts.
 
-import test from "node:test";
-import assert from "node:assert/strict";
+import { describe, test, it, expect, assert, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import { Keypair } from "@solana/web3.js";
 import bs58 from "bs58";
@@ -67,8 +66,8 @@ test("M5 Suite 1: Multi-layer Telegram Suppression & Alert Safety", async () => 
   assert.equal(cmdsRes, null, "setBotCommands returns null when suppressed");
 
   // 3. Trade alerts execute cleanly without sending real messages
-  await assert.doesNotReject(async () => {
-    await notifyDeploy({
+  await expect(
+    notifyDeploy({
       pair: "TEST/SOL",
       amountSol: 1.5,
       position: "Pos111111111111111111111111111111111",
@@ -77,36 +76,36 @@ test("M5 Suite 1: Multi-layer Telegram Suppression & Alert Safety", async () => 
       rangeCoverage: { downside_pct: 15, upside_pct: 20, width_pct: 35 },
       binStep: 100,
       baseFee: 0.25,
-    });
-  });
+    })
+  ).resolves.not.toThrow();
 
-  await assert.doesNotReject(async () => {
-    await notifyClose({
+  await expect(
+    notifyClose({
       pair: "TEST/SOL",
       pnlUsd: 25.5,
       pnlPct: 12.3,
       solMode: false,
-    });
-  });
+    })
+  ).resolves.not.toThrow();
 
-  await assert.doesNotReject(async () => {
-    await notifyClose({
+  await expect(
+    notifyClose({
       pair: "TEST/SOL",
       pnlUsd: 0.15,
       pnlPct: -5.2,
       solMode: true,
-    });
-  });
+    })
+  ).resolves.not.toThrow();
 
-  await assert.doesNotReject(async () => {
-    await notifySwap({
+  await expect(
+    notifySwap({
       inputSymbol: "TEST",
       outputSymbol: "SOL",
       amountIn: 1000,
       amountOut: 1.25,
       tx: "TxSwap11111111111111111111111111111111",
-    });
-  });
+    })
+  ).resolves.not.toThrow();
 });
 
 test("M5 Suite 2: Telegram Admin Console & Schema Integrity", () => {
@@ -215,9 +214,9 @@ test("M5 Suite 4: Utility Scripts (Syntax Checker & Envcrypt CLI)", () => {
   assert.equal(syntaxPass, true, "Syntax checker passes across repository");
 
   // 2. envcrypt usage
-  assert.doesNotThrow(() => {
+  expect(() => {
     envcryptUsage();
-  });
+  }).not.toThrow();
 });
 
 test("M5 Suite 5: Standalone Runtime Contracts & Deterministic Execution", async () => {

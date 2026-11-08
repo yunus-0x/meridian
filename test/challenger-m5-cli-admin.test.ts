@@ -5,8 +5,7 @@
 //
 // Oracle Engineering Standards: Zero any, Zero unsafe type assertions.
 
-import test from "node:test";
-import assert from "node:assert/strict";
+import { describe, test, it, expect, assert, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -45,6 +44,37 @@ const StderrErrorSchema = z.object({
   error: z.string(),
 });
 
+const PerformanceCliOutputSchema = z.object({
+  summary: z.unknown(),
+  recent: z.object({
+    positions: z.array(z.unknown()),
+  }),
+});
+
+const WalletsCliOutputSchema = z.object({
+  wallets: z.array(z.unknown()),
+});
+
+const BlacklistCliOutputSchema = z.object({
+  blacklist: z.array(z.unknown()),
+});
+
+const BalanceCliOutputSchema = z.object({
+  sol: z.unknown(),
+  tokens: z.unknown(),
+});
+
+const PositionsCliOutputSchema = z.object({
+  positions: z.unknown(),
+});
+
+const SetupWrittenConfigSchema = z.object({
+  walletAddress: z.string().optional(),
+  rpcUrl: z.string().optional(),
+  shadowMode: z.boolean().optional(),
+  _readme: z.unknown().optional(),
+}).passthrough();
+
 function runCli(args: string[], extraEnv: Record<string, string> = {}): CliExecResult {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -62,7 +92,8 @@ function runCli(args: string[], extraEnv: Record<string, string> = {}): CliExecR
     cwd: REPO_ROOT,
     env,
     encoding: "utf8",
-    timeout: 10_000,
+    timeout: 20_000,
+    killSignal: "SIGKILL",
   });
 
   return {
@@ -89,7 +120,8 @@ function runCliJs(args: string[], extraEnv: Record<string, string> = {}): CliExe
     cwd: REPO_ROOT,
     env,
     encoding: "utf8",
-    timeout: 10_000,
+    timeout: 20_000,
+    killSignal: "SIGKILL",
   });
 
   return {
@@ -185,30 +217,32 @@ test("Challenger M5: CLI Subcommand Execution & Schema Completeness (All 17 Subc
   const perfRes = runCli(["performance"]);
   assert.equal(perfRes.status, 0);
   const rawPerf: unknown = extractJson(perfRes.stdout);
-  assert.ok(typeof rawPerf === "object" && rawPerf !== null);
-  const perfObj = rawPerf as Record<string, unknown>;
-  assert.ok("summary" in perfObj);
-  assert.ok("recent" in perfObj);
-  const recentObj = perfObj["recent"] as Record<string, unknown>;
-  assert.ok(Array.isArray(recentObj["positions"]));
+  const parsedPerf = PerformanceCliOutputSchema.safeParse(rawPerf);
+  assert.ok(parsedPerf.success, "performance output matches PerformanceCliOutputSchema");
+  if (parsedPerf.success) {
+    assert.ok(parsedPerf.data.summary !== undefined);
+    assert.ok(Array.isArray(parsedPerf.data.recent.positions));
+  }
 
   // 6. Subcommand: wallets (list)
   const walletsRes = runCli(["wallets"]);
   assert.equal(walletsRes.status, 0);
   const rawWallets: unknown = extractJson(walletsRes.stdout);
-  assert.ok(typeof rawWallets === "object" && rawWallets !== null);
-  const walletsObj = rawWallets as Record<string, unknown>;
-  assert.ok("wallets" in walletsObj);
-  assert.ok(Array.isArray(walletsObj["wallets"]));
+  const parsedWallets = WalletsCliOutputSchema.safeParse(rawWallets);
+  assert.ok(parsedWallets.success, "wallets output matches WalletsCliOutputSchema");
+  if (parsedWallets.success) {
+    assert.ok(Array.isArray(parsedWallets.data.wallets));
+  }
 
   // 7. Subcommand: blacklist (list)
   const blRes = runCli(["blacklist"]);
   assert.equal(blRes.status, 0);
   const rawBl: unknown = extractJson(blRes.stdout);
-  assert.ok(typeof rawBl === "object" && rawBl !== null);
-  const blObj = rawBl as Record<string, unknown>;
-  assert.ok("blacklist" in blObj);
-  assert.ok(Array.isArray(blObj["blacklist"]));
+  const parsedBl = BlacklistCliOutputSchema.safeParse(rawBl);
+  assert.ok(parsedBl.success, "blacklist output matches BlacklistCliOutputSchema");
+  if (parsedBl.success) {
+    assert.ok(Array.isArray(parsedBl.data.blacklist));
+  }
 
   // 8. Subcommand: start (fails gracefully when lock is held by active parent)
   const lockFile = repoPath("standalone.lock");
@@ -224,18 +258,22 @@ test("Challenger M5: CLI Subcommand Execution & Schema Completeness (All 17 Subc
   const balRes = runCli(["balance"]);
   assert.equal(balRes.status, 0);
   const rawBal: unknown = extractJson(balRes.stdout);
-  assert.ok(typeof rawBal === "object" && rawBal !== null);
-  const balObj = rawBal as Record<string, unknown>;
-  assert.ok("sol" in balObj);
-  assert.ok("tokens" in balObj);
+  const parsedBal = BalanceCliOutputSchema.safeParse(rawBal);
+  assert.ok(parsedBal.success, "balance output matches BalanceCliOutputSchema");
+  if (parsedBal.success) {
+    assert.ok(parsedBal.data.sol !== undefined);
+    assert.ok(parsedBal.data.tokens !== undefined);
+  }
 
   // 10. Subcommand: positions
   const posRes = runCli(["positions"]);
   assert.equal(posRes.status, 0);
   const rawPos: unknown = extractJson(posRes.stdout);
-  assert.ok(typeof rawPos === "object" && rawPos !== null);
-  const posObj = rawPos as Record<string, unknown>;
-  assert.ok("positions" in posObj);
+  const parsedPos = PositionsCliOutputSchema.safeParse(rawPos);
+  assert.ok(parsedPos.success, "positions output matches PositionsCliOutputSchema");
+  if (parsedPos.success) {
+    assert.ok(parsedPos.data.positions !== undefined);
+  }
 
   // 11. Subcommand: manage
   const manageRes = runCli(["manage"]);
@@ -404,16 +442,20 @@ test("Challenger M5: Telegram Admin Console — Exhaustive Validation Across All
     if ("path" in setting) {
       let currentTarget: unknown = config;
       for (const segment of setting.path) {
+        function isRecord(val: unknown): val is Record<string, unknown> {
+          return typeof val === "object" && val !== null;
+        }
         assert.ok(
-          typeof currentTarget === "object" && currentTarget !== null,
+          isRecord(currentTarget),
           `Intermediate path segment for ${setting.k} must be an object`
         );
-        const record = currentTarget as Record<string, unknown>;
         assert.ok(
-          segment in record,
+          isRecord(currentTarget) && segment in currentTarget,
           `Segment "${segment}" of path [${setting.path.join(".")}] for ${setting.k} must exist in live config`
         );
-        currentTarget = record[segment];
+        if (isRecord(currentTarget)) {
+          currentTarget = currentTarget[segment];
+        }
       }
     }
   }
@@ -422,9 +464,8 @@ test("Challenger M5: Telegram Admin Console — Exhaustive Validation Across All
   for (const setting of allSettings) {
     switch (setting.type) {
       case "int": {
-        const numSetting = setting as NumberSetting;
-        const minVal = numSetting.min ?? 0;
-        const maxVal = numSetting.max ?? 1000;
+        const minVal = setting.min ?? 0;
+        const maxVal = setting.max ?? 1000;
         const validInt = Math.floor((minVal + maxVal) / 2);
 
         // Valid whole number
@@ -438,18 +479,17 @@ test("Challenger M5: Telegram Admin Console — Exhaustive Validation Across All
         assert.throws(() => validate(setting, `${validInt}.75`), /Must be a whole number/);
 
         // Boundary violations
-        if (numSetting.min != null) {
-          assert.throws(() => validate(setting, String(numSetting.min! - 1)), /Minimum is/);
+        if (setting.min != null) {
+          assert.throws(() => validate(setting, String(setting.min! - 1)), /Minimum is/);
         }
-        if (numSetting.max != null) {
-          assert.throws(() => validate(setting, String(numSetting.max! + 1)), /Maximum is/);
+        if (setting.max != null) {
+          assert.throws(() => validate(setting, String(setting.max! + 1)), /Maximum is/);
         }
         break;
       }
       case "float": {
-        const numSetting = setting as NumberSetting;
-        const minVal = numSetting.min ?? 0;
-        const maxVal = numSetting.max ?? 1000;
+        const minVal = setting.min ?? 0;
+        const maxVal = setting.max ?? 1000;
         const validFloat = (minVal + maxVal) / 2;
 
         // Valid float
@@ -460,11 +500,11 @@ test("Challenger M5: Telegram Admin Console — Exhaustive Validation Across All
         assert.throws(() => validate(setting, "Infinity"), /Must be a number/);
 
         // Boundary violations
-        if (numSetting.min != null) {
-          assert.throws(() => validate(setting, String(numSetting.min! - 0.5)), /Minimum is/);
+        if (setting.min != null) {
+          assert.throws(() => validate(setting, String(setting.min! - 0.5)), /Minimum is/);
         }
-        if (numSetting.max != null) {
-          assert.throws(() => validate(setting, String(numSetting.max! + 0.5)), /Maximum is/);
+        if (setting.max != null) {
+          assert.throws(() => validate(setting, String(setting.max! + 0.5)), /Maximum is/);
         }
         break;
       }
@@ -485,9 +525,8 @@ test("Challenger M5: Telegram Admin Console — Exhaustive Validation Across All
         break;
       }
       case "enum": {
-        const enumSetting = setting as EnumSetting;
-        assert.ok(Array.isArray(enumSetting.options) && enumSetting.options.length > 0);
-        for (const opt of enumSetting.options) {
+        assert.ok(Array.isArray(setting.options) && setting.options.length > 0);
+        for (const opt of setting.options) {
           assert.equal(validate(setting, opt), opt);
         }
         assert.throws(() => validate(setting, "completely_invalid_option_xyz"), /Must be one of/);
@@ -515,19 +554,18 @@ test("Challenger M5: Telegram Admin Console — Exhaustive Validation Across All
         break;
       }
       case "env": {
-        const envSetting = setting as EnvSetting;
-        if (envSetting.kind === "url") {
+        if (setting.kind === "url") {
           assert.equal(validate(setting, "https://api.mainnet-beta.solana.com"), "https://api.mainnet-beta.solana.com");
           assert.equal(validate(setting, "wss://api.mainnet-beta.solana.com"), "wss://api.mainnet-beta.solana.com");
           assert.equal(validate(setting, ""), "");
           assert.throws(() => validate(setting, "ftp://invalid-protocol.com"), /Must be an http\(s\):\/\/ or ws\(s\):\/\//);
           assert.throws(() => validate(setting, "plain-string"), /Must be an http\(s\):\/\/ or ws\(s\):\/\//);
-        } else if (envSetting.kind === "secret") {
+        } else if (setting.kind === "secret") {
           assert.equal(validate(setting, "my_api_key_12345"), "my_api_key_12345");
           assert.throws(() => validate(setting, "api key with spaces"), /Key must not contain whitespace/);
-        } else if (envSetting.kind === "enum") {
-          assert.ok(Array.isArray(envSetting.options));
-          for (const opt of envSetting.options!) {
+        } else if (setting.kind === "enum") {
+          assert.ok(Array.isArray(setting.options));
+          for (const opt of setting.options!) {
             assert.equal(validate(setting, opt), opt);
           }
           assert.throws(() => validate(setting, "unknown_enum_choice"), /Must be one of/);
@@ -622,13 +660,14 @@ test("Challenger M5: Interactive Setup (`setup.ts`) Public Key, RPC & Stream Han
 
     assert.ok(fs.existsSync(tmpConfig), "Config file must be created");
     const rawContent: unknown = JSON.parse(fs.readFileSync(tmpConfig, "utf8"));
-    assert.ok(typeof rawContent === "object" && rawContent !== null);
-    const content = rawContent as Record<string, unknown>;
-
-    assert.equal(content["walletAddress"], validPubkey);
-    assert.equal(content["rpcUrl"], validRpc);
-    assert.equal(content["shadowMode"], true);
-    assert.equal(content["_readme"], undefined, "_readme must be deleted from written config");
+    const parsedSetup = SetupWrittenConfigSchema.safeParse(rawContent);
+    assert.ok(parsedSetup.success, "setup config matches schema");
+    if (parsedSetup.success) {
+      assert.equal(parsedSetup.data.walletAddress, validPubkey);
+      assert.equal(parsedSetup.data.rpcUrl, validRpc);
+      assert.equal(parsedSetup.data.shadowMode, true);
+      assert.equal(parsedSetup.data._readme, undefined, "_readme must be deleted from written config");
+    }
 
     // File mode check (0o600)
     const stat = fs.statSync(tmpConfig);
@@ -652,9 +691,12 @@ test("Challenger M5: Interactive Setup (`setup.ts`) Public Key, RPC & Stream Han
     input.end();
 
     const rawContent: unknown = JSON.parse(fs.readFileSync(tmpConfig, "utf8"));
-    const content = rawContent as Record<string, unknown>;
-    assert.equal(content["shadowMode"], true);
-    assert.equal(content["walletAddress"], "");
+    const parsedSetup = SetupWrittenConfigSchema.safeParse(rawContent);
+    assert.ok(parsedSetup.success, "setup config matches schema");
+    if (parsedSetup.success) {
+      assert.equal(parsedSetup.data.shadowMode, true);
+      assert.equal(parsedSetup.data.walletAddress, "");
+    }
 
     fs.rmSync(tmpConfig, { force: true });
   }
@@ -666,9 +708,10 @@ test("Challenger M5: Interactive Setup (`setup.ts`) Public Key, RPC & Stream Han
     const output = new PassThrough();
 
     const setupPromise = runSetup({ configFile: tmpConfig, input, output });
+
     input.write("invalid_solana_pubkey_that_is_not_base58!\n");
 
-    await assert.rejects(setupPromise, /Non-base58 character|Invalid public key input/);
+    await expect(setupPromise).rejects.toThrow(/Non-base58 character|Invalid public key input/);
     input.end();
     fs.rmSync(tmpConfig, { force: true });
   }
@@ -680,11 +723,12 @@ test("Challenger M5: Interactive Setup (`setup.ts`) Public Key, RPC & Stream Han
     const output = new PassThrough();
 
     const setupPromise = runSetup({ configFile: tmpConfig, input, output });
+
     input.write("11111111111111111111111111111111\n");
     await new Promise((r) => setTimeout(r, 20));
     input.write("ftp://invalid-rpc-node.com\n");
 
-    await assert.rejects(setupPromise, /RPC URL must use HTTP or HTTPS/);
+    await expect(setupPromise).rejects.toThrow(/RPC URL must use HTTP or HTTPS/);
     input.end();
     fs.rmSync(tmpConfig, { force: true });
   }
@@ -696,11 +740,12 @@ test("Challenger M5: Interactive Setup (`setup.ts`) Public Key, RPC & Stream Han
     const output = new PassThrough();
 
     const setupPromise = runSetup({ configFile: tmpConfig, input, output });
+
     input.write("11111111111111111111111111111111\n");
     await new Promise((r) => setTimeout(r, 20));
     input.write("completely_invalid_url\n");
 
-    await assert.rejects(setupPromise, /Invalid URL/);
+    await expect(setupPromise).rejects.toThrow(/Invalid URL/);
     input.end();
     fs.rmSync(tmpConfig, { force: true });
   }

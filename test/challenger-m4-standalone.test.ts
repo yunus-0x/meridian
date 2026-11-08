@@ -20,8 +20,7 @@
 process.env.NODE_ENV = "test";
 process.env.DISABLE_TELEGRAM = "true";
 
-import test, { describe } from "node:test";
-import assert from "node:assert/strict";
+import { describe, test, it, expect, assert, beforeEach, afterEach, vi } from "vitest";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
@@ -286,18 +285,24 @@ describe("Challenge Suite 1: standalone/screening.ts Adversarial Edge Cases", ()
     assert.equal(rejectPool({ ...pool, is_blacklisted: true }, MINT_TEST, s), "Pool blacklist status unsafe or unknown");
 
     // Warnings not array
+    function isPartialPool(val: unknown): val is Partial<MeteoraPoolDiscoveryItem> {
+      return typeof val === "object" && val !== null;
+    }
     const invalidTokenX: Partial<MeteoraPoolDiscoveryItem["token_x"]> = {
       address: MINT_TEST,
       organic_score: 80,
     };
-    const poolNoWarn = {
+    const poolNoWarn: unknown = {
       ...pool,
       token_x: invalidTokenX,
     };
-    assert.equal(
-      rejectPool(poolNoWarn as Partial<MeteoraPoolDiscoveryItem>, MINT_TEST, s),
-      "Pool token warnings unavailable"
-    );
+    expect(isPartialPool(poolNoWarn)).toBe(true);
+    if (isPartialPool(poolNoWarn)) {
+      assert.equal(
+        rejectPool(poolNoWarn, MINT_TEST, s),
+        "Pool token warnings unavailable"
+      );
+    }
 
     // Critical, danger, warning severities rejected
     assert.equal(
@@ -889,9 +894,26 @@ describe("Challenge Suite 3: standalone/monitor.ts State Transitions & Convergen
     assert.equal(monitor.stats.entries, 2);
     // Convergence signal triggered! (Threshold = 2 wallets)
     assert.equal(signalsTriggered.length, 1);
-    const signal = signalsTriggered[0] as { mint: string; events: unknown[] };
-    assert.equal(signal.mint, MINT_TEST);
-    assert.equal(signal.events.length, 2);
+    interface ConvergenceSignal {
+      mint: string;
+      events: readonly unknown[];
+    }
+    function isConvergenceSignal(val: unknown): val is ConvergenceSignal {
+      return (
+        typeof val === "object" &&
+        val !== null &&
+        "mint" in val &&
+        typeof val.mint === "string" &&
+        "events" in val &&
+        Array.isArray(val.events)
+      );
+    }
+    const rawSignal = signalsTriggered[0];
+    expect(isConvergenceSignal(rawSignal)).toBe(true);
+    if (isConvergenceSignal(rawSignal)) {
+      assert.equal(rawSignal.mint, MINT_TEST);
+      assert.equal(rawSignal.events.length, 2);
+    }
 
     if (fs.existsSync(tmpFile)) fs.rmSync(tmpFile, { force: true });
   });

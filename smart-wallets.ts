@@ -37,7 +37,7 @@ function saveWallets(data: SmartWalletsDb): void {
 
 export interface AddSmartWalletInput {
   name: string;
-  address: string;
+  address?: string | null;
   category?: string;
   type?: string;
 }
@@ -52,7 +52,7 @@ export function addSmartWallet({
   category = "alpha",
   type = "lp",
 }: AddSmartWalletInput): AddSmartWalletResult {
-  if (!SolAddressSchema.safeParse(address).success) {
+  if (!address || !SolAddressSchema.safeParse(address).success) {
     return { success: false, error: "Invalid Solana address format" };
   }
   const data = loadWallets();

@@ -291,10 +291,11 @@ export async function notifyDeploy({
   );
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlPct, solMode }: NotifyCloseParams): Promise<void> {
+export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, solMode }: NotifyCloseParams): Promise<void> {
   if (isTelegramSuppressed()) return;
   const useSolMode = solMode != null ? Boolean(solMode) : Boolean(config.management?.solMode);
-  const val = Number(pnlUsd ?? 0);
+  const rawPrimary = useSolMode ? (pnlSol ?? pnlUsd ?? 0) : (pnlUsd ?? 0);
+  const val = Number(rawPrimary);
   const pct = Number(pnlPct ?? 0);
   const valSign = val >= 0 ? "+" : "-";
   const pctSign = pct >= 0 ? "+" : "";

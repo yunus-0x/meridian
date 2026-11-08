@@ -18,11 +18,15 @@ export const MeteoraPoolDiscoveryItemSchema = z.object({
   fee_active_tvl_ratio: FlexibleNumberSchema,
   volatility: FlexibleNumberSchema,
   pool_price: FlexibleNumberSchema,
+  mcap: FlexibleNumberSchema.optional(),
+  market_cap: FlexibleNumberSchema.optional(),
   token_x: z.object({
     address: SolAddressSchema,
     symbol: z.string().optional(),
     warnings: z.array(MeteoraTokenWarningSchema).optional().default([]),
     organic_score: FlexibleNumberSchema,
+    mcap: FlexibleNumberSchema.optional(),
+    market_cap: FlexibleNumberSchema.optional(),
   }),
   token_y: z.object({
     address: SolAddressSchema,
@@ -339,6 +343,7 @@ export const NotifyDeployParamsSchema = z.object({
 export const NotifyCloseParamsSchema = z.object({
   pair: z.string(),
   pnlUsd: z.union([z.number(), z.string()]).optional().nullable(),
+  pnlSol: z.union([z.number(), z.string()]).optional().nullable(),
   pnlPct: z.union([z.number(), z.string()]).optional().nullable(),
   solMode: z.boolean().optional().nullable(),
 });

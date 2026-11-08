@@ -210,6 +210,7 @@ export interface GetMyPositionsOptions {
   force?: boolean;
   silent?: boolean;
   wallet_address?: string | null;
+  skip_sync?: boolean;
 }
 
 export type ClaimFeesResult =
@@ -228,6 +229,8 @@ export type ClosePositionResult =
       close_txs: string[];
       txs: string[];
       pnl_usd?: number;
+      pnl_true_usd?: number;
+      pnl_sol?: number;
       pnl_pct?: number;
       base_mint?: string;
       auto_swapped?: boolean;
@@ -1109,6 +1112,7 @@ export async function getMyPositions({
   force = false,
   silent = false,
   wallet_address = null,
+  skip_sync = false,
 }: GetMyPositionsOptions = {}): Promise<PositionsPayload> {
   let walletOverride: string | null = null;
   try {
@@ -1137,7 +1141,7 @@ export async function getMyPositions({
           if (!silent) log("positions", `Computing PnL from RPC (${config.pnl.rpcUrl})...`);
           const rpcResult = await computePositions(walletAddress);
           if (useLocalWallet) {
-            syncOpenPositions(rpcResult.positions.map((p) => p.position));
+            if (!skip_sync) syncOpenPositions(rpcResult.positions.map((p) => p.position));
             _positionsCache = rpcResult;
             _positionsCacheAt = Date.now();
           }
@@ -1166,7 +1170,7 @@ export async function getMyPositions({
           log("positions_warn", `Meteora PnL path failed (${message}); falling back to on-chain RPC engine`);
           const rpcResult = await computePositions(walletAddress);
           if (useLocalWallet) {
-            syncOpenPositions(rpcResult.positions.map((p) => p.position));
+            if (!skip_sync) syncOpenPositions(rpcResult.positions.map((p) => p.position));
             _positionsCache = rpcResult;
             _positionsCacheAt = Date.now();
           }
@@ -1313,7 +1317,7 @@ export async function getMyPositions({
         source: "meteora",
       };
       if (useLocalWallet) {
-        syncOpenPositions(positions.map((p) => p.position));
+        if (!skip_sync) syncOpenPositions(positions.map((p) => p.position));
         _positionsCache = result;
         _positionsCacheAt = Date.now();
       }
@@ -1436,9 +1440,31 @@ function resolvePerformanceSignalSnapshot({
 }
 
 function getClosedPnlValue(posEntry: MeteoraPositionPnlItem, solMode = false): number {
-  return solMode
-    ? maybeNum(posEntry.pnlSol) ?? maybeNum(posEntry.pnl?.valueNative) ?? 0
-    : maybeNum(posEntry.pnlUsd) ?? maybeNum(posEntry.pnl?.value) ?? 0;
+  const reported = solMode
+    ? maybeNum(posEntry.pnlSol) ?? maybeNum(posEntry.pnl?.valueNative)
+    : maybeNum(posEntry.pnlUsd) ?? maybeNum(posEntry.pnl?.value);
+  if (reported != null && reported !== 0) return reported;
+
+  const withdrawn = solMode
+    ? safeNum(posEntry.allTimeWithdrawals?.total?.sol)
+    : safeNum(posEntry.allTimeWithdrawals?.total?.usd);
+  const deposited = solMode
+    ? safeNum(posEntry.allTimeDeposits?.total?.sol)
+    : safeNum(posEntry.allTimeDeposits?.total?.usd);
+  const fees = solMode
+    ? safeNum(posEntry.allTimeFees?.total?.sol)
+    : safeNum(posEntry.allTimeFees?.total?.usd);
+  if (withdrawn > 0 && deposited > 0) {
+    return withdrawn + fees - deposited;
+  }
+
+  const pct = solMode
+    ? maybeNum(posEntry.pnlSolPctChange) ?? maybeNum(posEntry.pnl?.percentNative)
+    : maybeNum(posEntry.pnlPctChange) ?? maybeNum(posEntry.pnl?.percent);
+  if (pct != null && pct !== 0 && deposited > 0) {
+    return (pct / 100) * deposited;
+  }
+  return reported ?? 0;
 }
 
 function getClosedPnlPct(posEntry: MeteoraPositionPnlItem, solMode = false): number {
@@ -1574,7 +1600,7 @@ export async function closePosition({
     let closedConfirmed = false;
     for (let attempt = 0; attempt < 4; attempt++) {
       try {
-        const refreshed = await getMyPositions({ force: true, silent: true });
+        const refreshed = await getMyPositions({ force: true, silent: true, skip_sync: true });
         const stillOpen = refreshed?.positions?.some((p) => p.position === normPos);
         if (!stillOpen) {
           closedConfirmed = true;
@@ -1620,6 +1646,7 @@ export async function closePosition({
 
       let pnlUsd = 0;
       let pnlTrueUsd = 0;
+      let pnlSol = 0;
       let pnlPct = 0;
       let finalValueUsd = 0;
       let initialUsd = 0;
@@ -1638,10 +1665,12 @@ export async function closePosition({
               (p) => (p.positionAddress ?? p.address ?? p.position) === normPos
             );
             if (posEntry) {
-              const nextPnlUsd = safeNum(posEntry.pnlUsd);
-              const nextPnlValue = config.management.solMode ? getClosedPnlValue(posEntry, true) : nextPnlUsd;
+              const nextPnlTrueUsd = getClosedPnlValue(posEntry, false);
+              const nextPnlSol = getClosedPnlValue(posEntry, true);
+              const nextPnlValue = config.management.solMode ? nextPnlSol : nextPnlTrueUsd;
               const nextPnlPct = getClosedPnlPct(posEntry, config.management.solMode);
               const nextFinalValueUsd = parseFloat(String(posEntry.allTimeWithdrawals?.total?.usd || 0));
+              const nextFinalValueSol = parseFloat(String(posEntry.allTimeWithdrawals?.total?.sol || 0));
               const nextInitialUsd = parseFloat(String(posEntry.allTimeDeposits?.total?.usd || 0));
               const nextFeesUsd = parseFloat(String(posEntry.allTimeFees?.total?.usd || 0)) || feesUsd;
               const nextFeesSol = maybeNum(posEntry.allTimeFees?.total?.sol);
@@ -1651,17 +1680,32 @@ export async function closePosition({
                   "close_warn",
                   `Rejected unsettled closed PnL for ${normPos.slice(0, 8)} on attempt ${attempt + 1}/6: ${nextPnlPct.toFixed(2)}%`
                 );
+              } else if (nextFinalValueUsd <= 0 && nextFinalValueSol <= 0 && attempt < 5) {
+                log(
+                  "close_warn",
+                  `Closed PnL withdrawal not indexed yet for ${normPos.slice(0, 8)} on attempt ${attempt + 1}/6 — retrying`
+                );
               } else {
-                pnlTrueUsd = nextPnlUsd;
+                pnlTrueUsd = nextPnlTrueUsd;
+                pnlSol = nextPnlSol;
                 pnlUsd = nextPnlValue;
                 pnlPct = nextPnlPct;
                 finalValueUsd = nextFinalValueUsd;
                 initialUsd = nextInitialUsd;
                 feesUsd = nextFeesUsd;
                 if (nextFeesSol != null) feesSol = nextFeesSol;
+                if (pnlSol === 0 && pnlPct !== 0 && tracked.amount_sol > 0) {
+                  pnlSol = (pnlPct / 100) * tracked.amount_sol;
+                  if (config.management.solMode) pnlUsd = pnlSol;
+                }
+                if (pnlTrueUsd === 0 && pnlPct !== 0 && initialUsd > 0) {
+                  pnlTrueUsd = (pnlPct / 100) * initialUsd;
+                  if (!config.management.solMode) pnlUsd = pnlTrueUsd;
+                }
+                const logPnlFormatted = config.management.solMode ? pnlUsd.toFixed(4) : pnlUsd.toFixed(2);
                 log(
                   "close",
-                  `Closed PnL from API: pnl=${pnlUsd.toFixed(2)} ${config.management.solMode ? "SOL" : "USD"} (${pnlPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(2)} USD, deposited=${initialUsd.toFixed(2)} USD`
+                  `Closed PnL from API: pnl=${logPnlFormatted} ${config.management.solMode ? "SOL" : "USD"} (${pnlPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(2)} USD, deposited=${initialUsd.toFixed(2)} USD`
                 );
                 break;
               }
@@ -1680,7 +1724,8 @@ export async function closePosition({
         const cachedPos = preCloseCachedPos ?? _positionsCache?.positions?.find((p) => p.position === normPos);
         if (cachedPos) {
           pnlTrueUsd = cachedPos.pnl_true_usd ?? (config.management.solMode ? 0 : cachedPos.pnl_usd) ?? 0;
-          pnlUsd = config.management.solMode ? (cachedPos.pnl_usd ?? 0) : pnlTrueUsd;
+          pnlSol = config.management.solMode ? (cachedPos.pnl_usd ?? 0) : 0;
+          pnlUsd = config.management.solMode ? pnlSol : pnlTrueUsd;
           pnlPct = cachedPos.pnl_pct ?? 0;
           feesUsd = Math.max(
             feesUsd,
@@ -1700,7 +1745,11 @@ export async function closePosition({
             initialUsd = Math.max(0, finalValueUsd + feesUsd - pnlTrueUsd);
           }
           if (config.management.solMode && cachedPos.pnl_pct == null && tracked.amount_sol > 0) {
-            pnlPct = (pnlUsd / tracked.amount_sol) * 100;
+            pnlPct = (pnlSol / tracked.amount_sol) * 100;
+          }
+          if (pnlSol === 0 && pnlPct !== 0 && tracked.amount_sol > 0) {
+            pnlSol = (pnlPct / 100) * tracked.amount_sol;
+            if (config.management.solMode) pnlUsd = pnlSol;
           }
           log("close_warn", `Using cached pnl fallback because closed API has not settled yet`);
         }
@@ -1724,7 +1773,7 @@ export async function closePosition({
           const ep = parsedDiscovery.success ? parsedDiscovery.data.data?.[0] : undefined;
           if (ep) {
             exitMarket = {
-              exit_mcap: safeNum(ep.token_x?.organic_score) || null,
+              exit_mcap: safeNum(ep.token_x?.mcap ?? ep.token_x?.market_cap ?? ep.mcap ?? ep.market_cap) || null,
               exit_tvl: safeNum(ep.tvl ?? ep.active_tvl) || null,
               exit_volume: safeNum(ep.volume) || null,
             };
@@ -1776,7 +1825,8 @@ export async function closePosition({
         reason: reason || "agent decision",
         risks,
         metrics: {
-          pnl_usd: pnlUsd,
+          pnl_usd: pnlTrueUsd,
+          pnl_sol: pnlSol,
           pnl_pct: pnlPct,
           fees_usd: feesUsd,
           minutes_held: minutesHeld,
@@ -1792,6 +1842,8 @@ export async function closePosition({
         close_txs: closeTxHashes,
         txs: txHashes,
         pnl_usd: pnlUsd,
+        pnl_true_usd: pnlTrueUsd,
+        pnl_sol: pnlSol,
         pnl_pct: pnlPct,
         base_mint: closeBaseMint,
       };

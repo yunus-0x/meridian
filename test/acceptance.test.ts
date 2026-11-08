@@ -1,8 +1,7 @@
 /**
  * Meridian Acceptance Test Suite (Tiers 1-4)
  * Requirement-driven & Opaque-box testing mapping Features 1-27 from PROJECT.md.
- *
- * Run: npx tsx --test test/acceptance.test.js
+ * Converted to 100% Vitest and strict Oracle TypeScript compliance.
  */
 
 process.env.NODE_ENV = 'test';
@@ -10,23 +9,37 @@ process.env.DISABLE_TELEGRAM = 'true';
 delete process.env.TELEGRAM_BOT_TOKEN;
 delete process.env.TELEGRAM_CHAT_ID;
 
-import test, { describe, before, after } from 'node:test';
-import assert from 'node:assert/strict';
+import { describe, test, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { z } from 'zod';
 
 import { REPO_ROOT, repoPath } from '../repo-root.js';
 import { log, logAction } from '../logger.js';
 import { envryptEncrypt, envryptDecrypt } from '../envcrypt.js';
+import { vi } from 'vitest';
+
+vi.mock('../decision-log.js', async () => {
+  return await vi.importActual<typeof import('../decision-log.js')>('../decision-log.ts');
+});
+vi.mock('../smart-wallets.js', async () => {
+  return await vi.importActual<typeof import('../smart-wallets.js')>('../smart-wallets.ts');
+});
+
 import { addSmartWallet, removeSmartWallet, listSmartWallets } from '../smart-wallets.js';
 import { isBlacklisted, addToBlacklist, removeFromBlacklist, listBlacklist } from '../token-blacklist.js';
 import { isDevBlocked, blockDev, unblockDev, listBlockedDevs } from '../dev-blocklist.js';
 import { appendDecision, getRecentDecisions, getDecisionSummary } from '../decision-log.js';
 import { config, computeDeployAmount } from '../config.js';
-import { getDeterministicCloseRule, computeBinsBelow } from '../exit-rules.js';
+import {
+  getDeterministicCloseRule,
+  computeBinsBelow,
+  type DeterministicPositionMetrics,
+  type ManagementConfigInput,
+} from '../exit-rules.js';
 import {
   trackPosition,
   markOutOfRange,
@@ -42,22 +55,44 @@ import {
 } from '../state.js';
 import { recordPerformance, getPerformanceHistory, getPerformanceSummary } from '../performance.js';
 import { addPoolNote, getPoolMemory } from '../pool-memory.js';
-import { connection, readRpc, fetchJson } from '../standalone/rpc.js';
+import { connection } from '../standalone/rpc.js';
 import { aggregateTokenAccounts } from '../standalone/balances.js';
 import { withWalletLock } from '../standalone/transactions.js';
-import { decodeEvents, DLMM_PROGRAM } from '../standalone/events.js';
-import { MonitorStore, qualifyingEvents, acceptEvents, finishSignal } from '../standalone/store.js';
+import { DLMM_PROGRAM } from '../standalone/events.js';
+import {
+  MonitorStore,
+  acceptEvents,
+  finishSignal,
+  type MonitorEvent,
+  type AcceptEventsOptions,
+  type FinishSignalOptions,
+} from '../standalone/store.js';
 import { normalizeMint } from '../tools/wallet.js';
 import { executeTool } from '../tools/executor.js';
 import { rejectToken, rejectPool } from '../standalone/screening.js';
 import { localQuantizedForecast, buildTacticalSignals } from '../standalone/chronos.js';
+import type { GeckoCandleTuple } from '../src/schemas/api.js';
 import { isEnabled as isTelegramEnabled, notifyDeploy, notifyClose, notifySwap } from '../telegram.js';
 import { _test as adminTest } from '../standalone/telegram-admin.js';
+import {
+  snapshotStateFiles,
+  restoreStateFiles,
+  cleanDanglingLockFile,
+} from './helpers/state-isolation.js';
 
 const require = createRequire(import.meta.url);
 
-function runCli(args, extraEnv = {}) {
-  const env = { ...process.env, DRY_RUN: 'true', NODE_ENV: 'test', DISABLE_TELEGRAM: 'true', ...extraEnv };
+function runCli(
+  args: readonly string[],
+  extraEnv: Readonly<Record<string, string>> = {}
+): SpawnSyncReturns<string> {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    DRY_RUN: 'true',
+    NODE_ENV: 'test',
+    DISABLE_TELEGRAM: 'true',
+    ...extraEnv,
+  };
   delete env.LLM_API_KEY;
   delete env.OPENROUTER_API_KEY;
   delete env.TELEGRAM_BOT_TOKEN;
@@ -70,33 +105,15 @@ function runCli(args, extraEnv = {}) {
   });
 }
 
-const BACKED_UP_FILES = [
-  'smart-wallets.json',
-  'token-blacklist.json',
-  'dev-blocklist.json',
-  'decision-log.json',
-  'state.json',
-];
-
-const backups = new Map();
-
-before(() => {
-  for (const name of BACKED_UP_FILES) {
-    const fullPath = repoPath(name);
-    if (fs.existsSync(fullPath)) {
-      backups.set(name, fs.readFileSync(fullPath, 'utf8'));
-    }
-  }
+beforeAll(() => {
+  snapshotStateFiles();
 });
 
-after(() => {
-  for (const name of BACKED_UP_FILES) {
-    const fullPath = repoPath(name);
-    if (backups.has(name)) {
-      fs.writeFileSync(fullPath, backups.get(name));
-    } else if (fs.existsSync(fullPath)) {
-      fs.unlinkSync(fullPath);
-    }
+afterAll(() => {
+  try {
+    restoreStateFiles();
+  } finally {
+    cleanDanglingLockFile();
   }
 });
 
@@ -106,28 +123,42 @@ after(() => {
 describe('Tier 1: Feature Baseline & Happy Path Coverage', () => {
   test('F1 & F25: PM2 ecosystem config and daemon entrypoint integrity', () => {
     const ecosystemPath = repoPath('ecosystem.config.cjs');
-    assert.ok(fs.existsSync(ecosystemPath), 'ecosystem.config.cjs must exist');
-    const ecosystem = require(ecosystemPath);
-    assert.ok(Array.isArray(ecosystem.apps) && ecosystem.apps.length > 0, 'apps array configured');
+    expect(fs.existsSync(ecosystemPath)).toBe(true);
+
+    const rawEcosystem: unknown = require(ecosystemPath);
+    const EcosystemSchema = z.object({
+      apps: z.array(
+        z.object({
+          name: z.string(),
+          script: z.string(),
+          interpreter: z.string(),
+          exec_mode: z.string(),
+        }).passthrough()
+      ).min(1),
+    }).passthrough();
+    const ecosystem = EcosystemSchema.parse(rawEcosystem);
+
     const app = ecosystem.apps[0];
-    assert.equal(app.name, 'meridian');
-    assert.equal(app.script, path.join(REPO_ROOT, 'index.js'));
-    assert.equal(app.interpreter, 'node');
-    assert.equal(app.exec_mode, 'fork');
+    expect(app).toBeDefined();
+    if (!app) throw new Error('Ecosystem app configuration missing');
+    expect(app.name).toBe('meridian');
+    expect(app.script).toBe(path.join(REPO_ROOT, 'index.js'));
+    expect(app.interpreter).toBe('node');
+    expect(app.exec_mode).toBe('fork');
 
     const indexContent = fs.readFileSync(repoPath('index.js'), 'utf8');
-    assert.match(indexContent, /import "\.\/envcrypt\.js"/);
-    assert.match(indexContent, /startStandalone/);
+    expect(indexContent).toMatch(/import "\.\/envcrypt\.js"/);
+    expect(indexContent).toMatch(/startStandalone/);
   });
 
   test('F3: Core storage & utilities (repoPath, logger, decision-log, envcrypt)', () => {
-    assert.equal(repoPath('test-subpath'), path.join(REPO_ROOT, 'test-subpath'));
+    expect(repoPath('test-subpath')).toBe(path.join(REPO_ROOT, 'test-subpath'));
 
     // Logger writes without throwing
-    assert.doesNotThrow(() => {
+    expect(() => {
       log('test_cat', 'Unit test log message');
       logAction({ tool: 'get_wallet_balance', success: true, duration_ms: 12, result: { sol: 1.5 } });
-    });
+    }).not.toThrow();
 
     // Decision-log append and read (including BigInt serialization)
     const dec = appendDecision({
@@ -140,171 +171,194 @@ describe('Tier 1: Feature Baseline & Happy Path Coverage', () => {
       risks: ['risk1', 'risk2'],
       metrics: { lamports: 1000000000n },
     });
-    assert.ok(dec.id && dec.id.startsWith('dec_'));
-    assert.equal(dec.actor, 'TEST_WRITER');
-    assert.equal(dec.metrics.lamports, '1000000000');
+    expect(dec.id.startsWith('dec_')).toBe(true);
+    expect(dec.actor).toBe('TEST_WRITER');
+    expect(dec.metrics?.['lamports']).toBe('1000000000');
+
     const recent = getRecentDecisions(5);
-    assert.ok(recent.some(d => d.id === dec.id));
+    expect(recent.some(d => d.id === dec.id)).toBe(true);
     const summary = getDecisionSummary(5);
-    assert.match(summary, /TEST_WRITER/);
+    expect(summary).toMatch(/TEST_WRITER/);
 
     // Envcrypt roundtrip
     const secret = 'super-secret-key-12345';
     const key = 'encryption-key-passphrase';
     const encrypted = envryptEncrypt(secret, key);
-    assert.notEqual(encrypted, secret);
+    expect(encrypted).not.toBe(secret);
     const decrypted = envryptDecrypt(encrypted, key);
-    assert.equal(decrypted, secret);
+    expect(decrypted).toBe(secret);
   });
 
   test('F4: Smart wallets, token blacklist and dev blocklist CRUD operations', () => {
     const testWallet = 'Wa11t11111111111111111111111111111111111111';
     const addRes = addSmartWallet({ name: 'AlphaWhale', address: testWallet, category: 'alpha', type: 'lp' });
-    assert.equal(addRes.success, true);
-    assert.equal(addRes.wallet.name, 'AlphaWhale');
+    expect(addRes.success).toBe(true);
+    if (!addRes.success) throw new Error('addSmartWallet failed');
+    expect(addRes.wallet.name).toBe('AlphaWhale');
 
     const listRes = listSmartWallets();
-    assert.ok(listRes.wallets.some(w => w.address === testWallet));
+    expect(listRes.wallets.some(w => w.address === testWallet)).toBe(true);
 
     const removeRes = removeSmartWallet({ address: testWallet });
-    assert.equal(removeRes.success, true);
-    assert.equal(removeRes.removed, 'AlphaWhale');
+    expect(removeRes.success).toBe(true);
+    if (!removeRes.success) throw new Error('removeSmartWallet failed');
+    expect(removeRes.removed).toBe('AlphaWhale');
 
     // Token blacklist CRUD
     const testMint = 'BadMint111111111111111111111111111111111111';
-    assert.equal(isBlacklisted(testMint), false);
+    expect(isBlacklisted(testMint)).toBe(false);
     const blAdd = addToBlacklist({ mint: testMint, symbol: 'RUG', reason: 'Malicious dev drain' });
-    assert.equal(blAdd.blacklisted, true);
-    assert.equal(isBlacklisted(testMint), true);
+    if (!('blacklisted' in blAdd)) throw new Error('Expected blacklisted in result');
+    expect(blAdd.blacklisted).toBe(true);
+    expect(isBlacklisted(testMint)).toBe(true);
+
     const blList = listBlacklist();
-    assert.ok(blList.blacklist.some(t => t.mint === testMint));
+    expect(blList.blacklist.some(t => t.mint === testMint)).toBe(true);
+
     const blRem = removeFromBlacklist({ mint: testMint });
-    assert.equal(blRem.removed, true);
-    assert.equal(isBlacklisted(testMint), false);
+    if (!('removed' in blRem)) throw new Error('Expected removed in result');
+    expect(blRem.removed).toBe(true);
+    expect(isBlacklisted(testMint)).toBe(false);
 
     // Dev blocklist CRUD
     const testDev = 'Dev11111111111111111111111111111111111111111';
-    assert.equal(isDevBlocked(testDev), false);
+    expect(isDevBlocked(testDev)).toBe(false);
     const devAdd = blockDev({ wallet: testDev, label: 'SerialRugger', reason: 'Multiple abandoned pools' });
-    assert.equal(devAdd.blocked, true);
-    assert.equal(isDevBlocked(testDev), true);
+    if (!('blocked' in devAdd)) throw new Error('Expected blocked in result');
+    expect(devAdd.blocked).toBe(true);
+    expect(isDevBlocked(testDev)).toBe(true);
+
     const devList = listBlockedDevs();
-    assert.ok(devList.blocked_devs.some(d => d.wallet === testDev));
+    expect(devList.blocked_devs.some(d => d.wallet === testDev)).toBe(true);
+
     const devRem = unblockDev({ wallet: testDev });
-    assert.equal(devRem.unblocked, true);
-    assert.equal(isDevBlocked(testDev), false);
+    if (!('unblocked' in devRem)) throw new Error('Expected unblocked in result');
+    expect(devRem.unblocked).toBe(true);
+    expect(isDevBlocked(testDev)).toBe(false);
   });
 
   test('F5: Config management structure and computeDeployAmount dynamic compounding', () => {
-    assert.ok(config.standalone && typeof config.standalone === 'object');
-    assert.ok(config.risk && typeof config.risk === 'object');
-    assert.ok(config.screening && typeof config.screening === 'object');
-    assert.ok(config.management && typeof config.management === 'object');
-    assert.ok(config.strategy && typeof config.strategy === 'object');
+    expect(typeof config.standalone).toBe('object');
+    expect(typeof config.risk).toBe('object');
+    expect(typeof config.screening).toBe('object');
+    expect(typeof config.management).toBe('object');
+    expect(typeof config.strategy).toBe('object');
 
     // computeDeployAmount scaling
     const smallWallet = computeDeployAmount(0.5);
-    assert.ok(typeof smallWallet === 'number');
-    assert.ok(smallWallet >= 0);
+    expect(typeof smallWallet).toBe('number');
+    expect(smallWallet).toBeGreaterThanOrEqual(0);
 
     const midWallet = computeDeployAmount(10.0, 1.0);
-    assert.ok(midWallet >= config.management.deployAmountSol);
-    assert.ok(midWallet <= config.risk.maxDeployAmount);
+    expect(midWallet).toBeGreaterThanOrEqual(config.management.deployAmountSol);
+    expect(midWallet).toBeLessThanOrEqual(config.risk.maxDeployAmount);
 
     // Conviction multiplier sensitivity (clamped to [0.75, 1.25])
     const lowConv = computeDeployAmount(10.0, 0.5);
     const highConv = computeDeployAmount(10.0, 1.5);
-    assert.ok(highConv >= lowConv, `highConv (${highConv}) should be >= lowConv (${lowConv})`);
+    expect(highConv).toBeGreaterThanOrEqual(lowConv);
   });
 
   test('F8: Performance tracking and pool memory', () => {
     const summary = getPerformanceSummary();
-    assert.ok(summary === null || typeof summary === 'object');
+    expect(summary === null || typeof summary === 'object').toBe(true);
 
     const history = getPerformanceHistory({ hours: 24 });
-    assert.ok(Array.isArray(history.positions));
+    expect(Array.isArray(history.positions)).toBe(true);
 
     const pool = 'PoolMemTest1111111111111111111111111111111';
     addPoolNote({ pool_address: pool, note: 'Tested note insertion' });
     const mem = getPoolMemory({ pool_address: pool });
-    assert.ok(mem && mem.notes.some(n => n.note === 'Tested note insertion'));
+    expect(mem).toBeDefined();
+    expect(mem?.notes?.some(n => n.note === 'Tested note insertion')).toBe(true);
   });
 
   test('F14 & F21 & F22: Wallet mint normalization, Telegram formatting, and Admin UI schema', async () => {
-    assert.equal(normalizeMint('So11111111111111111111111111111111111111112'), 'So11111111111111111111111111111111111111112');
-    assert.equal(normalizeMint('SOL'), 'So11111111111111111111111111111111111111112');
-    assert.equal(normalizeMint('native'), 'So11111111111111111111111111111111111111112');
+    expect(normalizeMint('So11111111111111111111111111111111111111112')).toBe('So11111111111111111111111111111111111111112');
+    expect(normalizeMint('SOL')).toBe('So11111111111111111111111111111111111111112');
+    expect(normalizeMint('native')).toBe('So11111111111111111111111111111111111111112');
 
-    // Telegram formatters execute safely (mocked to prevent spamming user's live bot)
-    assert.equal(typeof isTelegramEnabled(), 'boolean');
-    assert.equal(isTelegramEnabled(), false);
-    await assert.doesNotReject(async () => {
+    // Telegram formatters execute safely
+    expect(typeof isTelegramEnabled()).toBe('boolean');
+    expect(isTelegramEnabled()).toBe(false);
+
+    await expect((async () => {
       await notifyDeploy({ pair: 'TEST/SOL', amountSol: 1, position: 'pos123', tx: 'tx123' });
       await notifyClose({ pair: 'TEST/SOL', pnlUsd: 10, pnlPct: 5, solMode: false });
       await notifySwap({ inputSymbol: 'TEST', outputSymbol: 'SOL', amountIn: 100, amountOut: 1, tx: 'tx123' });
-    });
+    })()).resolves.not.toThrow();
 
     // Admin UI Schema verification
     const { SECTIONS, byKey, validate, fmtValue } = adminTest;
-    assert.ok(SECTIONS.length >= 6);
+    expect(SECTIONS.length).toBeGreaterThanOrEqual(6);
     const sectionIds = SECTIONS.map(s => s.id);
-    assert.deepEqual(sectionIds, ['trigger', 'screening', 'risk', 'strategy', 'exits', 'rpc']);
+    expect(sectionIds).toEqual(['trigger', 'screening', 'risk', 'strategy', 'exits', 'rpc']);
 
     const riskSection = SECTIONS.find(s => s.id === 'risk');
-    assert.ok(riskSection && riskSection.settings.length > 0);
+    expect(riskSection).toBeDefined();
+    expect(riskSection?.settings.length).toBeGreaterThan(0);
+
     const maxPos = byKey.get('maxPositions');
-    assert.ok(maxPos);
-    assert.equal(validate(maxPos, '5'), 5);
-    assert.match(fmtValue(maxPos), /\d+/);
+    expect(maxPos).toBeDefined();
+    if (!maxPos) throw new Error('maxPositions setting missing');
+    expect(validate(maxPos, '5')).toBe(5);
+    expect(fmtValue(maxPos)).toMatch(/\d+/);
   });
 
   test('F24 & F26: CLI 17 subcommands and utility scripts invocation', () => {
     // 1. Help command advertising all 17 subcommands
     const helpRes = runCli(['help']);
-    assert.equal(helpRes.status, 0);
+    expect(helpRes.status).toBe(0);
     const expectedSubcommands = [
       'start', 'status', 'balance', 'positions', 'pnl', 'screen',
       'pool', 'active-bin', 'manage', 'close', 'claim', 'swap',
       'wallets', 'blacklist', 'performance', 'config', 'help',
     ];
     for (const cmd of expectedSubcommands) {
-      assert.match(helpRes.stdout, new RegExp(`\\b${cmd}\\b`), `CLI help must list subcommand '${cmd}'`);
+      expect(helpRes.stdout).toMatch(new RegExp(`\\b${cmd}\\b`));
     }
 
     // 2. Config command
     const configRes = runCli(['config']);
-    assert.equal(configRes.status, 0);
-    const parsedConfig = JSON.parse(configRes.stdout);
-    assert.ok('risk' in parsedConfig && 'screening' in parsedConfig);
+    expect(configRes.status).toBe(0);
+    const rawConfig: unknown = JSON.parse(configRes.stdout);
+    expect(rawConfig).toBeTypeOf('object');
+    expect(rawConfig).not.toBeNull();
+    expect(rawConfig).toHaveProperty('risk');
+    expect(rawConfig).toHaveProperty('screening');
 
     // 3. Wallets list command
     const walletsRes = runCli(['wallets']);
-    assert.equal(walletsRes.status, 0);
-    const parsedWallets = JSON.parse(walletsRes.stdout);
-    assert.ok('wallets' in parsedWallets);
+    expect(walletsRes.status).toBe(0);
+    const rawWallets: unknown = JSON.parse(walletsRes.stdout);
+    expect(rawWallets).toBeTypeOf('object');
+    expect(rawWallets).not.toBeNull();
+    expect(rawWallets).toHaveProperty('wallets');
 
     // 4. Blacklist list command
     const blRes = runCli(['blacklist']);
-    assert.equal(blRes.status, 0);
-    const parsedBl = JSON.parse(blRes.stdout);
-    assert.ok('blacklist' in parsedBl);
+    expect(blRes.status).toBe(0);
+    const rawBl: unknown = JSON.parse(blRes.stdout);
+    expect(rawBl).toBeTypeOf('object');
+    expect(rawBl).not.toBeNull();
+    expect(rawBl).toHaveProperty('blacklist');
 
     // 5. Scripts syntax verification script
-    const syntaxRes = spawnSync(process.execPath, ['scripts/check-syntax.js'], {
+    const syntaxRes: SpawnSyncReturns<string> = spawnSync(process.execPath, ['scripts/check-syntax.js'], {
       cwd: REPO_ROOT,
       encoding: 'utf8',
       timeout: 10_000,
     });
-    assert.equal(syntaxRes.status, 0, syntaxRes.stderr);
+    expect(syntaxRes.status).toBe(0);
 
     // 6. Scripts envrypt CLI
-    const envcryptCli = spawnSync(process.execPath, ['scripts/envrypt.js'], {
+    const envcryptCli: SpawnSyncReturns<string> = spawnSync(process.execPath, ['scripts/envrypt.js'], {
       cwd: REPO_ROOT,
       encoding: 'utf8',
       timeout: 10_000,
     });
-    assert.equal(envcryptCli.status, 0);
-    assert.match(envcryptCli.stdout, /Usage:/);
+    expect(envcryptCli.status).toBe(0);
+    expect(envcryptCli.stdout).toMatch(/Usage:/);
   });
 });
 
@@ -322,15 +376,13 @@ describe('Tier 2: Boundary, Corner & Adversarial Integrity', () => {
     try {
       // 1. Genuinely test token-blacklist.ts error branch on unreadable/corrupted file
       fs.writeFileSync(blacklistFile, 'MALFORMED_JSON_CONTENT{{{');
-      assert.throws(
-        () => isBlacklisted('Mint111111111111111111111111111111111111'),
+      expect(() => isBlacklisted('Mint111111111111111111111111111111111111')).toThrow(
         /Safety blacklist is unreadable:/
       );
 
       // 2. Genuinely test dev-blocklist.ts error branch on unreadable/corrupted file
       fs.writeFileSync(blocklistFile, 'MALFORMED_JSON_CONTENT{{{');
-      assert.throws(
-        () => isDevBlocked('Dev1111111111111111111111111111111111111'),
+      expect(() => isDevBlocked('Dev1111111111111111111111111111111111111')).toThrow(
         /Safety blocklist is unreadable:/
       );
     } finally {
@@ -349,7 +401,7 @@ describe('Tier 2: Boundary, Corner & Adversarial Integrity', () => {
   });
 
   test('F4: Solana public key boundary validation', () => {
-    const invalidKeys = [
+    const invalidKeys: readonly (string | null)[] = [
       'too-short',
       '00000000000000000000000000000000000000000000',
       'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII',
@@ -362,32 +414,26 @@ describe('Tier 2: Boundary, Corner & Adversarial Integrity', () => {
 
     for (const key of invalidKeys) {
       const res = addSmartWallet({ name: 'BadKey', address: key });
-      assert.equal(res.success, false);
-      assert.equal(res.error, 'Invalid Solana address format');
+      expect(res.success).toBe(false);
+      if (res.success) throw new Error('Expected failure');
+      expect(res.error).toBe('Invalid Solana address format');
     }
   });
 
-  test('F9: Solana RPC Client boundary validation & missing RPC_URL handling', async () => {
-    assert.throws(
-      () => connection(''),
-      /Configure RPC_URL/
-    );
-
-    assert.throws(
-      () => connection('ftp://rpc.solana.com'),
-      /`http:` or `https:`/i
-    );
+  test('F9: Solana RPC Client boundary validation & missing RPC_URL handling', () => {
+    expect(() => connection('')).toThrow(/Configure RPC_URL/);
+    expect(() => connection('ftp://rpc.solana.com')).toThrow(/`http:` or `https:`/i);
   });
 
   test('F10: Token balance aggregation edge cases (zero balance, decimal conflict, program merge)', () => {
     const MINT = 'MintAgg111111111111111111111111111111111111';
-    const acct = (mint, amount, decimals) => ({
+    const acct = (mint: string, amount: number | string, decimals: number) => ({
       account: { data: { parsed: { info: { mint, tokenAmount: { amount: String(amount), decimals } } } } },
     });
 
     // 1. Zero balances dropped
     const respZero = [{ value: [acct('MINT_A', 0, 6)] }];
-    assert.deepEqual(aggregateTokenAccounts(respZero), []);
+    expect(aggregateTokenAccounts(respZero)).toEqual([]);
 
     // 2. Aggregate across programs
     const respMulti = [
@@ -395,41 +441,43 @@ describe('Tier 2: Boundary, Corner & Adversarial Integrity', () => {
       { value: [acct(MINT, 2500, 6)] },
     ];
     const agg = aggregateTokenAccounts(respMulti);
-    assert.equal(agg.length, 1);
-    assert.equal(agg[0].mint, MINT);
-    assert.equal(agg[0].balance, 0.0035);
+    expect(agg).toHaveLength(1);
+    expect(agg[0]?.mint).toBe(MINT);
+    expect(agg[0]?.balance).toBe(0.0035);
 
     // 3. Conflicting decimals thrown
     const respConflict = [
       { value: [acct(MINT, 1, 6)] },
       { value: [acct(MINT, 1, 9)] },
     ];
-    assert.throws(() => aggregateTokenAccounts(respConflict), /Conflicting token decimals/i);
+    expect(() => aggregateTokenAccounts(respConflict)).toThrow(/Conflicting token decimals/i);
   });
 
   test('F17 & F24: Tool executor & CLI boundary enforcement (missing flags, invalid amounts)', async () => {
     // Missing flags in CLI
     const missingMint = runCli(['screen']);
-    assert.equal(missingMint.status, 1);
-    assert.match(missingMint.stderr, /--mint is required/);
+    expect(missingMint.status).toBe(1);
+    expect(missingMint.stderr).toMatch(/--mint is required/);
 
     const missingPool = runCli(['pnl', '--position', 'pos1']);
-    assert.equal(missingPool.status, 1);
-    assert.match(missingPool.stderr, /--pool is required/);
+    expect(missingPool.status).toBe(1);
+    expect(missingPool.stderr).toMatch(/--pool is required/);
 
     // Non-positive amount in swap CLI
     const negSwap = runCli(['swap', '--from', 'MINT1', '--to', 'MINT2', '--amount', '0']);
-    assert.equal(negSwap.status, 1);
-    assert.match(negSwap.stderr, /--amount must be positive/);
+    expect(negSwap.status).toBe(1);
+    expect(negSwap.stderr).toMatch(/--amount must be positive/);
 
     // Executor returns error for unknown tool
     const res = await executeTool('unknown_hypothetical_tool', {});
-    assert.match(res.error, /Unknown tool/i);
+    if (!('error' in res)) throw new Error('Expected error in tool execution');
+    expect(res.error).toMatch(/Unknown tool/i);
   });
 
   test('F18: Token & Pool screening rejection guards', () => {
     const mint = 'TargetMint111111111111111111111111111111111';
     const settings = {
+      ...config.screening,
       minTokenFeesSol: 30,
       maxBotHoldersPct: 30,
       maxTop10Pct: 60,
@@ -453,7 +501,7 @@ describe('Tier 2: Boundary, Corner & Adversarial Integrity', () => {
       holderCount: 1000,
       fees: 50,
     };
-    assert.match(rejectToken(staleToken, mint, settings), /stale/i);
+    expect(rejectToken(staleToken, mint, settings)).toMatch(/stale/i);
 
     // Mint authority enabled rejected
     const authEnabledToken = {
@@ -464,14 +512,14 @@ describe('Tier 2: Boundary, Corner & Adversarial Integrity', () => {
       holderCount: 1000,
       fees: 50,
     };
-    assert.match(rejectToken(authEnabledToken, mint, settings), /authority is enabled/i);
+    expect(rejectToken(authEnabledToken, mint, settings)).toMatch(/authority is enabled/i);
 
     // Pool above max TVL rejected
     const highTvlPool = {
       pool_address: 'PoolHigh111111111111111111111111111111111111',
-      token_x: { address: mint, warnings: [] },
+      token_x: { address: mint, warnings: [], organic_score: 80 },
       token_y: { address: config.tokens.SOL, warnings: [], organic_score: 80 },
-      pool_type: 'dlmm',
+      pool_type: 'dlmm' as const,
       is_blacklisted: false,
       tvl: 500_000,
       active_tvl: 450_000,
@@ -481,7 +529,7 @@ describe('Tier 2: Boundary, Corner & Adversarial Integrity', () => {
       volatility: 1.5,
       pool_price: 1.0,
     };
-    assert.match(rejectPool(highTvlPool, mint, settings), /TVL outside limits/i);
+    expect(rejectPool(highTvlPool, mint, settings)).toMatch(/TVL outside limits/i);
   });
 
   test('F3: High-byte XOR encryption adversarial byte-range fidelity', () => {
@@ -492,7 +540,7 @@ describe('Tier 2: Boundary, Corner & Adversarial Integrity', () => {
 
     const encrypted = envryptEncrypt(testSecret, complexKey);
     const decrypted = envryptDecrypt(encrypted, complexKey);
-    assert.equal(decrypted, testSecret);
+    expect(decrypted).toBe(testSecret);
   });
 });
 
@@ -501,9 +549,9 @@ describe('Tier 2: Boundary, Corner & Adversarial Integrity', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 describe('Tier 3: Cross-Feature Integration Contracts', () => {
   test('F11: withWalletLock mutex prioritizes exits ahead of standard writes', async () => {
-    const executionOrder = [];
-    let resolveFirst;
-    const firstBarrier = new Promise(r => { resolveFirst = r; });
+    const executionOrder: string[] = [];
+    let resolveFirst!: () => void;
+    const firstBarrier = new Promise<void>(r => { resolveFirst = r; });
 
     // 1. Start long running standard operation
     const op1 = withWalletLock(async () => {
@@ -530,7 +578,7 @@ describe('Tier 3: Cross-Feature Integration Contracts', () => {
     resolveFirst();
     await Promise.all([op1, op2, op3]);
 
-    assert.deepEqual(executionOrder, [
+    expect(executionOrder).toEqual([
       'op1_started',
       'op1_ended',
       'op3_priority_exit',
@@ -539,13 +587,13 @@ describe('Tier 3: Cross-Feature Integration Contracts', () => {
   });
 
   test('F12 & F13: DLMM CPI events decoding & MonitorStore aggregation contract', () => {
-    assert.equal(DLMM_PROGRAM, 'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo');
+    expect(DLMM_PROGRAM).toBe('LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo');
 
     const MINT = 'MintTarget11111111111111111111111111111111';
     const W1 = 'Wa11111111111111111111111111111111111111111';
     const W2 = 'Wa22222222222222222222222222222222222222222';
     const now = Date.now();
-    const options = {
+    const options: AcceptEventsOptions & FinishSignalOptions = {
       walletThreshold: 2,
       windowSec: 120,
       screeningDeadlineSec: 120,
@@ -554,7 +602,7 @@ describe('Tier 3: Cross-Feature Integration Contracts', () => {
       walletGroups: {},
     };
 
-    const makeEvt = (wallet, depositSol, at) => ({
+    const makeEvt = (wallet: string, depositSol: number, at: number): MonitorEvent => ({
       id: `sig:${wallet}:${depositSol}:${at}`,
       wallet,
       mint: MINT,
@@ -566,32 +614,36 @@ describe('Tier 3: Cross-Feature Integration Contracts', () => {
     const storeFile = path.join(os.tmpdir(), `store-test-${Date.now()}.json`);
     const store = new MonitorStore(storeFile);
     const sig1 = acceptEvents(store, [makeEvt(W1, 1.0, now)], options, now);
-    assert.equal(sig1.length, 0);
+    expect(sig1).toHaveLength(0);
 
     const sig2 = acceptEvents(store, [makeEvt(W2, 1.5, now + 1000)], options, now + 1000);
-    assert.equal(sig2.length, 1);
-    assert.equal(sig2[0].mint, MINT);
-    assert.ok(sig2[0].deadline > now);
+    expect(sig2).toHaveLength(1);
+    const targetSig = sig2[0];
+    expect(targetSig).toBeDefined();
+    if (!targetSig) throw new Error('Expected target signal');
+    expect(targetSig.mint).toBe(MINT);
+    expect(targetSig.deadline).toBeGreaterThan(now);
 
-    finishSignal(store, sig2[0], 'Test cycle completed', options, now + 2000);
+    finishSignal(store, targetSig, 'Test cycle completed', options, now + 2000);
 
     const sig3 = acceptEvents(store, [makeEvt(W1, 2.0, now + 3000), makeEvt(W2, 2.0, now + 3000)], options, now + 3000);
-    assert.equal(sig3.length, 0);
+    expect(sig3).toHaveLength(0);
 
     if (fs.existsSync(storeFile)) fs.unlinkSync(storeFile);
   });
 
   test('F6 & F19: Chronos quantized forecasting & tactical signals contract', () => {
-    const synthCandles = Array.from({ length: 60 }, (_, i) => {
+    const synthCandles: GeckoCandleTuple[] = Array.from({ length: 60 }, (_, i) => {
       const p = 1.0 + Math.sin(i / 4) * 0.04 + i * 0.001;
       return [1700000000 + i * 300, p * 0.995, p * 1.01, p * 0.99, p, 1000 + i * 25];
     });
 
     const forecast = localQuantizedForecast(synthCandles, { poolAddress: 'PoolTest', binStep: 100 });
-    assert.ok(forecast);
-    assert.ok(forecast.summary.p10_pct <= forecast.summary.p50_pct);
-    assert.ok(forecast.summary.p50_pct <= forecast.summary.p90_pct);
-    assert.ok(forecast.recommended_bins.bins_below >= config.strategy.minBinsBelow);
+    expect(forecast).toBeDefined();
+    if (!forecast) throw new Error('Forecast is undefined');
+    expect(forecast.summary.p10_pct).toBeLessThanOrEqual(forecast.summary.p50_pct);
+    expect(forecast.summary.p50_pct).toBeLessThanOrEqual(forecast.summary.p90_pct);
+    expect(forecast.recommended_bins.bins_below).toBeGreaterThanOrEqual(config.strategy.minBinsBelow);
 
     const bullSignals = buildTacticalSignals({
       p10Pct: -5,
@@ -601,18 +653,19 @@ describe('Tier 3: Cross-Feature Integration Contracts', () => {
       bbPctB: 0.65,
       modelAgreement: 0.82,
     });
-    assert.ok(bullSignals);
-    assert.equal(bullSignals.x_ratio_mult, 0.85);
-    assert.equal(bullSignals.conviction_mult, 1.15);
-    assert.equal(bullSignals.let_winners_run, true);
+    expect(bullSignals).toBeDefined();
+    if (!bullSignals) throw new Error('Bull signals undefined');
+    expect(bullSignals.x_ratio_mult).toBe(0.85);
+    expect(bullSignals.conviction_mult).toBe(1.15);
+    expect(bullSignals.let_winners_run).toBe(true);
 
     const binsLowVol = computeBinsBelow(1.0, 100);
     const binsHighVol = computeBinsBelow(5.0, 100);
-    assert.ok(binsHighVol >= binsLowVol);
+    expect(binsHighVol).toBeGreaterThanOrEqual(binsLowVol);
   });
 
   test('F6 & F7: Deterministic exit rules contract across all triggers', () => {
-    const pos = base => ({
+    const pos = (base: Partial<DeterministicPositionMetrics>): DeterministicPositionMetrics => ({
       position: 'Pos111111111111111111111111111111111111111',
       pair: 'T/SOL',
       pnl_pct: 0,
@@ -624,7 +677,8 @@ describe('Tier 3: Cross-Feature Integration Contracts', () => {
       fee_per_tvl_24h: 10,
       ...base,
     });
-    const mgmt = {
+
+    const mgmt: ManagementConfigInput = {
       ...config.management,
       takeProfitPct: 8,
       outOfRangeBinsToClose: 25,
@@ -634,26 +688,26 @@ describe('Tier 3: Cross-Feature Integration Contracts', () => {
 
     // 1. Hard Stop-Loss (-60%) -> Rule 1
     const slRule = getDeterministicCloseRule(pos({ pnl_pct: -60 }), mgmt);
-    assert.equal(slRule?.rule, 1);
-    assert.match(slRule.reason, /Stop loss/i);
+    expect(slRule?.rule).toBe(1);
+    expect(slRule?.reason).toMatch(/Stop loss/i);
 
     // 2. Take-Profit (+10%) -> Rule 2
     const tpRule = getDeterministicCloseRule(pos({ pnl_pct: 10 }), mgmt);
-    assert.equal(tpRule?.rule, 2);
-    assert.match(tpRule.reason, /Take profit/i);
+    expect(tpRule?.rule).toBe(2);
+    expect(tpRule?.reason).toMatch(/Take profit/i);
 
     // 3. Pumped far above range -> Rule 3
     const pumpRule = getDeterministicCloseRule(pos({ active_bin: 130 }), mgmt);
-    assert.equal(pumpRule?.rule, 3);
-    assert.match(pumpRule.reason, /Pumped far above range/i);
+    expect(pumpRule?.rule).toBe(3);
+    expect(pumpRule?.reason).toMatch(/Pumped far above range/i);
 
     // 4. OOR above closes after 60m -> Rule 4
     const oorAboveRule = getDeterministicCloseRule(pos({ active_bin: 105, minutes_out_of_range: 65 }), mgmt);
-    assert.equal(oorAboveRule?.rule, 4);
+    expect(oorAboveRule?.rule).toBe(4);
 
     // 5. Suspicious PnL guard (never closes on PnL triggers when suspicious)
     const suspRule = getDeterministicCloseRule(pos({ pnl_pct: -95, pnl_pct_suspicious: true }), mgmt);
-    assert.equal(suspRule, null);
+    expect(suspRule).toBeNull();
   });
 });
 
@@ -666,7 +720,7 @@ describe('Tier 4: Real-World Scenarios & Convergence Lifecycle', () => {
     const store = new MonitorStore(tempStorePath);
     const targetMint = 'ConvergenceToken1111111111111111111111111';
     const now = Date.now();
-    const opts = {
+    const opts: AcceptEventsOptions & FinishSignalOptions = {
       walletThreshold: 2,
       windowSec: 60,
       screeningDeadlineSec: 60,
@@ -675,7 +729,7 @@ describe('Tier 4: Real-World Scenarios & Convergence Lifecycle', () => {
       walletGroups: {},
     };
 
-    const ev1 = {
+    const ev1: MonitorEvent = {
       id: 'tx_w1_pos1',
       wallet: 'AlphaWallet11111111111111111111111111111111',
       mint: targetMint,
@@ -684,9 +738,9 @@ describe('Tier 4: Real-World Scenarios & Convergence Lifecycle', () => {
       at: now,
     };
     const r1 = acceptEvents(store, [ev1], opts, now);
-    assert.equal(r1.length, 0, 'Single wallet deposit must not emit signal');
+    expect(r1).toHaveLength(0);
 
-    const ev2 = {
+    const ev2: MonitorEvent = {
       id: 'tx_w2_pos2',
       wallet: 'AlphaWallet22222222222222222222222222222222',
       mint: targetMint,
@@ -695,13 +749,15 @@ describe('Tier 4: Real-World Scenarios & Convergence Lifecycle', () => {
       at: now + 5000,
     };
     const r2 = acceptEvents(store, [ev2], opts, now + 5000);
-    assert.equal(r2.length, 1, 'Two independent alpha wallets must converge into a signal');
+    expect(r2).toHaveLength(1);
     const signal = r2[0];
-    assert.equal(signal.mint, targetMint);
-    assert.equal(signal.events.length, 2);
+    expect(signal).toBeDefined();
+    if (!signal) throw new Error('Expected signal');
+    expect(signal.mint).toBe(targetMint);
+    expect(signal.events).toHaveLength(2);
 
     finishSignal(store, signal, 'Autonomous deploy completed', opts, now + 10_000);
-    assert.ok(signal.cooldownUntil >= now + 10_000);
+    expect(signal.cooldownUntil).toBeGreaterThanOrEqual(now + 10_000);
 
     if (fs.existsSync(tempStorePath)) fs.unlinkSync(tempStorePath);
   });
@@ -716,50 +772,61 @@ describe('Tier 4: Real-World Scenarios & Convergence Lifecycle', () => {
       pool: poolAddress,
       pool_name: 'LIFE/SOL',
       amount_sol: 1.0,
-      lower_bin: 80,
-      upper_bin: 120,
+      bin_range: { min: 80, max: 120 },
       active_bin: 100,
       strategy: 'spot',
-      base_mint: 'LifeToken111111111111111111111111111111111',
     });
 
     const tracked = getTrackedPosition(posAddress);
-    assert.ok(tracked);
-    assert.equal(tracked.pool, poolAddress);
-    assert.equal(tracked.pool_name, 'LIFE/SOL');
+    expect(tracked).toBeDefined();
+    if (!tracked) throw new Error('tracked position missing');
+    expect(tracked.pool).toBe(poolAddress);
+    expect(tracked.pool_name).toBe('LIFE/SOL');
 
     // 2. Mark Out of Range
     markOutOfRange(posAddress);
     const oorPos = getTrackedPosition(posAddress);
-    assert.ok(oorPos.out_of_range_since);
-    assert.ok(minutesOutOfRange(posAddress) >= 0);
+    expect(oorPos).toBeDefined();
+    if (!oorPos) throw new Error('oorPos missing');
+    expect(oorPos.out_of_range_since).toBeDefined();
+    expect(minutesOutOfRange(posAddress)).toBeGreaterThanOrEqual(0);
 
     // 3. Mark In Range again
     markInRange(posAddress);
-    assert.equal(getTrackedPosition(posAddress).out_of_range_since, null);
+    const inRangePos = getTrackedPosition(posAddress);
+    expect(inRangePos).toBeDefined();
+    if (!inRangePos) throw new Error('inRangePos missing');
+    expect(inRangePos.out_of_range_since).toBeNull();
 
     // 4. Confirm Peak PnL progression (confirmTicks = 2)
     const tick1 = confirmPeak(posAddress, 5.0, 2);
-    assert.equal(tick1, false, 'First tick should not confirm peak immediately');
+    expect(tick1).toBe(false);
     const tick2 = confirmPeak(posAddress, 5.0, 2);
-    assert.equal(tick2, true, 'Second consecutive tick must confirm peak');
-    assert.equal(getTrackedPosition(posAddress).peak_pnl_pct, 5.0);
+    expect(tick2).toBe(true);
+    const peakPos = getTrackedPosition(posAddress);
+    expect(peakPos).toBeDefined();
+    if (!peakPos) throw new Error('peakPos missing');
+    expect(peakPos.peak_pnl_pct).toBe(5.0);
 
     // 5. Post-claim settling guard
-    assert.equal(isPostClaimSettling(posAddress), false);
+    expect(isPostClaimSettling(posAddress)).toBe(false);
     const posWithClaim = getTrackedPosition(posAddress);
+    expect(posWithClaim).toBeDefined();
+    if (!posWithClaim) throw new Error('posWithClaim missing');
     posWithClaim.last_claim_at = new Date().toISOString();
-    assert.equal(isPostClaimSettling(posWithClaim), true, 'Position within 60s of claim must be in settling state');
-    assert.equal(isPostClaimSettling(posWithClaim, Date.now() + POST_CLAIM_SETTLE_MS + 1000), false, 'Settling state clears after 60s');
+    expect(isPostClaimSettling(posWithClaim)).toBe(true);
+    expect(isPostClaimSettling(posWithClaim, Date.now() + POST_CLAIM_SETTLE_MS + 1000)).toBe(false);
 
     // 6. Record Close & sync
     recordClose(posAddress, 'Take profit reached +15%');
     const closed = getTrackedPosition(posAddress);
-    assert.equal(closed.closed, true);
+    expect(closed).toBeDefined();
+    if (!closed) throw new Error('closed position missing');
+    expect(closed.closed).toBe(true);
 
     syncOpenPositions([]);
     const active = getTrackedPositions(true);
-    assert.ok(!active.some(p => p.position === posAddress));
+    expect(active.some(p => p.position === posAddress)).toBe(false);
 
     // 7. Record Performance
     await recordPerformance({
@@ -775,10 +842,10 @@ describe('Tier 4: Real-World Scenarios & Convergence Lifecycle', () => {
 
   test('F23: Standalone runtime cycle dry-run execution continuity', async () => {
     const { manageOnce } = await import('../standalone/runtime.js');
-    assert.equal(typeof manageOnce, 'function');
+    expect(typeof manageOnce).toBe('function');
 
     // Execution should complete safely in dry-run without unhandled rejections
     const result = await manageOnce({ confirmTicksOverride: 1 });
-    assert.ok(result === null || typeof result === 'string' || typeof result === 'object');
+    expect(result === null || typeof result === 'string' || typeof result === 'object').toBe(true);
   });
 });

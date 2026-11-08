@@ -3,8 +3,7 @@
 // fast exit poller, and proves zero outbound Telegram leaks under simulated live credentials.
 // Strict TypeScript, Oracle Engineering Standards: Zero any, Zero unsafe type assertions.
 
-import test from "node:test";
-import assert from "node:assert/strict";
+import { describe, test, it, expect, assert, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -107,8 +106,8 @@ test("M5 Adversarial Suite 1: Telegram Alert Leak Interception (Simulated Live C
     stopPoll();
 
     // 4. Dispatch structured trade alerts (Deploy / Close / Swap)
-    await assert.doesNotReject(async () => {
-      await notifyDeploy({
+    await expect(
+      notifyDeploy({
         pair: "TEST/SOL",
         amountSol: 2.5,
         position: "Pos111111111111111111111111111111111",
@@ -117,41 +116,39 @@ test("M5 Adversarial Suite 1: Telegram Alert Leak Interception (Simulated Live C
         rangeCoverage: { downside_pct: 12.5, upside_pct: 15.0, width_pct: 27.5 },
         binStep: 100,
         baseFee: 0.25,
-      });
-    });
+      })
+    ).resolves.not.toThrow();
 
-    await assert.doesNotReject(async () => {
-      await notifyClose({
+    await expect(
+      notifyClose({
         pair: "TEST/SOL",
         pnlUsd: 45.5,
         pnlPct: 15.2,
         solMode: false,
-      });
-    });
+      })
+    ).resolves.not.toThrow();
 
-    await assert.doesNotReject(async () => {
-      await notifyClose({
+    await expect(
+      notifyClose({
         pair: "TEST/SOL",
         pnlUsd: 0.25,
         pnlPct: -3.4,
         solMode: true,
-      });
-    });
+      })
+    ).resolves.not.toThrow();
 
-    await assert.doesNotReject(async () => {
-      await notifySwap({
+    await expect(
+      notifySwap({
         inputSymbol: "TEST",
         outputSymbol: "SOL",
         amountIn: 1000,
         amountOut: 1.5,
         tx: "TxSwap11111111111111111111111111111111",
-      });
-    });
+      })
+    ).resolves.not.toThrow();
 
     // 5. Runtime orchestrator notify helper
-    await assert.doesNotReject(async () => {
-      await runtimeTest.notify("🤖 Adversarial Runtime Notification Probe");
-    });
+    await expect(runtimeTest.notify("🤖 Adversarial Runtime Notification Probe")).resolves.not.toThrow();
 
     // 6. Admin console wiring startup
     const stopAdmin = startAdmin({ monitor: null, activeSignals: () => 0 });
@@ -230,9 +227,9 @@ test("M5 Adversarial Suite 3: Daemon Lock File Handling (standalone.lock) & Coll
     assert.equal(acquiredPid, process.pid, "Lock file must contain current process.pid");
 
     // 2. Self-reacquisition: same pid does not throw
-    assert.doesNotThrow(() => {
+    expect(() => {
       runtimeTest.acquireLock();
-    }, "Re-acquiring lock from the same process must succeed");
+    }).not.toThrow();
 
     // 3. Stale lock with dead PID: automatically removed and acquired
     const deadPid = 99999999;
@@ -258,18 +255,9 @@ test("M5 Adversarial Suite 3: Daemon Lock File Handling (standalone.lock) & Coll
     try {
       fs.writeFileSync(lockPath, String(child.pid));
 
-      assert.throws(
-        () => {
-          runtimeTest.acquireLock();
-        },
-        (err: unknown) => {
-          return (
-            err instanceof Error &&
-            err.message.includes(`Another standalone instance is running (pid ${child.pid})`)
-          );
-        },
-        "Must throw descriptive rejection when another alive process holds standalone.lock"
-      );
+      expect(() => {
+        runtimeTest.acquireLock();
+      }).toThrow(`Another standalone instance is running (pid ${child.pid})`);
     } finally {
       child.kill("SIGKILL");
     }
@@ -367,121 +355,158 @@ test("M5 Adversarial Suite 6: Empirical Subprocess Signal Handling (SIGINT & SIG
   }
 
   // 1. Empirical test for SIGTERM
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(
-      process.execPath,
-      [
-        "--import",
-        "tsx",
-        "-e",
-        `
-        import { _test } from "./standalone/runtime.js";
-        _test.acquireLock();
-        process.on("SIGTERM", async () => {
-          await _test.shutdown("SIGTERM", (code) => {
-            process.exit(code);
+  let sigtermChild: ReturnType<typeof spawn> | undefined;
+  let sigtermTimer: NodeJS.Timeout | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      sigtermChild = spawn(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          "-e",
+          `
+          import { _test } from "./standalone/runtime.js";
+          _test.acquireLock();
+          process.on("SIGTERM", async () => {
+            await _test.shutdown("SIGTERM", (code) => {
+              process.exit(code);
+            });
           });
-        });
-        console.log("READY");
-        setInterval(() => {}, 1000);
-      `,
-      ],
-      {
-        cwd: REPO_ROOT,
-        stdio: ["ignore", "pipe", "pipe"],
-      }
-    );
+          console.log("READY");
+          setInterval(() => {}, 1000);
+        `,
+        ],
+        {
+          cwd: REPO_ROOT,
+          stdio: ["ignore", "pipe", "pipe"],
+        }
+      );
 
-    let stdoutData = "";
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdoutData += chunk.toString("utf8");
-      if (stdoutData.includes("READY")) {
-        // Child is ready with lock acquired
-        assert.equal(fs.existsSync(lockPath), true, "Subprocess must have created standalone.lock");
-        const lockedPid = Number(fs.readFileSync(lockPath, "utf8").trim());
-        assert.equal(lockedPid, child.pid, "Lock file must contain child PID");
+      sigtermTimer = setTimeout(() => {
+        if (sigtermChild && !sigtermChild.killed) {
+          sigtermChild.kill("SIGKILL");
+        }
+        reject(new Error("SIGTERM test child process timed out after 20_000ms"));
+      }, 20_000);
 
-        // Send SIGTERM
-        child.kill("SIGTERM");
-      }
+      let stdoutData = "";
+      sigtermChild.stdout?.on("data", (chunk: Buffer) => {
+        stdoutData += chunk.toString("utf8");
+        if (stdoutData.includes("READY")) {
+          // Child is ready with lock acquired
+          assert.equal(fs.existsSync(lockPath), true, "Subprocess must have created standalone.lock");
+          const lockedPid = Number(fs.readFileSync(lockPath, "utf8").trim());
+          assert.equal(lockedPid, sigtermChild?.pid, "Lock file must contain child PID");
+
+          // Send SIGTERM
+          sigtermChild?.kill("SIGTERM");
+        }
+      });
+
+      sigtermChild.on("exit", (code: number | null) => {
+        clearTimeout(sigtermTimer);
+        try {
+          assert.equal(code, 0, "Subprocess must exit with code 0 on SIGTERM");
+          assert.equal(
+            fs.existsSync(lockPath),
+            false,
+            "standalone.lock must be cleaned up on SIGTERM shutdown"
+          );
+          resolve();
+        } catch (err: unknown) {
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      });
+
+      sigtermChild.on("error", (err: Error) => {
+        clearTimeout(sigtermTimer);
+        reject(err);
+      });
     });
-
-    child.on("exit", (code: number | null) => {
-      try {
-        assert.equal(code, 0, "Subprocess must exit with code 0 on SIGTERM");
-        assert.equal(
-          fs.existsSync(lockPath),
-          false,
-          "standalone.lock must be cleaned up on SIGTERM shutdown"
-        );
-        resolve();
-      } catch (err: unknown) {
-        reject(err instanceof Error ? err : new Error(String(err)));
-      }
-    });
-
-    child.on("error", (err: Error) => {
-      reject(err);
-    });
-  });
+  } finally {
+    clearTimeout(sigtermTimer);
+    if (sigtermChild && !sigtermChild.killed) {
+      sigtermChild.kill("SIGKILL");
+    }
+  }
 
   // 2. Empirical test for SIGINT
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(
-      process.execPath,
-      [
-        "--import",
-        "tsx",
-        "-e",
-        `
-        import { _test } from "./standalone/runtime.js";
-        _test.acquireLock();
-        process.on("SIGINT", async () => {
-          await _test.shutdown("SIGINT", (code) => {
-            process.exit(code);
+  let sigintChild: ReturnType<typeof spawn> | undefined;
+  let sigintTimer: NodeJS.Timeout | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      sigintChild = spawn(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          "-e",
+          `
+          import { _test } from "./standalone/runtime.js";
+          _test.acquireLock();
+          process.on("SIGINT", async () => {
+            await _test.shutdown("SIGINT", (code) => {
+              process.exit(code);
+            });
           });
-        });
-        console.log("READY");
-        setInterval(() => {}, 1000);
-      `,
-      ],
-      {
-        cwd: REPO_ROOT,
-        stdio: ["ignore", "pipe", "pipe"],
-      }
-    );
+          console.log("READY");
+          setInterval(() => {}, 1000);
+        `,
+        ],
+        {
+          cwd: REPO_ROOT,
+          stdio: ["ignore", "pipe", "pipe"],
+        }
+      );
 
-    let stdoutData = "";
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdoutData += chunk.toString("utf8");
-      if (stdoutData.includes("READY")) {
-        assert.equal(fs.existsSync(lockPath), true, "Subprocess must have created standalone.lock");
-        const lockedPid = Number(fs.readFileSync(lockPath, "utf8").trim());
-        assert.equal(lockedPid, child.pid, "Lock file must contain child PID");
+      sigintTimer = setTimeout(() => {
+        if (sigintChild && !sigintChild.killed) {
+          sigintChild.kill("SIGKILL");
+        }
+        reject(new Error("SIGINT test child process timed out after 20_000ms"));
+      }, 20_000);
 
-        // Send SIGINT
-        child.kill("SIGINT");
-      }
+      let stdoutData = "";
+      sigintChild.stdout?.on("data", (chunk: Buffer) => {
+        stdoutData += chunk.toString("utf8");
+        if (stdoutData.includes("READY")) {
+          // Child is ready with lock acquired
+          assert.equal(fs.existsSync(lockPath), true, "Subprocess must have created standalone.lock");
+          const lockedPid = Number(fs.readFileSync(lockPath, "utf8").trim());
+          assert.equal(lockedPid, sigintChild?.pid, "Lock file must contain child PID");
+
+          // Send SIGINT
+          sigintChild?.kill("SIGINT");
+        }
+      });
+
+      sigintChild.on("exit", (code: number | null) => {
+        clearTimeout(sigintTimer);
+        try {
+          assert.equal(code, 0, "Subprocess must exit with code 0 on SIGINT");
+          assert.equal(
+            fs.existsSync(lockPath),
+            false,
+            "standalone.lock must be cleaned up on SIGINT shutdown"
+          );
+          resolve();
+        } catch (err: unknown) {
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      });
+
+      sigintChild.on("error", (err: Error) => {
+        clearTimeout(sigintTimer);
+        reject(err);
+      });
     });
-
-    child.on("exit", (code: number | null) => {
-      try {
-        assert.equal(code, 0, "Subprocess must exit with code 0 on SIGINT");
-        assert.equal(
-          fs.existsSync(lockPath),
-          false,
-          "standalone.lock must be cleaned up on SIGINT shutdown"
-        );
-        resolve();
-      } catch (err: unknown) {
-        reject(err instanceof Error ? err : new Error(String(err)));
-      }
-    });
-
-    child.on("error", (err: Error) => {
-      reject(err);
-    });
-  });
+  } finally {
+    clearTimeout(sigintTimer);
+    if (sigintChild && !sigintChild.killed) {
+      sigintChild.kill("SIGKILL");
+    }
+  }
 });
 
 test("M5 Adversarial Suite 7: Node & PM2 Native Continuity (index.js, index.ts, ecosystem.config.cjs)", async () => {

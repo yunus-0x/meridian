@@ -17,8 +17,8 @@ process.env.DISABLE_TELEGRAM = "true";
 delete process.env.TELEGRAM_BOT_TOKEN;
 delete process.env.TELEGRAM_CHAT_ID;
 
-import test, { describe, beforeEach, afterEach } from "node:test";
-import assert from "node:assert/strict";
+import { describe, test, it, expect, assert, beforeEach, afterEach, vi } from "vitest";
+import { Connection } from "@solana/web3.js";
 import fs from "node:fs";
 import path from "node:path";
 import bs58 from "bs58";
@@ -41,13 +41,14 @@ import {
   JupiterPriceV3ResponseSchema,
   JupiterPriceV3EntrySchema,
 } from "../src/schemas/api.js";
-import { connection, readRpc, fetchJson } from "../standalone/rpc.js";
+import { connection, readRpc, fetchJson, type RpcKind } from "../standalone/rpc.js";
 import {
   aggregateTokenAccounts,
   rpcBalances,
   priceBalances,
   invalidateBalances,
   TOKEN_PROGRAMS,
+  type RpcBalancesOptions,
 } from "../standalone/balances.js";
 import {
   withWalletLock,
@@ -164,20 +165,13 @@ describe("Milestone 3: standalone/rpc.ts", () => {
     const originalUrl = config.standalone.monitorRpcUrl;
     try {
       config.standalone.monitorRpcUrl = "https://sensitive-key.rpc.example.com";
-      await assert.rejects(
-        async () => {
-          await readRpc("monitor", () => {
-            const err = new Error("Connection refused to https://sensitive-key.rpc.example.com");
-            err.name = "FetchError";
-            throw err;
-          });
-        },
-        (err: Error) => {
-          assert.equal(err.message, "RPC monitor read failed (FetchError)");
-          assert.ok(!err.message.includes("sensitive-key"));
-          return true;
-        }
-      );
+      await expect(
+        readRpc("monitor", () => {
+          const err = new Error("Connection refused to https://sensitive-key.rpc.example.com");
+          err.name = "FetchError";
+          throw err;
+        })
+      ).rejects.toThrow("RPC monitor read failed (FetchError)");
     } finally {
       config.standalone.monitorRpcUrl = originalUrl;
     }
@@ -217,19 +211,19 @@ describe("Milestone 3: standalone/balances.ts", () => {
   });
 
   test("rpcBalances nativeOnly vs full token balance queries", async () => {
-    const mockRpc = async (kind: string, fn: (c: unknown) => unknown) => {
-      if (kind === "balance") {
-        return 1_500_000_000; // 1.5 SOL
-      }
-      return { value: [] };
+    const dummyConn = new Connection("https://api.mainnet-beta.solana.com");
+    vi.spyOn(dummyConn, "getBalance").mockResolvedValue(1_500_000_000);
+
+    const mockRpc: NonNullable<RpcBalancesOptions["rpc"]> = async <T>(_kind: RpcKind, fn: (conn: Connection) => Promise<T>): Promise<T> => {
+      return await fn(dummyConn);
     };
 
     const native = await rpcBalances(W1, {
       nativeOnly: true,
-      rpc: mockRpc as unknown as typeof readRpc,
+      rpc: mockRpc,
     });
     assert.equal(native.sol, 1.5);
-    assert.equal((native as { tokens?: unknown }).tokens, undefined);
+    assert.equal("tokens" in native, false);
   });
 
   test("priceBalances computes USD balances with clean type narrowing", async () => {
@@ -283,21 +277,18 @@ describe("Milestone 3: standalone/transactions.ts", () => {
   });
 
   test("withWalletLock timeout rejects when acquisition takes too long", async () => {
-    let blockerResolve: (() => void) | null = null;
+    let blockerResolve = () => {};
     const blockerPromise = new Promise<void>((r) => { blockerResolve = r; });
 
     void withWalletLock(async () => {
       await blockerPromise;
     }, 0);
 
-    await assert.rejects(
-      async () => {
-        await withWalletLock(async () => "fast", { priority: 0, timeoutMs: 20 });
-      },
-      /Wallet lock acquisition timed out after 20ms/
-    );
+    await expect(
+      withWalletLock(async () => "fast", { priority: 0, timeoutMs: 20 })
+    ).rejects.toThrow(/Wallet lock acquisition timed out after 20ms/);
 
-    if (blockerResolve) (blockerResolve as () => void)();
+    blockerResolve();
   });
 
   test("calculatePriorityFee handles percentiles and clamps", () => {

@@ -9,8 +9,7 @@ process.env.DISABLE_TELEGRAM = "true";
 delete process.env.TELEGRAM_BOT_TOKEN;
 delete process.env.TELEGRAM_CHAT_ID;
 
-import test, { describe, beforeEach, afterEach } from "node:test";
-import assert from "node:assert/strict";
+import { describe, test, it, expect, assert, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -192,8 +191,7 @@ describe("Adversarial Challenge 2: Queue Timeout, Rejection Isolation & Deadlock
       { priority: 10, timeoutMs: 25 }
     );
 
-    await assert.rejects(
-      timedOutTask,
+    await expect(timedOutTask).rejects.toThrow(
       /Wallet lock acquisition timed out after 25ms/
     );
 
@@ -216,7 +214,7 @@ describe("Adversarial Challenge 2: Queue Timeout, Rejection Isolation & Deadlock
     const item1 = withWalletLock(async () => {
       results.push("item1");
     }, { priority: 10, timeoutMs: 20 });
-    const p1 = assert.rejects(item1, /timed out after 20ms/);
+    const p1 = expect(item1).rejects.toThrow(/timed out after 20ms/);
 
     const item2 = withWalletLock(async () => {
       results.push("item2");
@@ -225,7 +223,7 @@ describe("Adversarial Challenge 2: Queue Timeout, Rejection Isolation & Deadlock
     const item3 = withWalletLock(async () => {
       results.push("item3");
     }, { priority: 0, timeoutMs: 20 });
-    const p3 = assert.rejects(item3, /timed out after 20ms/);
+    const p3 = expect(item3).rejects.toThrow(/timed out after 20ms/);
 
     const item4 = withWalletLock(async () => {
       results.push("item4");
@@ -254,13 +252,13 @@ describe("Adversarial Challenge 2: Queue Timeout, Rejection Isolation & Deadlock
     }, 0);
 
     const w1 = withWalletLock(async () => "w1", { priority: 10, timeoutMs: 15 });
-    const p1 = assert.rejects(w1, /timed out after 15ms/);
+    const p1 = expect(w1).rejects.toThrow(/timed out after 15ms/);
 
     const w2 = withWalletLock(async () => "w2", { priority: 5, timeoutMs: 15 });
-    const p2 = assert.rejects(w2, /timed out after 15ms/);
+    const p2 = expect(w2).rejects.toThrow(/timed out after 15ms/);
 
     const w3 = withWalletLock(async () => "w3", { priority: 0, timeoutMs: 15 });
-    const p3 = assert.rejects(w3, /timed out after 15ms/);
+    const p3 = expect(w3).rejects.toThrow(/timed out after 15ms/);
 
     await Promise.all([p1, p2, p3]);
 
@@ -282,7 +280,7 @@ describe("Adversarial Challenge 2: Queue Timeout, Rejection Isolation & Deadlock
       throw new Error("Simulated on-chain RPC error");
     }, 10);
 
-    await assert.rejects(errorTask, /Simulated on-chain RPC error/);
+    await expect(errorTask).rejects.toThrow(/Simulated on-chain RPC error/);
     await tick();
     assert.equal(isWalletLocked(), false);
 
@@ -665,7 +663,7 @@ describe("Adversarial Challenge 5: Store Convergence Rules & Mutex Edge Cases", 
       throw new Error("Immediate synchronous throw");
     }, 10);
 
-    await assert.rejects(errorTask, /Immediate synchronous throw/);
+    await expect(errorTask).rejects.toThrow(/Immediate synchronous throw/);
     await tick();
 
     assert.equal(isWalletLocked(), false);

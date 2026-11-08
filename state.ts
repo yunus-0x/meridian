@@ -180,6 +180,7 @@ export function trackPosition({
     pending_exit_action: null,
     pending_exit_count: 0,
     pending_exit_started_at: null,
+    missing_onchain_count: 0,
     trailing_active: false,
   };
   pushEvent(state, { action: "deploy", position, pool_name: pool_name || pool });
@@ -661,15 +662,27 @@ export function setLastBriefingDate(): void {
 // ─── On-Chain State Sync ───────────────────────────────────────
 
 const SYNC_GRACE_MS = 5 * 60_000;
+const DEFAULT_SYNC_MISSING_CONFIRM_TICKS = 3;
 
-export function syncOpenPositions(active_addresses: Iterable<string>): void {
+export function syncOpenPositions(
+  active_addresses: Iterable<string>,
+  confirmMissingTicks = DEFAULT_SYNC_MISSING_CONFIRM_TICKS
+): void {
   const state = load();
   const activeSet = new Set(active_addresses);
   let changed = false;
 
   for (const posId in state.positions) {
     const pos = state.positions[posId];
-    if (!pos || pos.closed || activeSet.has(posId)) continue;
+    if (!pos || pos.closed) continue;
+
+    if (activeSet.has(posId)) {
+      if ((pos.missing_onchain_count ?? 0) > 0) {
+        pos.missing_onchain_count = 0;
+        changed = true;
+      }
+      continue;
+    }
 
     const deployedAt = pos.deployed_at ? new Date(pos.deployed_at).getTime() : 0;
     if (Date.now() - deployedAt < SYNC_GRACE_MS) {
@@ -677,11 +690,22 @@ export function syncOpenPositions(active_addresses: Iterable<string>): void {
       continue;
     }
 
+    const nextMissingCount = (pos.missing_onchain_count ?? 0) + 1;
+    pos.missing_onchain_count = nextMissingCount;
+    changed = true;
+
+    if (nextMissingCount < Math.max(1, confirmMissingTicks)) {
+      log(
+        "state",
+        `Position ${posId} missing from portfolio poll (${nextMissingCount}/${confirmMissingTicks}) — awaiting confirmation before auto-close`
+      );
+      continue;
+    }
+
     pos.closed = true;
     pos.closed_at = new Date().toISOString();
     pos.notes.push("Auto-closed during state sync (not found on-chain)");
-    changed = true;
-    log("state", `Position ${posId} auto-closed (missing from on-chain data)`);
+    log("state", `Position ${posId} auto-closed (missing from on-chain data for ${nextMissingCount} consecutive polls)`);
   }
 
   if (changed) save(state);

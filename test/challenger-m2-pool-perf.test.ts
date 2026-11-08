@@ -18,8 +18,7 @@ process.env.DISABLE_TELEGRAM = "true";
 delete process.env.TELEGRAM_BOT_TOKEN;
 delete process.env.TELEGRAM_CHAT_ID;
 
-import test, { describe, beforeEach, afterEach } from "node:test";
-import assert from "node:assert/strict";
+import { describe, test, it, expect, assert, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 
 import { repoPath } from "../repo-root.js";

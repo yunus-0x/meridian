@@ -572,6 +572,7 @@ async function executeToolUnlocked(name: string, rawArgs: unknown): Promise<Tool
         notifyClose({
           pair,
           pnlUsd: Number(result.pnl_usd ?? 0),
+          pnlSol: typeof result.pnl_sol === "number" ? result.pnl_sol : undefined,
           pnlPct: Number(result.pnl_pct ?? 0),
           solMode: config.management.solMode,
         }).catch(() => {});

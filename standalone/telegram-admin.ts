@@ -387,6 +387,13 @@ function applySetting(setting: AdminSetting, value: unknown): boolean {
 
 // ─── Rendering ───────────────────────────────────────────────────────────────
 
+export function escapeHtml(text: unknown): string {
+  return String(text ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 export function fmtValue(setting: AdminSetting): string {
   const v = currentValue(setting);
   if (setting.type === "bool") return v ? "ON" : "OFF";
@@ -471,7 +478,7 @@ async function viewSection(sectionId?: string, note = ""): Promise<void> {
     const rows = wallets.map((w, i) => [{ text: `🗑 ${w.name}`, callback_data: `w:rm:${i}` }]);
     await render(
       `👛 <b>Monitored wallets</b> (${wallets.length})\n${
-        wallets.map((w) => `• <b>${w.name}</b>\n<code>${w.address}</code>`).join("\n") ||
+        wallets.map((w) => `• <b>${escapeHtml(w.name)}</b>\n<code>${escapeHtml(w.address)}</code>`).join("\n") ||
         "none — add at least 2 to trigger entries"
       }${note ? `\n\n${note}` : ""}`,
       [...rows, [{ text: "➕ Add wallet", callback_data: "w:add" }, { text: "← Back", callback_data: "s:root" }]]
@@ -634,7 +641,7 @@ async function handleCallback(cb: TelegramCallbackQuery): Promise<void> {
       if (!setting) return;
       pending = { kind: "set", setting };
       await render(
-        `✏️ <b>${setting.label ?? setting.k}</b>\nCurrent: <code>${fmtValue(setting)}</code>\n\n${editHint(setting)}`,
+        `✏️ <b>${escapeHtml(setting.label ?? setting.k)}</b>\nCurrent: <code>${escapeHtml(fmtValue(setting))}</code>\n\n${escapeHtml(editHint(setting))}`,
         cancelKB()
       );
       return;
@@ -652,7 +659,7 @@ async function handleCallback(cb: TelegramCallbackQuery): Promise<void> {
         return;
       }
       const res = removeSmartWallet({ address: w.address });
-      await viewSection("wallets", res.success ? `🗑 Removed ${w.name}` : `⚠️ ${res.error}`);
+      await viewSection("wallets", res.success ? `🗑 Removed ${escapeHtml(w.name)}` : `⚠️ ${escapeHtml(res.error)}`);
       return;
     }
     if (data.startsWith("w:rm:")) {
@@ -662,7 +669,7 @@ async function handleCallback(cb: TelegramCallbackQuery): Promise<void> {
         await viewSection("wallets", "⚠️ Wallet not found.");
         return;
       }
-      await render(`Remove <b>${w.name}</b>\n<code>${w.address}</code>?`, [
+      await render(`Remove <b>${escapeHtml(w.name)}</b>\n<code>${escapeHtml(w.address)}</code>?`, [
         [{ text: "🗑 Confirm remove", callback_data: `w:rm2:${data.slice(5)}` }, { text: "✖️ Cancel", callback_data: "s:wallets" }],
       ]);
       return;
@@ -737,7 +744,7 @@ async function handleCallback(cb: TelegramCallbackQuery): Promise<void> {
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     log("telegram_error", `admin callback failed: ${msg}`);
-    await viewRoot(`⚠️ ${msg}`).catch(() => {});
+    await viewRoot(`⚠️ ${escapeHtml(msg)}`).catch(() => {});
   }
 }
 
@@ -755,7 +762,7 @@ async function handleText(text?: string): Promise<void> {
         const sectionId = SECTIONS.find((s) => s.settings.includes(p.setting))?.id;
         await viewSection(
           sectionId,
-          `✅ <b>${p.setting.label ?? p.setting.k}</b> → <code>${fmtValue(p.setting)}</code>${
+          `✅ <b>${escapeHtml(p.setting.label ?? p.setting.k)}</b> → <code>${escapeHtml(fmtValue(p.setting))}</code>${
             needs ? "\n♻️ Applies after restart" : ""
           }`
         );
@@ -774,7 +781,7 @@ async function handleText(text?: string): Promise<void> {
       if (p.kind === "wname") {
         const name = rawText.trim().slice(0, 40) || "wallet";
         const res = addSmartWallet({ address: p.address, name });
-        await viewSection("wallets", res.success ? `✅ Added <b>${name}</b>\n<code>${p.address}</code>` : `⚠️ ${res.error}`);
+        await viewSection("wallets", res.success ? `✅ Added <b>${escapeHtml(name)}</b>\n<code>${escapeHtml(p.address)}</code>` : `⚠️ ${escapeHtml(res.error)}`);
         return;
       }
       if (p.kind === "pkimport") {
@@ -805,12 +812,12 @@ async function handleText(text?: string): Promise<void> {
         }
         writeUserConfig({ walletAddress: rawText.trim() });
         config.standalone.walletAddress = rawText.trim();
-        await viewSection("key", `✅ Read-only address set: <code>${rawText.trim()}</code>`);
+        await viewSection("key", `✅ Read-only address set: <code>${escapeHtml(rawText.trim())}</code>`);
         return;
       }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      await render(`⚠️ ${msg} — try again or tap Cancel`, cancelKB());
+      await render(`⚠️ ${escapeHtml(msg)} — try again or tap Cancel`, cancelKB());
       return;
     }
   }
@@ -828,7 +835,7 @@ async function handleText(text?: string): Promise<void> {
       consoleMessageId = null;
       lastRenderSig = null;
     }
-    await viewRoot("Commands: /addwallet <address> <name> · /removewallet <address> · /wallets · /status · /cancel");
+    await viewRoot("Commands: /addwallet &lt;address&gt; &lt;name&gt; · /removewallet &lt;address&gt; · /wallets · /status · /cancel");
     return;
   }
   if (cmd === "/status") {
@@ -843,12 +850,12 @@ async function handleText(text?: string): Promise<void> {
     const address = args[0] || "";
     const name = args.slice(1).join(" ").slice(0, 40) || "wallet";
     const res = addSmartWallet({ address, name });
-    await viewSection("wallets", res.success ? `✅ Added <b>${name}</b> <code>${address}</code>` : `⚠️ ${res.error}`);
+    await viewSection("wallets", res.success ? `✅ Added <b>${escapeHtml(name)}</b> <code>${escapeHtml(address)}</code>` : `⚠️ ${escapeHtml(res.error)}`);
     return;
   }
   if (cmd === "/removewallet") {
     const res = removeSmartWallet({ address: args[0] ?? "" });
-    await viewSection("wallets", res.success ? `🗑 Removed ${res.removed}` : `⚠️ ${res.error}`);
+    await viewSection("wallets", res.success ? `🗑 Removed ${escapeHtml(res.removed)}` : `⚠️ ${escapeHtml(res.error)}`);
     return;
   }
 }
